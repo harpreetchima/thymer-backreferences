@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "name": "Backlinks",
   "icon": "ti-link",
-  "description": "Roam-style Linked References footer for every page",
+  "description": "Linked + property references footer for every page",
   "custom": {
     "maxResults": 200,
     "collapsedByDefault": false,
