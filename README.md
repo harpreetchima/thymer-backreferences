@@ -50,7 +50,6 @@ Original goal: make each backlink row behave like a real transclusion so the lin
 Findings (SDK + official examples):
 
 - The public Plugin SDK does not currently expose the editor's native per-line "..." menu / "Transclude" option, and it also does not provide an API to render an editable line item inside custom plugin DOM.
-- Official examples implement transclusion behavior by creating a line item of type `ref` and setting meta `itemref` to the source line item GUID (example: `/home/chima/Projects/Knowledgebase/Thymer/Example Plugins and Themes/App Plugins/thymer-synchub/plannerhub/plugin.js`).
 
 Known transclusion write-path (as used in the official examples):
 
