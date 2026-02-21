@@ -1,4 +1,4 @@
-# Backlinks (Linked + Property References)
+# Backreferences (Linked + Property References)
 
 Adds a Roam-style **Linked References** section to the bottom of each record/page, plus Tana-style **Property References** grouped by the property name ("[Property] in...").
 
@@ -35,7 +35,7 @@ Note: This plugin injects its own CSS at runtime; no `plugin.css` is needed.
 
 Command palette:
 
-- `Backlinks: Refresh (Active Page)`
+- `Backlinks: Refresh (Active Page)` (Thymer command palette label)
 
 ## Configuration
 
