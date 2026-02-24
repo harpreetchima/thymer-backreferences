@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.3.1';
+    this._version = '0.3.2';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -682,15 +682,10 @@ class Plugin extends AppPlugin {
       row.dataset.sortBy = option.id;
       if (option.id === sortBy) row.classList.add('is-active');
 
-      const check = document.createElement('span');
-      check.className = 'tlr-sort-option-check';
-      check.textContent = option.id === sortBy ? '>' : '';
-
       const label = document.createElement('span');
       label.className = 'tlr-sort-option-label';
       label.textContent = option.label;
 
-      row.appendChild(check);
       row.appendChild(label);
       menu.appendChild(row);
     }
@@ -2039,6 +2034,7 @@ class Plugin extends AppPlugin {
         display: flex;
         align-items: center;
         gap: 10px;
+        min-height: 30px;
         margin-bottom: 10px;
       }
 
@@ -2067,7 +2063,8 @@ class Plugin extends AppPlugin {
         cursor: pointer;
         font-size: 12px;
         line-height: 1;
-        min-height: 28px;
+        min-height: 30px;
+        box-sizing: border-box;
       }
 
       .tlr-btn:hover {
@@ -2156,8 +2153,8 @@ class Plugin extends AppPlugin {
         min-width: 260px;
         padding: 8px;
         border-radius: 12px;
-        border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
-        background: var(--bg-panel, #fff);
+        border: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+        background: var(--cmdpal-bg-color, var(--bg-panel, rgba(22, 26, 24, 0.96)));
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
         z-index: 20;
       }
@@ -2181,28 +2178,21 @@ class Plugin extends AppPlugin {
         border-radius: 8px;
         background: transparent;
         color: var(--text, inherit);
-        padding: 6px 8px;
+        padding: 6px 10px;
         display: flex;
         align-items: center;
-        gap: 8px;
         text-align: left;
         cursor: pointer;
       }
 
       .tlr-sort-option:hover {
-        background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+        background: var(--cmdpal-hover-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
       }
 
       .tlr-sort-option.is-active {
-        border-color: var(--border-subtle, rgba(0, 0, 0, 0.12));
-        background: var(--bg-hover, rgba(0, 0, 0, 0.04));
-      }
-
-      .tlr-sort-option-check {
-        width: 14px;
-        color: var(--text, inherit);
-        opacity: 0.95;
-        flex: 0 0 auto;
+        border-color: var(--cmdpal-selected-bg-color, var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12))));
+        background: var(--cmdpal-selected-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
+        color: var(--cmdpal-selected-fg-color, var(--text, inherit));
       }
 
       .tlr-sort-option-label {
@@ -2211,7 +2201,7 @@ class Plugin extends AppPlugin {
 
       .tlr-sort-menu-divider {
         margin: 8px 0;
-        border-top: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+        border-top: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
       }
 
       .tlr-sort-dir-row {
@@ -2221,7 +2211,7 @@ class Plugin extends AppPlugin {
 
       .tlr-sort-dir-btn {
         flex: 1 1 auto;
-        border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+        border: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
         border-radius: 8px;
         background: transparent;
         color: var(--text, inherit);
@@ -2231,12 +2221,13 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-sort-dir-btn:hover {
-        background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+        background: var(--cmdpal-hover-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
       }
 
       .tlr-sort-dir-btn.is-active {
-        background: var(--bg-hover, rgba(0, 0, 0, 0.04));
-        border-color: var(--text-muted, rgba(0, 0, 0, 0.6));
+        background: var(--cmdpal-selected-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
+        color: var(--cmdpal-selected-fg-color, var(--text, inherit));
+        border-color: var(--cmdpal-selected-bg-color, var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12))));
       }
 
       .tlr-search-wrap {
@@ -2244,10 +2235,12 @@ class Plugin extends AppPlugin {
         align-items: center;
         gap: 6px;
         padding: 0 8px;
-        min-height: 28px;
-        border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+        height: 30px;
+        min-height: 30px;
+        border: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
         border-radius: 10px;
-        background: var(--bg-panel, transparent);
+        background: var(--cmdpal-bg-color, var(--bg-panel, transparent));
+        box-sizing: border-box;
       }
 
       .tlr-search-open .tlr-search-wrap { display: flex; }
@@ -2262,12 +2255,18 @@ class Plugin extends AppPlugin {
       .tlr-search-input {
         width: 220px;
         max-width: 40vw;
+        height: 20px;
         min-height: 20px;
         border: 0;
         outline: none;
         background: transparent;
         color: var(--text, inherit);
         font-size: 12px;
+        line-height: 20px;
+      }
+
+      .tlr-search-input::placeholder {
+        color: var(--text-muted, rgba(0, 0, 0, 0.6));
       }
 
       .tlr-search-clear {
@@ -2281,7 +2280,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-search-clear:hover {
-        background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+        background: var(--cmdpal-hover-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
         color: var(--text, inherit);
       }
 
