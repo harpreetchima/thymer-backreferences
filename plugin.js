@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.3.2';
+    this._version = '0.3.3';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -2024,7 +2024,7 @@ class Plugin extends AppPlugin {
     this.ui.injectCSS(`
       .tlr-footer {
         margin-top: 24px;
-        padding-top: 14px;
+        padding-top: 16px;
         border-top: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
         color: var(--text, inherit);
         font-size: 13px;
@@ -2033,9 +2033,9 @@ class Plugin extends AppPlugin {
       .tlr-header {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         min-height: 30px;
-        margin-bottom: 10px;
+        margin-bottom: 12px;
       }
 
       .tlr-title {
@@ -2047,9 +2047,16 @@ class Plugin extends AppPlugin {
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
         font-size: 12px;
         white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
       }
 
-      .tlr-spacer { flex: 1; }
+      .tlr-spacer {
+        flex: 1 1 auto;
+        min-width: 8px;
+      }
 
       .tlr-btn {
         display: inline-flex;
@@ -2175,12 +2182,13 @@ class Plugin extends AppPlugin {
       .tlr-sort-option {
         width: 100%;
         border: 1px solid transparent;
-        border-radius: 8px;
+        border-radius: 9px;
         background: transparent;
         color: var(--text, inherit);
-        padding: 6px 10px;
+        padding: 8px 12px;
         display: flex;
         align-items: center;
+        line-height: 1.35;
         text-align: left;
         cursor: pointer;
       }
@@ -2200,13 +2208,13 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-sort-menu-divider {
-        margin: 8px 0;
+        margin: 10px 0;
         border-top: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
       }
 
       .tlr-sort-dir-row {
         display: flex;
-        gap: 8px;
+        gap: 10px;
       }
 
       .tlr-sort-dir-btn {
@@ -2215,9 +2223,10 @@ class Plugin extends AppPlugin {
         border-radius: 8px;
         background: transparent;
         color: var(--text, inherit);
-        padding: 6px 8px;
+        padding: 7px 10px;
         cursor: pointer;
         text-align: center;
+        min-height: 30px;
       }
 
       .tlr-sort-dir-btn:hover {
@@ -2233,8 +2242,8 @@ class Plugin extends AppPlugin {
       .tlr-search-wrap {
         display: none;
         align-items: center;
-        gap: 6px;
-        padding: 0 8px;
+        gap: 8px;
+        padding: 0 10px;
         height: 30px;
         min-height: 30px;
         border: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
@@ -2253,8 +2262,8 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-search-input {
-        width: 220px;
-        max-width: 40vw;
+        width: clamp(150px, 22vw, 260px);
+        max-width: none;
         height: 20px;
         min-height: 20px;
         border: 0;
@@ -2275,7 +2284,7 @@ class Plugin extends AppPlugin {
         background: transparent;
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
         cursor: pointer;
-        padding: 2px 6px;
+        padding: 2px 8px;
         border-radius: 8px;
       }
 
@@ -2303,8 +2312,8 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-section-title {
-        margin-top: 12px;
-        margin-bottom: 6px;
+        margin-top: 16px;
+        margin-bottom: 8px;
         font-size: 11px;
         font-weight: 700;
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
@@ -2313,11 +2322,11 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-divider {
-        margin: 12px 0 8px;
+        margin: 14px 0 10px;
         border-top: 2px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
       }
 
-      .tlr-prop-group { margin: 10px 0 14px; }
+      .tlr-prop-group { margin: 12px 0 16px; }
 
       .tlr-prop-header {
         display: flex;
@@ -2325,9 +2334,9 @@ class Plugin extends AppPlugin {
         justify-content: flex-start;
         gap: 10px;
         width: 100%;
-        padding: 6px 8px;
+        padding: 8px 10px;
         border-radius: 10px;
-        border: 2px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+        border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
         background: var(--bg-panel, transparent);
         cursor: pointer;
         text-align: left;
@@ -2373,17 +2382,18 @@ class Plugin extends AppPlugin {
         flex: 0 0 auto;
       }
 
-      .tlr-prop-records { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+      .tlr-prop-records { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 
       .tlr-prop-record {
         width: 100%;
         border: 1px solid transparent;
         background: transparent;
-        padding: 6px 8px;
+        padding: 8px 10px;
         border-radius: 10px;
         cursor: pointer;
         text-align: left;
         color: var(--ed-link-color, var(--link-color, var(--accent, inherit)));
+        line-height: 1.4;
       }
 
       .tlr-prop-record:hover {
@@ -2393,7 +2403,7 @@ class Plugin extends AppPlugin {
         text-decoration: underline;
       }
 
-      .tlr-group { margin: 10px 0 14px; }
+      .tlr-group { margin: 12px 0 16px; }
 
       .tlr-group-header {
         width: 100%;
@@ -2401,9 +2411,9 @@ class Plugin extends AppPlugin {
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        padding: 6px 8px;
+        padding: 8px 10px;
         border-radius: 10px;
-        border: 2px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
+        border: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.12));
         background: var(--bg-panel, transparent);
         cursor: pointer;
         text-align: left;
@@ -2426,17 +2436,18 @@ class Plugin extends AppPlugin {
         flex: 0 0 auto;
       }
 
-      .tlr-lines { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+      .tlr-lines { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 
       .tlr-line {
         width: 100%;
         border: 1px solid transparent;
         background: transparent;
-        padding: 6px 8px;
+        padding: 8px 10px;
         border-radius: 10px;
         cursor: pointer;
         text-align: left;
         color: var(--text, inherit);
+        line-height: 1.35;
       }
 
       .tlr-line:hover {
@@ -2451,6 +2462,7 @@ class Plugin extends AppPlugin {
       .tlr-line-content {
         white-space: pre-wrap;
         word-break: break-word;
+        line-height: 1.45;
       }
 
       .tlr-seg-bold { font-weight: 600; }
@@ -2494,8 +2506,8 @@ class Plugin extends AppPlugin {
         }
 
         .tlr-search-input {
-          width: 160px;
-          max-width: 60vw;
+          width: min(58vw, 220px);
+          max-width: none;
         }
       }
     `);
