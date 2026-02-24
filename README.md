@@ -85,6 +85,20 @@ Planned follow-up ideas (not in v1):
 - Add an optional toggle to sync sort settings into workspace plugin config (shared across devices/users).
 - Add an option to change the default sort behavior from plugin settings.
 
+## UI Theming Guardrail
+
+To keep Backreferences visually consistent with native Thymer popups/menus in future changes:
+
+- Treat command-palette styling as the source of truth for menu/input surfaces.
+- For popup/search colors, prefer Thymer command-palette CSS vars:
+  - `--cmdpal-bg-color`
+  - `--cmdpal-border-color`
+  - `--cmdpal-hover-bg-color`
+  - `--cmdpal-selected-bg-color`
+  - `--cmdpal-selected-fg-color`
+- Avoid hardcoded menu/search colors (use fallbacks only).
+- Verify both dark and light themes before shipping UI style changes.
+
 ## UI Animation Notes
 
 In the native Thymer editor, clicking the "open" arrow on an inline record reference (inserted via `@@`) triggers a short blink/flash effect on the selected link.
