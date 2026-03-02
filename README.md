@@ -36,6 +36,11 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - Clicking the search icon toggles a text field.
   - Typing filters mentions and highlights matching text.
 
+- **Ignore a linked reference (shared)**
+  - `Alt+Click` a linked reference line to toggle ignore on that source line.
+  - Ignored lines are marked `Ignored` in the list.
+  - Ignore state is written to line-item metadata key `plugin.refs.v1.ignore`, so other plugins can honor it.
+
 ## Command
 
 - `Backreferences: Refresh (Active Page)`

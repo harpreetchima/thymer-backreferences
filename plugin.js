@@ -23,6 +23,7 @@ class Plugin extends AppPlugin {
 
     this._defaultMaxResults = 200;
     this._refreshDebounceMs = 350;
+    this._sharedIgnoreMetaKey = 'plugin.refs.v1.ignore';
 
     this.injectCss();
 
@@ -551,6 +552,13 @@ class Plugin extends AppPlugin {
       const guid = actionEl.dataset.recordGuid || null;
       const lineGuid = actionEl.dataset.lineGuid || null;
       if (!guid) return;
+      if (e?.altKey === true) {
+        this.setSortMenuOpen(state, false);
+        this.toggleSharedIgnoreForLine(state, lineGuid).catch(() => {
+          // ignore
+        });
+        return;
+      }
       this.setSortMenuOpen(state, false);
       this.openRecord(panel, guid, lineGuid || null, e);
       return;
@@ -1140,6 +1148,10 @@ class Plugin extends AppPlugin {
   }
 
   handleLineItemUpdated(ev) {
+    if (this.didSharedIgnoreChange(ev)) {
+      this.refreshAllPanels({ force: false, reason: 'lineitem.ignore-change' });
+    }
+
     if (!ev?.hasSegments?.() || typeof ev.getSegments !== 'function') return;
 
     const segments = ev.getSegments() || [];
@@ -1159,6 +1171,114 @@ class Plugin extends AppPlugin {
     // We don't know which record(s) were referenced by the deleted item.
     // This is rare, so we just refresh all visible footers (debounced).
     this.refreshAllPanels({ force: false, reason: 'lineitem.deleted' });
+  }
+
+  didSharedIgnoreChange(ev) {
+    const mp = ev?.metaProperties;
+    if (!mp || typeof mp !== 'object') return false;
+
+    if (Object.prototype.hasOwnProperty.call(mp, this._sharedIgnoreMetaKey)) return true;
+
+    const nested = mp?.plugin?.refs?.v1;
+    if (nested && Object.prototype.hasOwnProperty.call(nested, 'ignore')) return true;
+
+    return false;
+  }
+
+  normalizeSharedIgnoreValue(value) {
+    if (value === true || value === 1) return true;
+    if (typeof value === 'string') {
+      const v = value.trim().toLowerCase();
+      if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
+    }
+    return false;
+  }
+
+  readSharedIgnoreFromProps(props) {
+    if (!props || typeof props !== 'object') return false;
+
+    const direct = props?.[this._sharedIgnoreMetaKey];
+    if (this.normalizeSharedIgnoreValue(direct)) return true;
+
+    const underscore = props?.plugin_refs_v1_ignore;
+    if (this.normalizeSharedIgnoreValue(underscore)) return true;
+
+    const nested = props?.plugin?.refs?.v1?.ignore;
+    if (this.normalizeSharedIgnoreValue(nested)) return true;
+
+    return false;
+  }
+
+  isLineSharedIgnored(line) {
+    if (!line) return false;
+    return this.readSharedIgnoreFromProps(line?.props || null);
+  }
+
+  countActiveLinkedReferences(groups) {
+    let total = 0;
+    for (const g of groups || []) {
+      for (const line of g?.lines || []) {
+        if (this.isLineSharedIgnored(line)) continue;
+        total += 1;
+      }
+    }
+    return total;
+  }
+
+  countIgnoredLinkedReferences(groups) {
+    let total = 0;
+    for (const g of groups || []) {
+      for (const line of g?.lines || []) {
+        if (!this.isLineSharedIgnored(line)) continue;
+        total += 1;
+      }
+    }
+    return total;
+  }
+
+  findLinkedLineByGuid(state, lineGuid) {
+    const target = (lineGuid || '').trim();
+    if (!target || !state?.lastResults) return null;
+    const groups = Array.isArray(state.lastResults?.linkedGroups) ? state.lastResults.linkedGroups : [];
+
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if ((line?.guid || '') === target) return line;
+      }
+    }
+
+    return null;
+  }
+
+  async toggleSharedIgnoreForLine(state, lineGuid) {
+    const line = this.findLinkedLineByGuid(state, lineGuid);
+    if (!line || typeof line.setMetaProperty !== 'function') return;
+
+    const currentlyIgnored = this.isLineSharedIgnored(line);
+    const nextValue = currentlyIgnored ? null : 1;
+
+    let ok = false;
+    try {
+      ok = (await line.setMetaProperty(this._sharedIgnoreMetaKey, nextValue)) === true;
+    } catch (e) {
+      ok = false;
+    }
+    if (!ok) return;
+
+    try {
+      this.ui.addToaster({
+        title: 'Backreferences',
+        message: currentlyIgnored
+          ? 'Reference restored to shared counts.'
+          : 'Reference ignored in shared counts.',
+        dismissible: true,
+        autoDestroyTime: 1800
+      });
+    } catch (e) {
+      // ignore
+    }
+
+    this.refreshAllPanels({ force: true, reason: 'line.ignore-toggled' });
   }
 
   extractReferencedRecordGuids(segments) {
@@ -1417,10 +1537,12 @@ class Plugin extends AppPlugin {
       if (!guid) continue;
 
       const lines = Array.isArray(g?.lines) ? g.lines : [];
-      addReferenceCount(guid, lines.length);
+      const activeLines = lines.filter((line) => !this.isLineSharedIgnored(line));
+      if (activeLines.length === 0) continue;
+      addReferenceCount(guid, activeLines.length);
 
       let newestLineActivity = 0;
-      for (const line of lines) {
+      for (const line of activeLines) {
         const ts = this.getLineActivityTimestamp(line);
         if (ts > newestLineActivity) newestLineActivity = ts;
       }
@@ -1537,7 +1659,8 @@ class Plugin extends AppPlugin {
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
 
     const totalPropRefCount = propsAll.reduce((n, g) => n + (g?.records?.length || 0), 0);
-    const totalLinkedRefCount = linkedAll.reduce((n, g) => n + (g?.lines?.length || 0), 0);
+    const totalLinkedRefCount = this.countActiveLinkedReferences(linkedAll);
+    const totalIgnoredLinkedRefCount = this.countIgnoredLinkedReferences(linkedAll);
 
     const totalUniquePages = new Set();
     for (const g of propsAll) {
@@ -1582,7 +1705,8 @@ class Plugin extends AppPlugin {
     }
 
     const filteredPropRefCount = props.reduce((n, g) => n + (g?.records?.length || 0), 0);
-    const filteredLinkedRefCount = linked.reduce((n, g) => n + (g?.lines?.length || 0), 0);
+    const filteredLinkedRefCount = this.countActiveLinkedReferences(linked);
+    const filteredIgnoredLinkedRefCount = this.countIgnoredLinkedReferences(linked);
 
     const filteredUniquePages = new Set();
     for (const g of props) {
@@ -1611,10 +1735,12 @@ class Plugin extends AppPlugin {
       if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
       if (totalPropRefCount > 0) parts.push(`${filteredPropRefCount}/${totalPropRefCount} prop refs`);
       if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} line refs`);
+      if (totalIgnoredLinkedRefCount > 0) parts.push(`${filteredIgnoredLinkedRefCount}/${totalIgnoredLinkedRefCount} ignored`);
     } else {
       if (totalUniquePages.size > 0) parts.push(`${totalUniquePages.size} page${totalUniquePages.size === 1 ? '' : 's'}`);
       if (totalPropRefCount > 0) parts.push(`${totalPropRefCount} prop ref${totalPropRefCount === 1 ? '' : 's'}`);
       if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} line ref${totalLinkedRefCount === 1 ? '' : 's'}`);
+      if (totalIgnoredLinkedRefCount > 0) parts.push(`${totalIgnoredLinkedRefCount} ignored`);
     }
     state.countEl.textContent = parts.join(' | ');
 
@@ -1771,7 +1897,8 @@ class Plugin extends AppPlugin {
 
       const meta = document.createElement('div');
       meta.className = 'tlr-group-meta text-details';
-      meta.textContent = `${g.lines.length}`;
+      const activeLineCount = (g.lines || []).reduce((n, line) => n + (this.isLineSharedIgnored(line) ? 0 : 1), 0);
+      meta.textContent = `${activeLineCount}`;
 
       header.appendChild(title);
       header.appendChild(meta);
@@ -1787,6 +1914,12 @@ class Plugin extends AppPlugin {
         lineEl.dataset.recordGuid = recordGuid;
         lineEl.dataset.lineGuid = line.guid;
 
+        const ignored = this.isLineSharedIgnored(line);
+        if (ignored) lineEl.classList.add('tlr-line-ignored');
+        lineEl.title = ignored
+          ? 'Alt+Click to include this reference again'
+          : 'Alt+Click to ignore this reference in shared counts';
+
         const prefix = this.getLinePrefix(line);
         if (prefix) {
           const p = document.createElement('span');
@@ -1799,6 +1932,14 @@ class Plugin extends AppPlugin {
         content.className = 'tlr-line-content';
         this.appendSegments(content, line.segments || [], query);
         lineEl.appendChild(content);
+
+        if (ignored) {
+          lineEl.appendChild(document.createTextNode(' '));
+          const ignoredFlag = document.createElement('span');
+          ignoredFlag.className = 'tlr-line-ignored-flag text-details';
+          ignoredFlag.textContent = 'Ignored';
+          lineEl.appendChild(ignoredFlag);
+        }
 
         linesEl.appendChild(lineEl);
       }
@@ -2430,6 +2571,10 @@ class Plugin extends AppPlugin {
         line-height: 1.35;
       }
 
+      .tlr-line.tlr-line-ignored {
+        opacity: 0.62;
+      }
+
       .tlr-prefix {
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
       }
@@ -2438,6 +2583,11 @@ class Plugin extends AppPlugin {
         white-space: pre-wrap;
         word-break: break-word;
         line-height: 1.45;
+      }
+
+      .tlr-line-ignored-flag {
+        margin-left: 6px;
+        font-size: 11px;
       }
 
       .tlr-seg-bold { font-weight: 600; }
