@@ -1234,8 +1234,8 @@ class Plugin extends AppPlugin {
       ctx.ancestors = [];
       ctx.descendants = [];
       ctx.depthByGuid = {};
-      ctx.siblingItems = [];
-      ctx.matchedIndex = -1;
+      ctx.aboveItems = [];
+      ctx.belowItems = [];
     }
   }
 
@@ -1643,8 +1643,8 @@ class Plugin extends AppPlugin {
       ancestors: [],
       descendants: [],
       depthByGuid: {},
-      siblingItems: [],
-      matchedIndex: -1
+      aboveItems: [],
+      belowItems: []
     };
     state.linkedContextByLine.set(guid, ctx);
     return ctx;
@@ -1661,42 +1661,37 @@ class Plugin extends AppPlugin {
       ctx && (
         (ctx.showAncestors === true && (ctx.ancestors || []).length > 0) ||
         (ctx.showDescendants === true && (ctx.descendants || []).length > 0) ||
-        this.getVisibleAboveSiblingItems(ctx).length > 0 ||
-        this.getVisibleBelowSiblingItems(ctx).length > 0
+        this.getVisibleAboveContextItems(ctx).length > 0 ||
+        this.getVisibleBelowContextItems(ctx).length > 0
       )
     );
   }
 
-  getAvailableAboveSiblingCount(ctx) {
+  getAvailableAboveContextCount(ctx) {
     if (!ctx || ctx.loaded !== true) return null;
-    if (!Number.isInteger(ctx.matchedIndex) || ctx.matchedIndex < 0) return 0;
-    return ctx.matchedIndex;
+    return Array.isArray(ctx.aboveItems) ? ctx.aboveItems.length : 0;
   }
 
-  getAvailableBelowSiblingCount(ctx) {
+  getAvailableBelowContextCount(ctx) {
     if (!ctx || ctx.loaded !== true) return null;
-    if (!Number.isInteger(ctx.matchedIndex) || ctx.matchedIndex < 0) return 0;
-    if (!Array.isArray(ctx.siblingItems) || ctx.siblingItems.length === 0) return 0;
-    return Math.max(0, ctx.siblingItems.length - (ctx.matchedIndex + 1));
+    return Array.isArray(ctx.belowItems) ? ctx.belowItems.length : 0;
   }
 
-  getVisibleAboveSiblingItems(ctx) {
-    if (!ctx || ctx.loaded !== true || !Array.isArray(ctx.siblingItems)) return [];
-    const available = this.getAvailableAboveSiblingCount(ctx) || 0;
+  getVisibleAboveContextItems(ctx) {
+    if (!ctx || ctx.loaded !== true || !Array.isArray(ctx.aboveItems)) return [];
+    const available = this.getAvailableAboveContextCount(ctx) || 0;
     const count = Math.max(0, Math.min(ctx.siblingAboveCount || 0, available));
     if (count === 0) return [];
-    const end = ctx.matchedIndex;
-    const start = Math.max(0, end - count);
-    return ctx.siblingItems.slice(start, end);
+    const start = Math.max(0, ctx.aboveItems.length - count);
+    return ctx.aboveItems.slice(start);
   }
 
-  getVisibleBelowSiblingItems(ctx) {
-    if (!ctx || ctx.loaded !== true || !Array.isArray(ctx.siblingItems)) return [];
-    const available = this.getAvailableBelowSiblingCount(ctx) || 0;
+  getVisibleBelowContextItems(ctx) {
+    if (!ctx || ctx.loaded !== true || !Array.isArray(ctx.belowItems)) return [];
+    const available = this.getAvailableBelowContextCount(ctx) || 0;
     const count = Math.max(0, Math.min(ctx.siblingBelowCount || 0, available));
     if (count === 0) return [];
-    const start = ctx.matchedIndex + 1;
-    return ctx.siblingItems.slice(start, start + count);
+    return ctx.belowItems.slice(0, count);
   }
 
   getAncestorToggleLabel(ctx) {
@@ -1709,7 +1704,7 @@ class Plugin extends AppPlugin {
 
   getAboveToggleLabel(ctx) {
     const shown = ctx?.siblingAboveCount || 0;
-    const available = this.getAvailableAboveSiblingCount(ctx);
+    const available = this.getAvailableAboveContextCount(ctx);
     if (shown <= 0) return 'Show above';
     if (available === null || shown < available) return 'More above';
     return 'Hide above';
@@ -1717,7 +1712,7 @@ class Plugin extends AppPlugin {
 
   getBelowToggleLabel(ctx) {
     const shown = ctx?.siblingBelowCount || 0;
-    const available = this.getAvailableBelowSiblingCount(ctx);
+    const available = this.getAvailableBelowContextCount(ctx);
     if (shown <= 0) return 'Show below';
     if (available === null || shown < available) return 'More below';
     return 'Hide below';
@@ -1796,27 +1791,50 @@ class Plugin extends AppPlugin {
       }
       const descendantContext = this.collectDescendantContext(line);
 
-      const parent = await line.getParent();
-      let siblingItems = [];
-      if (parent && typeof parent.getChildren === 'function') {
-        siblingItems = (await parent.getChildren()) || [];
-      } else {
-        const record = line.getRecord?.() || null;
-        const allItems = record && typeof record.getLineItems === 'function'
-          ? ((await record.getLineItems(false)) || [])
-          : [];
-        siblingItems = allItems.filter((item) => !item?.parent_guid);
+      const record = line.getRecord?.() || null;
+      const allItems = record && typeof record.getLineItems === 'function'
+        ? ((await record.getLineItems(false)) || [])
+        : [];
+      const matchedGuid = line?.guid || '';
+      const excludedGuids = new Set([matchedGuid]);
+      for (const item of ancestors) {
+        const guid = item?.guid || '';
+        if (guid) excludedGuids.add(guid);
+      }
+      for (const item of descendantContext.descendants || []) {
+        const guid = item?.guid || '';
+        if (guid) excludedGuids.add(guid);
+      }
+
+      const matchedIndex = allItems.findIndex((item) => (item?.guid || '') === matchedGuid);
+      const aboveItems = [];
+      const belowItems = [];
+
+      if (matchedIndex >= 0) {
+        for (let i = matchedIndex - 1; i >= 0; i -= 1) {
+          const item = allItems[i] || null;
+          const guid = item?.guid || '';
+          if (!guid || excludedGuids.has(guid)) continue;
+          aboveItems.unshift(item);
+        }
+
+        for (let i = matchedIndex + 1; i < allItems.length; i += 1) {
+          const item = allItems[i] || null;
+          const guid = item?.guid || '';
+          if (!guid || excludedGuids.has(guid)) continue;
+          belowItems.push(item);
+        }
       }
 
       ctx.ancestors = ancestors;
       ctx.descendants = descendantContext.descendants;
       ctx.depthByGuid = descendantContext.depthByGuid;
-      ctx.siblingItems = Array.isArray(siblingItems) ? siblingItems.filter(Boolean) : [];
-      ctx.matchedIndex = ctx.siblingItems.findIndex((item) => (item?.guid || '') === (line?.guid || ''));
+      ctx.aboveItems = aboveItems;
+      ctx.belowItems = belowItems;
       ctx.loaded = true;
 
-      const availableAbove = this.getAvailableAboveSiblingCount(ctx);
-      const availableBelow = this.getAvailableBelowSiblingCount(ctx);
+      const availableAbove = this.getAvailableAboveContextCount(ctx);
+      const availableBelow = this.getAvailableBelowContextCount(ctx);
       ctx.siblingAboveCount = Math.max(0, Math.min(ctx.siblingAboveCount || 0, availableAbove || 0));
       ctx.siblingBelowCount = Math.max(0, Math.min(ctx.siblingBelowCount || 0, availableBelow || 0));
       return ctx;
@@ -1853,9 +1871,9 @@ class Plugin extends AppPlugin {
     } else if (action === 'toggle-context-down') {
       ctx.showDescendants = !(ctx.showDescendants === true);
     } else if (action === 'toggle-context-above') {
-      ctx.siblingAboveCount = this.adjustContextWindowCount(ctx.siblingAboveCount, this.getAvailableAboveSiblingCount(ctx));
+      ctx.siblingAboveCount = this.adjustContextWindowCount(ctx.siblingAboveCount, this.getAvailableAboveContextCount(ctx));
     } else if (action === 'toggle-context-below') {
-      ctx.siblingBelowCount = this.adjustContextWindowCount(ctx.siblingBelowCount, this.getAvailableBelowSiblingCount(ctx));
+      ctx.siblingBelowCount = this.adjustContextWindowCount(ctx.siblingBelowCount, this.getAvailableBelowContextCount(ctx));
     } else {
       return;
     }
@@ -2602,11 +2620,11 @@ class Plugin extends AppPlugin {
       active: ctx?.showDescendants === true
     }));
     controls.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, this.getAboveToggleLabel(ctx), {
-      disabled: ctx?.loaded === true && this.getAvailableAboveSiblingCount(ctx) === 0,
+      disabled: ctx?.loaded === true && this.getAvailableAboveContextCount(ctx) === 0,
       active: (ctx?.siblingAboveCount || 0) > 0
     }));
     controls.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, this.getBelowToggleLabel(ctx), {
-      disabled: ctx?.loaded === true && this.getAvailableBelowSiblingCount(ctx) === 0,
+      disabled: ctx?.loaded === true && this.getAvailableBelowContextCount(ctx) === 0,
       active: (ctx?.siblingBelowCount || 0) > 0
     }));
 
@@ -2662,7 +2680,7 @@ class Plugin extends AppPlugin {
         }
       }
 
-      for (const line of this.getVisibleAboveSiblingItems(ctx)) {
+      for (const line of this.getVisibleAboveContextItems(ctx)) {
         items.push({ line, label: 'Above', indent: 0 });
       }
     } else {
@@ -2676,7 +2694,7 @@ class Plugin extends AppPlugin {
         }
       }
 
-      for (const line of this.getVisibleBelowSiblingItems(ctx)) {
+      for (const line of this.getVisibleBelowContextItems(ctx)) {
         items.push({ line, label: 'Below', indent: 0 });
       }
     }
