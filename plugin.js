@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.3';
+    this._version = '0.4.7';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -173,7 +173,9 @@ class Plugin extends AppPlugin {
         searchToggleEl: null,
         searchWrapEl: null,
         searchInputEl: null,
-        searchQuery: '',
+        chipsRowEl: null,
+        searchPhrases: [],
+        searchTyped: '',
         searchOpen: false,
         sortBy: this._defaultSortBy,
         sortDir: this._defaultSortDir,
@@ -206,7 +208,9 @@ class Plugin extends AppPlugin {
       searchToggleEl: null,
       searchWrapEl: null,
       searchInputEl: null,
-      searchQuery: '',
+      chipsRowEl: null,
+      searchPhrases: [],
+      searchTyped: '',
       searchOpen: false,
       sortBy: this._defaultSortBy,
       sortDir: this._defaultSortDir,
@@ -366,10 +370,50 @@ class Plugin extends AppPlugin {
     input.className = 'tlr-search-input query-input--field form-input';
     input.type = 'text';
     input.name = 'backreferences-filter';
-    input.placeholder = 'Filter references...';
+    input.placeholder = 'Filter... (Enter to pin)';
     input.autocomplete = 'off';
     input.spellcheck = false;
-    input.value = state.searchQuery || '';
+    input.value = state.searchTyped || '';
+
+    const chipsRow = document.createElement('div');
+    chipsRow.className = 'tlr-chips-row';
+    chipsRow.dataset.role = 'chips';
+
+    const rebuildChips = () => {
+      chipsRow.innerHTML = '';
+      const phrases = state.searchPhrases || [];
+      for (let i = 0; i < phrases.length; i++) {
+        const chip = document.createElement('span');
+        chip.className = 'tlr-chip';
+        const label = document.createElement('span');
+        label.className = 'tlr-chip-label';
+        label.textContent = phrases[i];
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'tlr-chip-remove button-none';
+        remove.dataset.action = 'remove-chip';
+        remove.dataset.chipIndex = i;
+        remove.title = `Remove "${phrases[i]}"`;
+        remove.textContent = '×';
+        chip.appendChild(label);
+        chip.appendChild(remove);
+        chipsRow.appendChild(chip);
+      }
+      chipsRow.style.display = phrases.length > 0 ? 'flex' : 'none';
+    };
+
+    const commitChip = () => {
+      const val = input.value.trim();
+      if (!val) return;
+      if (!Array.isArray(state.searchPhrases)) state.searchPhrases = [];
+      if (!state.searchPhrases.includes(val)) {
+        state.searchPhrases = [...state.searchPhrases, val];
+        rebuildChips();
+      }
+      input.value = '';
+      state.searchTyped = '';
+      this.renderFromCache(state);
+    };
 
     const stopKeys = (e) => {
       e.stopPropagation();
@@ -378,12 +422,19 @@ class Plugin extends AppPlugin {
 
     input.addEventListener('keydown', (e) => {
       stopKeys(e);
-      if (e.key === 'Escape') {
+      if (e.key === 'Enter') {
         e.preventDefault();
-        const q = (state.searchQuery || '').trim();
-        if (q) {
-          state.searchQuery = '';
+        commitChip();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        if (input.value.trim()) {
           input.value = '';
+          state.searchTyped = '';
+          this.renderFromCache(state);
+        } else if ((state.searchPhrases || []).length > 0) {
+          state.searchPhrases = [];
+          state.searchTyped = '';
+          rebuildChips();
           this.renderFromCache(state);
         } else {
           this.setSearchOpen(state, false);
@@ -391,21 +442,28 @@ class Plugin extends AppPlugin {
       }
     });
 
+    input.addEventListener('keypress', stopKeys);
+    input.addEventListener('keyup', stopKeys);
+
     input.addEventListener('input', () => {
-      state.searchQuery = input.value;
+      state.searchTyped = input.value;
       this.renderFromCache(state);
     });
+
+    rebuildChips();
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'tlr-search-clear button-none button-small button-minimal-hover';
     clearBtn.type = 'button';
     clearBtn.dataset.action = 'clear-search';
-    clearBtn.title = 'Clear';
-    clearBtn.textContent = 'x';
+    clearBtn.title = 'Clear all filters';
+    clearBtn.textContent = '×';
 
     searchWrap.appendChild(searchIcon);
     searchWrap.appendChild(input);
     searchWrap.appendChild(clearBtn);
+
+    state._rebuildChips = rebuildChips;
 
     const sortWrap = document.createElement('div');
     sortWrap.className = 'tlr-sort-wrap';
@@ -448,6 +506,7 @@ class Plugin extends AppPlugin {
     body.dataset.role = 'body';
 
     root.appendChild(header);
+    root.appendChild(chipsRow);
     root.appendChild(body);
 
     root.addEventListener('click', (e) => this.handleFooterClick(e));
@@ -461,6 +520,7 @@ class Plugin extends AppPlugin {
     state.searchToggleEl = searchToggle;
     state.searchWrapEl = searchWrap;
     state.searchInputEl = input;
+    state.chipsRowEl = chipsRow;
     return root;
   }
 
@@ -565,14 +625,26 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (action === 'remove-chip') {
+      if (!state) return;
+      const idx = parseInt(actionEl.dataset.chipIndex, 10);
+      if (!isNaN(idx) && Array.isArray(state.searchPhrases)) {
+        state.searchPhrases = state.searchPhrases.filter((_, i) => i !== idx);
+        if (typeof state._rebuildChips === 'function') state._rebuildChips();
+        this.renderFromCache(state);
+      }
+      return;
+    }
+
     if (action === 'clear-search') {
       if (!state) return;
-      const q = (state.searchQuery || '').trim();
-      if (q) {
-        state.searchQuery = '';
+      const hasFilter = (state.searchPhrases || []).length > 0 || (state.searchTyped || '').trim();
+      if (hasFilter) {
+        state.searchPhrases = [];
+        state.searchTyped = '';
         if (state.searchInputEl) state.searchInputEl.value = '';
+        if (typeof state._rebuildChips === 'function') state._rebuildChips();
         this.renderFromCache(state);
-        // Keep the input open for continued searching.
         this.setSearchOpen(state, true);
       } else {
         this.setSearchOpen(state, false);
@@ -712,7 +784,6 @@ class Plugin extends AppPlugin {
     state.searchToggleEl?.setAttribute?.('aria-expanded', state.searchOpen === true ? 'true' : 'false');
 
     if (state.searchInputEl) {
-      state.searchInputEl.value = state.searchQuery || '';
       if (state.searchOpen === true) {
         setTimeout(() => {
           try {
@@ -2072,8 +2143,10 @@ class Plugin extends AppPlugin {
     const body = state.bodyEl;
     body.innerHTML = '';
 
-    const query = (state.searchQuery || '').trim();
-    const queryLower = query.toLowerCase();
+    const pinnedPhrases = (state.searchPhrases || []).map(p => p.toLowerCase()).filter(Boolean);
+    const typedPhrase = (state.searchTyped || '').trim().toLowerCase();
+    const phrases = typedPhrase ? [...pinnedPhrases, typedPhrase] : pinnedPhrases;
+    const query = phrases.join(' ');
 
     const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
@@ -2095,19 +2168,25 @@ class Plugin extends AppPlugin {
       const guid = g?.record?.guid || null;
       if (guid) totalUniquePages.add(guid);
     }
+    for (const g of unlinkedAll) {
+      const guid = g?.record?.guid || null;
+      if (guid) totalUniquePages.add(guid);
+    }
 
     let props = propsAll;
     let linked = linkedAll;
     let unlinked = unlinkedAll;
 
-    if (queryLower) {
+    if (phrases.length > 0) {
+      const allMatch = (text) => phrases.every(p => text.includes(p));
+
       const nextProps = [];
       for (const g of propsAll) {
         const propertyName = (g?.propertyName || '').trim();
         if (!propertyName) continue;
         const recs = (g?.records || []).filter((r) => {
           const name = (r?.getName?.() || '').toLowerCase();
-          return name.includes(queryLower);
+          return allMatch(name);
         });
         if (recs.length > 0) nextProps.push({ propertyName, records: recs });
       }
@@ -2119,8 +2198,8 @@ class Plugin extends AppPlugin {
         const recordGuid = record?.guid || null;
         if (!recordGuid) continue;
         const lines = (g?.lines || []).filter((line) => {
-          const text = this.segmentsToPlainText(line?.segments || []);
-          return text.toLowerCase().includes(queryLower);
+          const text = this.segmentsToPlainText(line?.segments || []).toLowerCase();
+          return allMatch(text);
         });
         if (lines.length > 0) nextLinked.push({ record, lines });
       }
@@ -2132,8 +2211,8 @@ class Plugin extends AppPlugin {
         const recordGuid = record?.guid || null;
         if (!recordGuid) continue;
         const lines = (g?.lines || []).filter((line) => {
-          const text = this.segmentsToPlainText(line?.segments || []);
-          return text.toLowerCase().includes(queryLower);
+          const text = this.segmentsToPlainText(line?.segments || []).toLowerCase();
+          return allMatch(text);
         });
         if (lines.length > 0) nextUnlinked.push({ record, lines });
       }
@@ -2156,6 +2235,10 @@ class Plugin extends AppPlugin {
       const guid = g?.record?.guid || null;
       if (guid) filteredUniquePages.add(guid);
     }
+    for (const g of unlinked) {
+      const guid = g?.record?.guid || null;
+      if (guid) filteredUniquePages.add(guid);
+    }
 
     const sortSpec = {
       sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
@@ -2167,7 +2250,7 @@ class Plugin extends AppPlugin {
     unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     const parts = [];
-    if (queryLower) {
+    if (phrases.length > 0) {
       const shortQuery = query.length > 24 ? `${query.slice(0, 24)}...` : query;
       parts.push(`Filter: "${shortQuery}"`);
       if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
@@ -2197,7 +2280,7 @@ class Plugin extends AppPlugin {
     if (propertyError) {
       this.appendError(propBody, propertyError);
     } else if (props.length === 0) {
-      this.appendEmpty(propBody, queryLower ? 'No matching property references.' : 'No property references.');
+      this.appendEmpty(propBody, phrases.length > 0 ? 'No matching property references.' : 'No property references.');
     } else {
       this.appendPropertyReferenceGroups(propBody, props, { query });
     }
@@ -2219,7 +2302,7 @@ class Plugin extends AppPlugin {
         maxResults,
         query,
         totalLineCount: totalLinkedRefCount,
-        emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.',
+        emptyMessage: phrases.length > 0 ? 'No matching linked references.' : 'No linked references.',
         treeContextMap: treeContextMap || new Map()
       });
     }
@@ -2238,7 +2321,7 @@ class Plugin extends AppPlugin {
     if (unlinkedError) {
       this.appendError(unlinkedBody, unlinkedError);
     } else if (unlinked.length === 0) {
-      this.appendEmpty(unlinkedBody, queryLower ? 'No matching unlinked references.' : 'No unlinked references.');
+      this.appendEmpty(unlinkedBody, phrases.length > 0 ? 'No matching unlinked references.' : 'No unlinked references.');
     } else {
       this.appendUnlinkedReferenceGroups(unlinkedBody, unlinked, {
         query,
@@ -2750,39 +2833,54 @@ class Plugin extends AppPlugin {
     const s = typeof text === 'string' ? text : '';
     if (!s) return;
 
-    const q = typeof query === 'string' ? query.trim() : '';
-    if (!q) {
+    const phrases = (typeof query === 'string' ? query.trim() : '')
+      .split(/\s+/).filter(Boolean).map(p => p.toLowerCase());
+
+    if (phrases.length === 0) {
       container.appendChild(document.createTextNode(s));
       return;
     }
 
     const hayLower = s.toLowerCase();
-    const needleLower = q.toLowerCase();
-    if (!needleLower) {
+
+    // Build a sorted list of [start, end] match ranges for all phrases
+    const ranges = [];
+    for (const needle of phrases) {
+      let idx = 0;
+      while (idx < s.length) {
+        const next = hayLower.indexOf(needle, idx);
+        if (next === -1) break;
+        ranges.push([next, next + needle.length]);
+        idx = next + needle.length;
+      }
+    }
+    if (ranges.length === 0) {
       container.appendChild(document.createTextNode(s));
       return;
     }
 
-    let idx = 0;
-    while (idx < s.length) {
-      const next = hayLower.indexOf(needleLower, idx);
-      if (next === -1) break;
-
-      if (next > idx) {
-        container.appendChild(document.createTextNode(s.slice(idx, next)));
+    // Sort and merge overlapping ranges
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [ranges[0]];
+    for (let i = 1; i < ranges.length; i++) {
+      const last = merged[merged.length - 1];
+      if (ranges[i][0] <= last[1]) {
+        last[1] = Math.max(last[1], ranges[i][1]);
+      } else {
+        merged.push(ranges[i]);
       }
+    }
 
+    let pos = 0;
+    for (const [start, end] of merged) {
+      if (start > pos) container.appendChild(document.createTextNode(s.slice(pos, start)));
       const mark = document.createElement('mark');
       mark.className = 'tlr-search-mark';
-      mark.textContent = s.slice(next, next + needleLower.length);
+      mark.textContent = s.slice(start, end);
       container.appendChild(mark);
-
-      idx = next + needleLower.length;
+      pos = end;
     }
-
-    if (idx < s.length) {
-      container.appendChild(document.createTextNode(s.slice(idx)));
-    }
+    if (pos < s.length) container.appendChild(document.createTextNode(s.slice(pos)));
   }
 
   appendSegments(container, segments, query) {
@@ -3178,6 +3276,55 @@ class Plugin extends AppPlugin {
         min-width: 20px;
         padding: 0 4px;
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
+      }
+
+      .tlr-chips-row {
+        display: none;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        border-bottom: 1px solid var(--divider-color, var(--border-subtle, rgba(0,0,0,0.08)));
+        background: var(--bg-panel, transparent);
+      }
+
+      .tlr-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        padding: 2px 4px 2px 8px;
+        border-radius: 10px;
+        background: var(--accent, var(--link-color, #4a90d9));
+        color: #fff;
+        font-size: 11px;
+        line-height: 16px;
+        white-space: nowrap;
+      }
+
+      .tlr-chip-label {
+        max-width: 120px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tlr-chip-remove {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        font-size: 13px;
+        line-height: 1;
+        color: rgba(255,255,255,0.8);
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .tlr-chip-remove:hover {
+        color: #fff;
+        background: rgba(0,0,0,0.2);
       }
 
       .tlr-toggle {
