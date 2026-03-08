@@ -4256,10 +4256,7 @@ class Plugin extends AppPlugin {
         gap: 4px;
         flex-shrink: 0;
         margin-left: auto;
-        opacity: 0;
-        transition: opacity 0.12s;
       }
-      .tlr-line-main:hover .tlr-unlinked-actions-row { opacity: 1; }
       .tlr-unlinked-actions-row .tlr-line-actions { margin: 0; }
 
       /* Link button */
