@@ -1,12 +1,14 @@
 {
   "ver": 1,
-  "version": "0.3.3",
+  "version": "0.4.0",
   "name": "Backreferences",
   "icon": "ti-link",
-  "description": "Backreferences footer (linked + property references)",
+  "description": "Backreferences footer (linked, property, and unlinked references)",
   "custom": {
     "maxResults": 200,
     "collapsedByDefault": false,
     "showSelf": false
   }
+  "__source_repo": "https://github.com/harpreetchima/thymer-backreferences"
+
 }

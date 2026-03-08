@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.3.3';
+    this._version = '0.4.0';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -15,6 +15,9 @@ class Plugin extends AppPlugin {
     this._legacyStorageKeyPropGroupCollapsed = null;
     this._propGroupCollapsed = this.loadPropGroupCollapsedSetting();
 
+    this._storageKeyUnlinkedCollapsed = 'thymer_backreferences_unlinked_collapsed_v1';
+    this._unlinkedCollapsed = this.loadUnlinkedCollapsedSetting();
+
     this._defaultSortBy = 'page_last_edited';
     this._defaultSortDir = 'desc';
     this._storageKeySortByRecord = 'thymer_backreferences_sort_by_record_v1';
@@ -24,6 +27,7 @@ class Plugin extends AppPlugin {
     this._defaultMaxResults = 200;
     this._refreshDebounceMs = 350;
     this._sharedIgnoreMetaKey = 'plugin.refs.v1.ignore';
+    this._collectionRecordNameCache = new Map();
 
     this.injectCss();
 
@@ -537,6 +541,31 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (action === 'toggle-unlinked') {
+      this._unlinkedCollapsed = !this._unlinkedCollapsed;
+      this.saveUnlinkedCollapsedSetting(this._unlinkedCollapsed);
+      for (const s of this._panelStates.values()) {
+        if (!s?.rootEl) continue;
+        const unlinkedSection = s.rootEl.querySelector?.('.tlr-unlinked-section') || null;
+        if (unlinkedSection) unlinkedSection.classList.toggle('tlr-unlinked-collapsed', this._unlinkedCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'link-unlinked') {
+      if (!state) return;
+      const lineGuid = actionEl.dataset.lineGuid || null;
+      if (!lineGuid) return;
+      this.linkUnlinkedReference(state, lineGuid).catch(() => {});
+      return;
+    }
+
+    if (action === 'link-all-unlinked') {
+      if (!state) return;
+      this.linkAllUnlinkedReferences(state).catch(() => {});
+      return;
+    }
+
     const panel = state?.panel || null;
     if (!panel) return;
 
@@ -935,6 +964,25 @@ class Plugin extends AppPlugin {
     }
   }
 
+  loadUnlinkedCollapsedSetting() {
+    try {
+      const v = localStorage.getItem(this._storageKeyUnlinkedCollapsed);
+      if (v === '1') return true;
+      if (v === '0') return false;
+    } catch (e) {
+      // ignore
+    }
+    return true;
+  }
+
+  saveUnlinkedCollapsedSetting(collapsed) {
+    try {
+      localStorage.setItem(this._storageKeyUnlinkedCollapsed, collapsed ? '1' : '0');
+    } catch (e) {
+      // ignore
+    }
+  }
+
   isPropGroupCollapsed(propName) {
     const name = (propName || '').trim();
     if (!name) return false;
@@ -1089,6 +1137,9 @@ class Plugin extends AppPlugin {
     const maxResults = this.coercePositiveInt(cfg.custom?.maxResults, this._defaultMaxResults);
     const showSelf = cfg.custom?.showSelf === true;
 
+    // Rebuild collection record name cache so we can resolve refs to collection entries.
+    await this.rebuildCollectionRecordNameCache();
+
     const query = `@linkto = "${recordGuid}"`;
     const [searchSettled, propSettled] = await Promise.allSettled([
       this.data.searchByQuery(query, maxResults),
@@ -1100,12 +1151,24 @@ class Plugin extends AppPlugin {
 
     let linkedError = '';
     let linkedGroups = [];
+    const treeContextMap = new Map();
+
     if (searchSettled.status === 'fulfilled') {
       const result = searchSettled.value;
       if (result?.error) {
         linkedError = result.error;
       } else {
         const lines = Array.isArray(result?.lines) ? result.lines : [];
+        
+        await Promise.all(lines.map(async (line) => {
+          if (typeof line.getTreeContext === 'function') {
+            try {
+              const ctx = await line.getTreeContext();
+              treeContextMap.set(line.guid, ctx);
+            } catch (e) {}
+          }
+        }));
+
         linkedGroups = this.groupBacklinkLines(lines, recordGuid, { showSelf });
       }
     } else {
@@ -1120,12 +1183,74 @@ class Plugin extends AppPlugin {
       propertyError = 'Error loading property references.';
     }
 
+    // --- Unlinked references ---
+    let unlinkedError = '';
+    let unlinkedGroups = [];
+    const unlinkedTreeContextMap = new Map();
+
+    try {
+      const recordName = (record?.getName?.() || '').trim();
+      if (recordName) {
+        // Collect all line guids that already link to this record (to exclude them).
+        const alreadyLinkedLineGuids = new Set();
+        for (const g of linkedGroups) {
+          for (const line of g?.lines || []) {
+            if (line?.guid) alreadyLinkedLineGuids.add(line.guid);
+          }
+        }
+
+        const unlinkedSearchResult = await this.data.searchByQuery(recordName, maxResults);
+        if (unlinkedSearchResult?.error) {
+          unlinkedError = unlinkedSearchResult.error;
+        } else {
+          const allLines = Array.isArray(unlinkedSearchResult?.lines) ? unlinkedSearchResult.lines : [];
+
+          // Filter: keep only lines that mention the record name in plain text
+          // but do NOT already have a ref segment pointing to this record.
+          const candidateLines = [];
+          for (const line of allLines) {
+            if (!line || !line.guid) continue;
+            // Skip lines already in linked references.
+            if (alreadyLinkedLineGuids.has(line.guid)) continue;
+            // Skip lines belonging to the target record itself.
+            const srcGuid = line.record?.guid || null;
+            if (!showSelf && srcGuid === recordGuid) continue;
+            // Check that the line has a text segment containing the name (case-insensitive)
+            // and does NOT have a ref segment pointing to this record.
+            if (this.lineHasRefToRecord(line, recordGuid)) continue;
+            if (!this.lineHasTextMentionOf(line, recordName)) continue;
+            candidateLines.push(line);
+          }
+
+          await Promise.all(candidateLines.map(async (line) => {
+            if (typeof line.getTreeContext === 'function') {
+              try {
+                const ctx = await line.getTreeContext();
+                unlinkedTreeContextMap.set(line.guid, ctx);
+              } catch (e) {}
+            }
+          }));
+
+          unlinkedGroups = this.groupBacklinkLines(candidateLines, recordGuid, { showSelf });
+        }
+      }
+    } catch (e) {
+      unlinkedError = 'Error loading unlinked references.';
+    }
+
+    // Ignore stale refreshes (re-check after async unlinked work).
+    if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
+
     state.lastResults = {
       propertyGroups,
       propertyError,
       linkedGroups,
       linkedError,
-      maxResults
+      unlinkedGroups,
+      unlinkedError,
+      unlinkedTreeContextMap,
+      maxResults,
+      treeContextMap
     };
     this.renderFromCache(state);
     this.setLoadingState(state, false);
@@ -1150,21 +1275,29 @@ class Plugin extends AppPlugin {
   handleLineItemUpdated(ev) {
     if (this.didSharedIgnoreChange(ev)) {
       this.refreshAllPanels({ force: false, reason: 'lineitem.ignore-change' });
+      return;
     }
 
     if (!ev?.hasSegments?.() || typeof ev.getSegments !== 'function') return;
 
     const segments = ev.getSegments() || [];
     const referenced = this.extractReferencedRecordGuids(segments);
-    if (referenced.size === 0) return;
 
-    for (const state of this._panelStates.values()) {
-      const panel = state?.panel || null;
-      if (!panel) continue;
-      if (!state.recordGuid) continue;
-      if (!referenced.has(state.recordGuid)) continue;
-      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.updated' });
+    // For linked references: only refresh panels whose record is referenced.
+    // For unlinked references: any text edit could add/remove a name mention,
+    // so we always do a debounced refresh of all panels.
+    if (referenced.size > 0) {
+      for (const state of this._panelStates.values()) {
+        const panel = state?.panel || null;
+        if (!panel) continue;
+        if (!state.recordGuid) continue;
+        if (!referenced.has(state.recordGuid)) continue;
+        this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.updated' });
+      }
     }
+
+    // Debounced refresh for unlinked references on any segment change.
+    this.refreshAllPanels({ force: false, reason: 'lineitem.updated.unlinked' });
   }
 
   handleLineItemDeleted() {
@@ -1291,6 +1424,186 @@ class Plugin extends AppPlugin {
       if (rec) out.add(guid);
     }
     return out;
+  }
+
+  // ---------- Unlinked reference helpers ----------
+
+  lineHasRefToRecord(line, recordGuid) {
+    if (!line || !recordGuid) return false;
+    const segments = line.segments || [];
+    for (const seg of segments) {
+      if (seg?.type !== 'ref') continue;
+      const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
+      if (textObj.guid === recordGuid) return true;
+    }
+    return false;
+  }
+
+  lineHasTextMentionOf(line, name) {
+    if (!line || !name) return false;
+    const nameLower = name.toLowerCase();
+    const segments = line.segments || [];
+    for (const seg of segments) {
+      if (seg?.type === 'ref') continue;
+      const text = typeof seg.text === 'string' ? seg.text : '';
+      if (text.toLowerCase().includes(nameLower)) return true;
+    }
+    return false;
+  }
+
+  buildReplacedSegments(segments, name, recordGuid) {
+    if (!Array.isArray(segments) || !name || !recordGuid) return segments;
+    const nameLower = name.toLowerCase();
+    const newSegments = [];
+
+    for (const seg of segments) {
+      // Only replace in text-like segments, skip refs and other structured types.
+      if (seg?.type !== 'text' && seg?.type !== 'bold' && seg?.type !== 'italic') {
+        newSegments.push(seg);
+        continue;
+      }
+
+      const text = typeof seg.text === 'string' ? seg.text : '';
+      if (!text || !text.toLowerCase().includes(nameLower)) {
+        newSegments.push(seg);
+        continue;
+      }
+
+      // Split the text around the first occurrence of the name (case-insensitive).
+      const idx = text.toLowerCase().indexOf(nameLower);
+      if (idx === -1) {
+        newSegments.push(seg);
+        continue;
+      }
+
+      const before = text.slice(0, idx);
+      const match = text.slice(idx, idx + name.length);
+      const after = text.slice(idx + name.length);
+
+      if (before) newSegments.push({ type: seg.type, text: before });
+      newSegments.push({ type: 'ref', text: { guid: recordGuid, title: match } });
+      if (after) newSegments.push({ type: seg.type, text: after });
+
+      // Only replace first occurrence per segment.
+      continue;
+    }
+
+    return newSegments;
+  }
+
+  buildReplacedSegmentsAll(segments, name, recordGuid) {
+    if (!Array.isArray(segments) || !name || !recordGuid) return segments;
+    const nameLower = name.toLowerCase();
+    const newSegments = [];
+
+    for (const seg of segments) {
+      if (seg?.type !== 'text' && seg?.type !== 'bold' && seg?.type !== 'italic') {
+        newSegments.push(seg);
+        continue;
+      }
+
+      const text = typeof seg.text === 'string' ? seg.text : '';
+      if (!text || !text.toLowerCase().includes(nameLower)) {
+        newSegments.push(seg);
+        continue;
+      }
+
+      // Replace ALL occurrences of the name in this text segment.
+      let remaining = text;
+      while (remaining.length > 0) {
+        const idx = remaining.toLowerCase().indexOf(nameLower);
+        if (idx === -1) {
+          newSegments.push({ type: seg.type, text: remaining });
+          break;
+        }
+
+        const before = remaining.slice(0, idx);
+        const match = remaining.slice(idx, idx + name.length);
+        remaining = remaining.slice(idx + name.length);
+
+        if (before) newSegments.push({ type: seg.type, text: before });
+        newSegments.push({ type: 'ref', text: { guid: recordGuid, title: match } });
+      }
+
+      continue;
+    }
+
+    return newSegments;
+  }
+
+  async linkUnlinkedReference(state, lineGuid) {
+    const panel = state?.panel || null;
+    const record = panel?.getActiveRecord?.() || null;
+    const recordGuid = record?.guid || null;
+    const recordName = (record?.getName?.() || '').trim();
+    if (!recordGuid || !recordName || !lineGuid) return;
+
+    const line = this.findUnlinkedLineByGuid(state, lineGuid);
+    if (!line || typeof line.setSegments !== 'function') return;
+
+    const newSegments = this.buildReplacedSegments(line.segments || [], recordName, recordGuid);
+    try {
+      await line.setSegments(newSegments);
+    } catch (e) {
+      // ignore
+    }
+
+    this.refreshAllPanels({ force: true, reason: 'unlinked.linked' });
+  }
+
+  async linkAllUnlinkedReferences(state) {
+    const panel = state?.panel || null;
+    const record = panel?.getActiveRecord?.() || null;
+    const recordGuid = record?.guid || null;
+    const recordName = (record?.getName?.() || '').trim();
+    if (!recordGuid || !recordName) return;
+
+    const groups = state?.lastResults?.unlinkedGroups || [];
+    let count = 0;
+
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if (!line || typeof line.setSegments !== 'function') continue;
+        if (this.lineHasRefToRecord(line, recordGuid)) continue;
+        if (!this.lineHasTextMentionOf(line, recordName)) continue;
+        const newSegments = this.buildReplacedSegmentsAll(line.segments || [], recordName, recordGuid);
+        try {
+          await line.setSegments(newSegments);
+          count++;
+        } catch (e) {
+          // ignore
+        }
+      }
+    }
+
+    if (count > 0) {
+      try {
+        this.ui.addToaster({
+          title: 'Backreferences',
+          message: `Linked ${count} unlinked reference${count === 1 ? '' : 's'}.`,
+          dismissible: true,
+          autoDestroyTime: 2500
+        });
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    this.refreshAllPanels({ force: true, reason: 'unlinked.linked-all' });
+  }
+
+  findUnlinkedLineByGuid(state, lineGuid) {
+    const target = (lineGuid || '').trim();
+    if (!target || !state?.lastResults) return null;
+    const groups = Array.isArray(state.lastResults?.unlinkedGroups) ? state.lastResults.unlinkedGroups : [];
+
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if ((line?.guid || '') === target) return line;
+      }
+    }
+
+    return null;
   }
 
   // ---------- Grouping + rendering ----------
@@ -1646,7 +1959,7 @@ class Plugin extends AppPlugin {
     state.bodyEl.appendChild(el);
   }
 
-  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, maxResults }) {
+  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, unlinkedGroups, unlinkedError, unlinkedTreeContextMap, maxResults, treeContextMap }) {
     if (!state?.bodyEl || !state?.countEl) return;
 
     const body = state.bodyEl;
@@ -1657,10 +1970,12 @@ class Plugin extends AppPlugin {
 
     const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
+    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
 
     const totalPropRefCount = propsAll.reduce((n, g) => n + (g?.records?.length || 0), 0);
     const totalLinkedRefCount = this.countActiveLinkedReferences(linkedAll);
     const totalIgnoredLinkedRefCount = this.countIgnoredLinkedReferences(linkedAll);
+    const totalUnlinkedRefCount = this.countActiveLinkedReferences(unlinkedAll);
 
     const totalUniquePages = new Set();
     for (const g of propsAll) {
@@ -1676,6 +1991,7 @@ class Plugin extends AppPlugin {
 
     let props = propsAll;
     let linked = linkedAll;
+    let unlinked = unlinkedAll;
 
     if (queryLower) {
       const nextProps = [];
@@ -1702,11 +2018,25 @@ class Plugin extends AppPlugin {
         if (lines.length > 0) nextLinked.push({ record, lines });
       }
       linked = nextLinked;
+
+      const nextUnlinked = [];
+      for (const g of unlinkedAll) {
+        const record = g?.record || null;
+        const recordGuid = record?.guid || null;
+        if (!recordGuid) continue;
+        const lines = (g?.lines || []).filter((line) => {
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return text.toLowerCase().includes(queryLower);
+        });
+        if (lines.length > 0) nextUnlinked.push({ record, lines });
+      }
+      unlinked = nextUnlinked;
     }
 
     const filteredPropRefCount = props.reduce((n, g) => n + (g?.records?.length || 0), 0);
     const filteredLinkedRefCount = this.countActiveLinkedReferences(linked);
     const filteredIgnoredLinkedRefCount = this.countIgnoredLinkedReferences(linked);
+    const filteredUnlinkedRefCount = this.countActiveLinkedReferences(unlinked);
 
     const filteredUniquePages = new Set();
     for (const g of props) {
@@ -1727,6 +2057,7 @@ class Plugin extends AppPlugin {
     const sortMetrics = this.computeRecordSortMetrics(props, linked);
     props = this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
     linked = this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
+    unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     const parts = [];
     if (queryLower) {
@@ -1734,13 +2065,15 @@ class Plugin extends AppPlugin {
       parts.push(`Filter: "${shortQuery}"`);
       if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
       if (totalPropRefCount > 0) parts.push(`${filteredPropRefCount}/${totalPropRefCount} prop refs`);
-      if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} line refs`);
+      if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} linked`);
       if (totalIgnoredLinkedRefCount > 0) parts.push(`${filteredIgnoredLinkedRefCount}/${totalIgnoredLinkedRefCount} ignored`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${filteredUnlinkedRefCount}/${totalUnlinkedRefCount} unlinked`);
     } else {
       if (totalUniquePages.size > 0) parts.push(`${totalUniquePages.size} page${totalUniquePages.size === 1 ? '' : 's'}`);
       if (totalPropRefCount > 0) parts.push(`${totalPropRefCount} prop ref${totalPropRefCount === 1 ? '' : 's'}`);
-      if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} line ref${totalLinkedRefCount === 1 ? '' : 's'}`);
+      if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} linked`);
       if (totalIgnoredLinkedRefCount > 0) parts.push(`${totalIgnoredLinkedRefCount} ignored`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${totalUnlinkedRefCount} unlinked`);
     }
     state.countEl.textContent = parts.join(' | ');
 
@@ -1767,7 +2100,22 @@ class Plugin extends AppPlugin {
       maxResults,
       query,
       totalLineCount: totalLinkedRefCount,
-      emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.'
+      emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.',
+      treeContextMap: treeContextMap || new Map()
+    });
+
+    // --- Unlinked References ---
+    const divider2 = document.createElement('div');
+    divider2.className = 'tlr-divider';
+    body.appendChild(divider2);
+
+    this.appendUnlinkedReferenceSection(body, unlinked, {
+      unlinkedError: unlinkedError || '',
+      query,
+      queryLower,
+      totalUnlinkedRefCount,
+      filteredUnlinkedRefCount,
+      treeContextMap: unlinkedTreeContextMap || new Map()
     });
   }
 
@@ -1907,6 +2255,33 @@ class Plugin extends AppPlugin {
       linesEl.className = 'tlr-lines';
 
       for (const line of g.lines || []) {
+        const ctx = opts?.treeContextMap?.get?.(line.guid) || null;
+        const ancestors = ctx?.ancestors || [];
+        const descendants = ctx?.descendants || [];
+
+        const blockEl = document.createElement('div');
+        blockEl.className = 'tlr-line-block';
+
+        if (ancestors.length > 0) {
+          const breadcrumbsEl = document.createElement('div');
+          breadcrumbsEl.className = 'tlr-breadcrumbs text-details';
+          
+          for (let i = ancestors.length - 1; i >= 0; i--) {
+            const anc = ancestors[i];
+            const ancEl = document.createElement('span');
+            ancEl.className = 'tlr-breadcrumb-item';
+            this.appendSegments(ancEl, anc.segments || [], query);
+            breadcrumbsEl.appendChild(ancEl);
+            if (i > 0) {
+              const sep = document.createElement('span');
+              sep.className = 'tlr-breadcrumb-sep';
+              sep.textContent = ' > ';
+              breadcrumbsEl.appendChild(sep);
+            }
+          }
+          blockEl.appendChild(breadcrumbsEl);
+        }
+
         const lineEl = document.createElement('button');
         lineEl.type = 'button';
         lineEl.className = 'tlr-line button-none button-minimal-hover';
@@ -1941,7 +2316,46 @@ class Plugin extends AppPlugin {
           lineEl.appendChild(ignoredFlag);
         }
 
-        linesEl.appendChild(lineEl);
+        blockEl.appendChild(lineEl);
+
+        if (descendants.length > 0) {
+          const descEl = document.createElement('div');
+          descEl.className = 'tlr-descendants';
+          
+          // We need to calculate relative depth
+          // Since descendants are in pre-order traversal and have parent_guid, we can compute depths.
+          const depthMap = new Map();
+          depthMap.set(line.guid, 0);
+
+          for (const desc of descendants) {
+            const parentGuid = desc.parent_guid || line.guid;
+            const parentDepth = depthMap.get(parentGuid) ?? 0;
+            const depth = parentDepth + 1;
+            depthMap.set(desc.guid, depth);
+
+            const dEl = document.createElement('div');
+            dEl.className = 'tlr-descendant-line text-details';
+            dEl.style.paddingLeft = `${depth * 16}px`;
+
+            const dPrefix = this.getLinePrefix(desc);
+            if (dPrefix) {
+              const dp = document.createElement('span');
+              dp.className = 'tlr-prefix';
+              dp.textContent = dPrefix;
+              dEl.appendChild(dp);
+            }
+
+            const dContent = document.createElement('span');
+            dContent.className = 'tlr-line-content';
+            this.appendSegments(dContent, desc.segments || [], query);
+            dEl.appendChild(dContent);
+
+            descEl.appendChild(dEl);
+          }
+          blockEl.appendChild(descEl);
+        }
+
+        linesEl.appendChild(blockEl);
       }
 
       groupEl.appendChild(header);
@@ -1955,6 +2369,171 @@ class Plugin extends AppPlugin {
       note.textContent = `Showing first ${maxResults} matches.`;
       container.appendChild(note);
     }
+  }
+
+  appendUnlinkedReferenceSection(container, groups, opts) {
+    if (!container) return;
+
+    const unlinkedError = opts?.unlinkedError || '';
+    const query = (opts?.query || '').trim();
+    const queryLower = (opts?.queryLower || '').trim();
+    const totalUnlinkedRefCount = opts?.totalUnlinkedRefCount || 0;
+    const filteredUnlinkedRefCount = opts?.filteredUnlinkedRefCount || 0;
+
+    const section = document.createElement('div');
+    section.className = 'tlr-unlinked-section';
+    if (this._unlinkedCollapsed) section.classList.add('tlr-unlinked-collapsed');
+
+    // Section header with toggle + count + Link All button
+    const sectionHeader = document.createElement('div');
+    sectionHeader.className = 'tlr-unlinked-header';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'tlr-unlinked-toggle-btn button-none button-small button-minimal-hover';
+    toggleBtn.dataset.action = 'toggle-unlinked';
+    toggleBtn.title = 'Collapse/expand unlinked references';
+
+    const caret = document.createElement('span');
+    caret.className = 'tlr-unlinked-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    toggleBtn.appendChild(caret);
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'tlr-section-title text-details';
+    titleEl.style.margin = '0';
+    titleEl.textContent = 'Unlinked References';
+    toggleBtn.appendChild(titleEl);
+
+    const refCount = groups.reduce((n, g) => n + (g?.lines?.length || 0), 0);
+
+    const countEl = document.createElement('span');
+    countEl.className = 'tlr-unlinked-count text-details';
+    countEl.textContent = refCount > 0 ? ` ${refCount}` : '';
+
+    sectionHeader.appendChild(toggleBtn);
+    sectionHeader.appendChild(countEl);
+
+    if (refCount > 1) {
+      const linkAllBtn = document.createElement('button');
+      linkAllBtn.type = 'button';
+      linkAllBtn.className = 'tlr-link-all-btn button-none button-small button-minimal-hover';
+      linkAllBtn.dataset.action = 'link-all-unlinked';
+      linkAllBtn.title = 'Convert all unlinked mentions to linked references';
+      linkAllBtn.textContent = 'Link All';
+      sectionHeader.appendChild(linkAllBtn);
+    }
+
+    section.appendChild(sectionHeader);
+
+    // Section body
+    const sectionBody = document.createElement('div');
+    sectionBody.className = 'tlr-unlinked-body';
+
+    if (unlinkedError) {
+      this.appendError(sectionBody, unlinkedError);
+    } else if (groups.length === 0) {
+      this.appendEmpty(sectionBody, queryLower ? 'No matching unlinked references.' : 'No unlinked references.');
+    } else {
+      for (const g of groups) {
+        const record = g.record || null;
+        const recordGuid = record?.guid || null;
+        if (!recordGuid) continue;
+
+        const groupEl = document.createElement('div');
+        groupEl.className = 'tlr-group';
+
+        const header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'tlr-group-header button-normal button-normal-hover';
+        header.dataset.action = 'open-record';
+        header.dataset.recordGuid = recordGuid;
+
+        const groupTitle = document.createElement('div');
+        groupTitle.className = 'tlr-group-title';
+        groupTitle.textContent = record.getName?.() || 'Untitled';
+
+        const groupMeta = document.createElement('div');
+        groupMeta.className = 'tlr-group-meta text-details';
+        groupMeta.textContent = `${g.lines?.length || 0}`;
+
+        header.appendChild(groupTitle);
+        header.appendChild(groupMeta);
+
+        const linesEl = document.createElement('div');
+        linesEl.className = 'tlr-lines';
+
+        for (const line of g.lines || []) {
+          const ctx = opts?.treeContextMap?.get?.(line.guid) || null;
+          const ancestors = ctx?.ancestors || [];
+
+          const blockEl = document.createElement('div');
+          blockEl.className = 'tlr-line-block';
+
+          if (ancestors.length > 0) {
+            const breadcrumbsEl = document.createElement('div');
+            breadcrumbsEl.className = 'tlr-breadcrumbs text-details';
+            for (let i = ancestors.length - 1; i >= 0; i--) {
+              const anc = ancestors[i];
+              const ancEl = document.createElement('span');
+              ancEl.className = 'tlr-breadcrumb-item';
+              this.appendSegments(ancEl, anc.segments || [], query);
+              breadcrumbsEl.appendChild(ancEl);
+              if (i > 0) {
+                const sep = document.createElement('span');
+                sep.className = 'tlr-breadcrumb-sep';
+                sep.textContent = ' > ';
+                breadcrumbsEl.appendChild(sep);
+              }
+            }
+            blockEl.appendChild(breadcrumbsEl);
+          }
+
+          const lineRow = document.createElement('div');
+          lineRow.className = 'tlr-unlinked-line-row';
+
+          const lineEl = document.createElement('button');
+          lineEl.type = 'button';
+          lineEl.className = 'tlr-line button-none button-minimal-hover';
+          lineEl.dataset.action = 'open-line';
+          lineEl.dataset.recordGuid = recordGuid;
+          lineEl.dataset.lineGuid = line.guid;
+
+          const prefix = this.getLinePrefix(line);
+          if (prefix) {
+            const p = document.createElement('span');
+            p.className = 'tlr-prefix';
+            p.textContent = prefix;
+            lineEl.appendChild(p);
+          }
+
+          const content = document.createElement('span');
+          content.className = 'tlr-line-content';
+          this.appendSegments(content, line.segments || [], query);
+          lineEl.appendChild(content);
+
+          const linkBtn = document.createElement('button');
+          linkBtn.type = 'button';
+          linkBtn.className = 'tlr-link-btn button-none button-small button-minimal-hover';
+          linkBtn.dataset.action = 'link-unlinked';
+          linkBtn.dataset.lineGuid = line.guid;
+          linkBtn.title = 'Convert this mention to a linked reference';
+          linkBtn.textContent = 'Link';
+
+          lineRow.appendChild(lineEl);
+          lineRow.appendChild(linkBtn);
+          blockEl.appendChild(lineRow);
+          linesEl.appendChild(blockEl);
+        }
+
+        groupEl.appendChild(header);
+        groupEl.appendChild(linesEl);
+        sectionBody.appendChild(groupEl);
+      }
+    }
+
+    section.appendChild(sectionBody);
+    container.appendChild(section);
   }
 
   getLinePrefix(line) {
@@ -2010,8 +2589,9 @@ class Plugin extends AppPlugin {
       }
 
       if (seg.type === 'ref') {
-        const guid = seg.text?.guid || null;
-        const title = seg.text?.title || (guid ? this.resolveRecordName(guid) : '') || '';
+        const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
+        const guid = textObj.guid || null;
+        const title = textObj.title || (guid ? this.resolveRecordName(guid) : '') || '[link]';
         out += title;
         continue;
       }
@@ -2151,14 +2731,15 @@ class Plugin extends AppPlugin {
       }
 
       if (seg.type === 'ref') {
-        const guid = seg.text?.guid || null;
+        const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
+        const guid = textObj.guid || null;
         if (!guid) continue;
         const el = document.createElement('span');
         el.className = 'tlr-seg-ref';
         el.dataset.action = 'open-ref';
         el.dataset.refGuid = guid;
 
-        const title = seg.text?.title || this.resolveRecordName(guid) || '[link]';
+        const title = textObj.title || this.resolveRecordName(guid) || '[link]';
         el.textContent = '';
         this.appendHighlightedText(el, title, query);
         container.appendChild(el);
@@ -2174,7 +2755,34 @@ class Plugin extends AppPlugin {
 
   resolveRecordName(guid) {
     const rec = this.data.getRecord?.(guid) || null;
-    return rec?.getName?.() || null;
+    const name = rec?.getName?.() || null;
+    if (name) return name;
+    const fromCache = this._collectionRecordNameCache?.get?.(guid) || null;
+    if (fromCache) return fromCache;
+    return `[Unknown: ${guid}]`;
+  }
+
+  async rebuildCollectionRecordNameCache() {
+    const cache = new Map();
+    try {
+      const collections = await this.data.getAllCollections?.() || [];
+      for (const col of collections) {
+        try {
+          const records = await col.getAllRecords?.() || [];
+          for (const r of records) {
+            const g = r?.guid || null;
+            if (!g) continue;
+            const n = r?.getName?.() || null;
+            if (n) cache.set(g, n);
+          }
+        } catch (e) {
+          // ignore individual collection errors
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    this._collectionRecordNameCache = cache;
   }
 
   formatMention(userGuid) {
@@ -2560,12 +3168,59 @@ class Plugin extends AppPlugin {
         flex: 0 0 auto;
       }
 
-      .tlr-lines { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+      .tlr-lines { margin-top: 8px; display: flex; flex-direction: column; gap: 12px; }
+
+      .tlr-line-block {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 100%;
+      }
+
+      .tlr-breadcrumbs {
+        font-size: 12px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        opacity: 0.8;
+        padding: 0 10px;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 2px;
+      }
+
+      .tlr-breadcrumb-item {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 200px;
+      }
+
+      .tlr-breadcrumb-sep {
+        opacity: 0.5;
+        margin: 0 2px;
+      }
+
+      .tlr-descendants {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding-top: 2px;
+      }
+
+      .tlr-descendant-line {
+        padding: 2px 10px;
+        font-size: 12px;
+        opacity: 0.8;
+        display: flex;
+        align-items: flex-start;
+      }
 
       .tlr-line {
         display: block;
         width: 100%;
-        padding: 8px 10px;
+        padding: 4px 10px;
         text-align: left;
         color: var(--text, inherit);
         line-height: 1.35;
@@ -2614,6 +3269,95 @@ class Plugin extends AppPlugin {
         border-radius: 4px;
         display: inline;
         line-height: inherit;
+      }
+
+      .tlr-unlinked-section {
+        margin-top: 4px;
+      }
+
+      .tlr-unlinked-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 28px;
+      }
+
+      .tlr-unlinked-toggle-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 4px;
+      }
+
+      .tlr-unlinked-caret {
+        width: 0;
+        height: 0;
+        border-top: 5px solid transparent;
+        border-bottom: 5px solid transparent;
+        border-left: 6px solid var(--text-muted, rgba(0, 0, 0, 0.6));
+        opacity: 0.85;
+        transform: rotate(90deg);
+        transition: transform 140ms ease;
+        flex: 0 0 auto;
+      }
+
+      .tlr-unlinked-collapsed .tlr-unlinked-caret {
+        transform: rotate(0deg);
+      }
+
+      .tlr-unlinked-count {
+        color: var(--text-muted, rgba(0, 0, 0, 0.6));
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .tlr-unlinked-body {
+        display: block;
+      }
+
+      .tlr-unlinked-collapsed .tlr-unlinked-body {
+        display: none;
+      }
+
+      .tlr-unlinked-line-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 4px;
+      }
+
+      .tlr-unlinked-line-row > .tlr-line {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .tlr-link-btn {
+        flex: 0 0 auto;
+        color: var(--ed-link-color, var(--link-color, var(--accent, inherit)));
+        font-size: 12px;
+        padding: 4px 8px;
+        white-space: nowrap;
+        opacity: 0.7;
+        transition: opacity 120ms ease;
+      }
+
+      .tlr-link-btn:hover {
+        opacity: 1;
+        text-decoration: underline;
+      }
+
+      .tlr-link-all-btn {
+        margin-left: auto;
+        color: var(--ed-link-color, var(--link-color, var(--accent, inherit)));
+        font-size: 12px;
+        padding: 2px 8px;
+        white-space: nowrap;
+        opacity: 0.7;
+        transition: opacity 120ms ease;
+      }
+
+      .tlr-link-all-btn:hover {
+        opacity: 1;
+        text-decoration: underline;
       }
 
       .tlr-loading .tlr-search-toggle { opacity: 0.6; cursor: default; }
