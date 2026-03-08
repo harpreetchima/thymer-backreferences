@@ -3,7 +3,7 @@
   "version": "0.4.8",
   "name": "Backreferences",
   "icon": "ti-link",
-  "description": "Backreferences footer (linked, property, and unlinked references)",
+  "description": "Backreferences footer (linked + property references)",
   "custom": {
     "maxResults": 200,
     "collapsedByDefault": false,

@@ -15,6 +15,18 @@ class Plugin extends AppPlugin {
     this._legacyStorageKeyPropGroupCollapsed = null;
     this._propGroupCollapsed = this.loadPropGroupCollapsedSetting();
 
+    this._storageKeyRecordGroupCollapsed = 'thymer_backreferences_record_group_collapsed_v1';
+    this._recordGroupCollapsed = this.loadRecordGroupCollapsedSetting();
+
+    this._storageKeyPropertyRefsCollapsed = 'thymer_backreferences_property_refs_collapsed_v1';
+    this._propertyRefsCollapsed = this.loadBoolSetting(this._storageKeyPropertyRefsCollapsed, false);
+
+    this._storageKeyLinkedRefsCollapsed = 'thymer_backreferences_linked_refs_collapsed_v1';
+    this._linkedRefsCollapsed = this.loadBoolSetting(this._storageKeyLinkedRefsCollapsed, false);
+
+    this._storageKeyUnlinkedCollapsed = 'thymer_backreferences_unlinked_collapsed_v1';
+    this._unlinkedCollapsed = this.loadBoolSetting(this._storageKeyUnlinkedCollapsed, false);
+
     this._defaultSortBy = 'page_last_edited';
     this._defaultSortDir = 'desc';
     this._storageKeySortByRecord = 'thymer_backreferences_sort_by_record_v1';
@@ -197,10 +209,7 @@ class Plugin extends AppPlugin {
         searchToggleEl: null,
         searchWrapEl: null,
         searchInputEl: null,
-        chipsRowEl: null,
         searchQuery: '',
-        searchTyped: '',
-        searchPhrases: [],
         searchOpen: false,
         emptyStateExpanded: false,
         linkedContextByLine: new Map(),
@@ -241,10 +250,7 @@ class Plugin extends AppPlugin {
       searchToggleEl: null,
       searchWrapEl: null,
       searchInputEl: null,
-      chipsRowEl: null,
       searchQuery: '',
-      searchTyped: '',
-      searchPhrases: [],
       searchOpen: false,
       emptyStateExpanded: false,
       linkedContextByLine: new Map(),
@@ -412,50 +418,10 @@ class Plugin extends AppPlugin {
     input.className = 'tlr-search-input query-input--field form-input';
     input.type = 'text';
     input.name = 'backreferences-filter';
-    input.placeholder = 'Filter... (Enter to pin)';
+    input.placeholder = 'Filter references...';
     input.autocomplete = 'off';
     input.spellcheck = false;
-    input.value = state.searchTyped || '';
-
-    const chipsRow = document.createElement('div');
-    chipsRow.className = 'tlr-chips-row';
-    chipsRow.dataset.role = 'chips';
-
-    const rebuildChips = () => {
-      chipsRow.innerHTML = '';
-      const phrases = state.searchPhrases || [];
-      for (let i = 0; i < phrases.length; i++) {
-        const chip = document.createElement('span');
-        chip.className = 'tlr-chip';
-        const label = document.createElement('span');
-        label.className = 'tlr-chip-label';
-        label.textContent = phrases[i];
-        const remove = document.createElement('button');
-        remove.type = 'button';
-        remove.className = 'tlr-chip-remove button-none';
-        remove.dataset.action = 'remove-chip';
-        remove.dataset.chipIndex = i;
-        remove.title = `Remove "${phrases[i]}"`;
-        remove.textContent = '×';
-        chip.appendChild(label);
-        chip.appendChild(remove);
-        chipsRow.appendChild(chip);
-      }
-      chipsRow.style.display = phrases.length > 0 ? 'flex' : 'none';
-    };
-
-    const commitChip = () => {
-      const val = input.value.trim();
-      if (!val) return;
-      if (!Array.isArray(state.searchPhrases)) state.searchPhrases = [];
-      if (!state.searchPhrases.includes(val)) {
-        state.searchPhrases = [...state.searchPhrases, val];
-        rebuildChips();
-      }
-      input.value = '';
-      state.searchTyped = '';
-      this.renderFromCache(state);
-    };
+    input.value = state.searchQuery || '';
 
     const stopKeys = (e) => {
       e.stopPropagation();
@@ -464,19 +430,12 @@ class Plugin extends AppPlugin {
 
     input.addEventListener('keydown', (e) => {
       stopKeys(e);
-      if (e.key === 'Enter') {
+      if (e.key === 'Escape') {
         e.preventDefault();
-        commitChip();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        if (input.value.trim()) {
+        const q = (state.searchQuery || '').trim();
+        if (q) {
+          state.searchQuery = '';
           input.value = '';
-          state.searchTyped = '';
-          this.renderFromCache(state);
-        } else if ((state.searchPhrases || []).length > 0) {
-          state.searchPhrases = [];
-          state.searchTyped = '';
-          rebuildChips();
           this.renderFromCache(state);
         } else {
           this.setSearchOpen(state, false);
@@ -484,28 +443,21 @@ class Plugin extends AppPlugin {
       }
     });
 
-    input.addEventListener('keypress', stopKeys);
-    input.addEventListener('keyup', stopKeys);
-
     input.addEventListener('input', () => {
-      state.searchTyped = input.value;
+      state.searchQuery = input.value;
       this.renderFromCache(state);
     });
-
-    rebuildChips();
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'tlr-search-clear button-none button-small button-minimal-hover';
     clearBtn.type = 'button';
     clearBtn.dataset.action = 'clear-search';
-    clearBtn.title = 'Clear all filters';
-    clearBtn.textContent = '×';
+    clearBtn.title = 'Clear';
+    clearBtn.textContent = 'x';
 
     searchWrap.appendChild(searchIcon);
     searchWrap.appendChild(input);
     searchWrap.appendChild(clearBtn);
-
-    state._rebuildChips = rebuildChips;
 
     const sortWrap = document.createElement('div');
     sortWrap.className = 'tlr-sort-wrap';
@@ -548,7 +500,6 @@ class Plugin extends AppPlugin {
     body.dataset.role = 'body';
 
     root.appendChild(header);
-    root.appendChild(chipsRow);
     root.appendChild(body);
 
     root.addEventListener('click', (e) => this.handleFooterClick(e));
@@ -557,7 +508,6 @@ class Plugin extends AppPlugin {
     root.classList.toggle('tlr-search-open', state.searchOpen === true);
     root.classList.toggle('tlr-sort-open', state.sortMenuOpen === true);
 
-    state.chipsRowEl = chipsRow;
     state.sortToggleEl = sortToggle;
     state.sortMenuEl = sortMenu;
     state.searchToggleEl = searchToggle;
@@ -639,14 +589,12 @@ class Plugin extends AppPlugin {
 
     if (action === 'clear-search') {
       if (!state) return;
-      const hasTyped = (state.searchTyped || '').trim().length > 0;
-      const hasChips = (state.searchPhrases || []).length > 0;
-      if (hasTyped || hasChips) {
-        state.searchTyped = '';
-        state.searchPhrases = [];
+      const q = (state.searchQuery || '').trim();
+      if (q) {
+        state.searchQuery = '';
         if (state.searchInputEl) state.searchInputEl.value = '';
-        if (typeof state._rebuildChips === 'function') state._rebuildChips();
         this.renderFromCache(state);
+        // Keep the input open for continued searching.
         this.setSearchOpen(state, true);
       } else {
         this.setSearchOpen(state, false);
@@ -654,14 +602,56 @@ class Plugin extends AppPlugin {
       return;
     }
 
-    if (action === 'remove-chip') {
-      if (!state) return;
-      const idx = parseInt(actionEl.dataset.chipIndex, 10);
-      if (!isNaN(idx) && Array.isArray(state.searchPhrases)) {
-        state.searchPhrases = state.searchPhrases.filter((_, i) => i !== idx);
-        if (typeof state._rebuildChips === 'function') state._rebuildChips();
-        this.renderFromCache(state);
+    if (action === 'toggle-property-refs') {
+      this._propertyRefsCollapsed = !this._propertyRefsCollapsed;
+      this.saveBoolSetting(this._storageKeyPropertyRefsCollapsed, this._propertyRefsCollapsed);
+      for (const s of this._panelStates.values()) {
+        const el = s.rootEl?.querySelector?.('[data-section="property"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._propertyRefsCollapsed);
       }
+      return;
+    }
+
+    if (action === 'toggle-linked-refs') {
+      this._linkedRefsCollapsed = !this._linkedRefsCollapsed;
+      this.saveBoolSetting(this._storageKeyLinkedRefsCollapsed, this._linkedRefsCollapsed);
+      for (const s of this._panelStates.values()) {
+        const el = s.rootEl?.querySelector?.('[data-section="linked"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._linkedRefsCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'toggle-unlinked-refs') {
+      this._unlinkedCollapsed = !this._unlinkedCollapsed;
+      this.saveBoolSetting(this._storageKeyUnlinkedCollapsed, this._unlinkedCollapsed);
+      for (const s of this._panelStates.values()) {
+        const el = s.rootEl?.querySelector?.('[data-section="unlinked"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._unlinkedCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'toggle-record-group') {
+      const guid = actionEl.dataset.recordGuid || '';
+      if (!guid) return;
+      const nextCollapsed = !this.isRecordGroupCollapsed(guid);
+      this.setRecordGroupCollapsed(guid, nextCollapsed);
+      const groupEl = actionEl.closest?.('.tlr-group') || null;
+      if (groupEl) groupEl.classList.toggle('tlr-group-collapsed', nextCollapsed);
+      return;
+    }
+
+    if (action === 'link-unlinked') {
+      if (!state) return;
+      const lineGuid = actionEl.dataset.lineGuid || null;
+      if (lineGuid) this.linkUnlinkedReference(state, lineGuid).catch(() => {});
+      return;
+    }
+
+    if (action === 'link-all-unlinked') {
+      if (!state) return;
+      this.linkAllUnlinkedReferences(state).catch(() => {});
       return;
     }
 
@@ -766,7 +756,7 @@ class Plugin extends AppPlugin {
     state.searchToggleEl?.setAttribute?.('aria-expanded', state.searchOpen === true ? 'true' : 'false');
 
     if (state.searchInputEl) {
-      state.searchInputEl.value = state.searchTyped || '';
+      state.searchInputEl.value = state.searchQuery || '';
       if (state.searchOpen === true) {
         setTimeout(() => {
           try {
@@ -1608,11 +1598,54 @@ class Plugin extends AppPlugin {
       propertyError = 'Error loading property references.';
     }
 
+    // --- Unlinked references ---
+    let unlinkedError = '';
+    let unlinkedGroups = [];
+
+    try {
+      const recordName = (record?.getName?.() || '').trim();
+      if (recordName) {
+        const alreadyLinkedLineGuids = new Set();
+        for (const g of linkedGroups) {
+          for (const line of g?.lines || []) {
+            if (line?.guid) alreadyLinkedLineGuids.add(line.guid);
+          }
+        }
+
+        const unlinkedSearchResult = await this.data.searchByQuery(recordName, maxResults);
+
+        if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
+
+        if (unlinkedSearchResult?.error) {
+          unlinkedError = unlinkedSearchResult.error;
+        } else {
+          const allLines = Array.isArray(unlinkedSearchResult?.lines) ? unlinkedSearchResult.lines : [];
+          const candidateLines = [];
+          for (const line of allLines) {
+            if (!line || !line.guid) continue;
+            if (alreadyLinkedLineGuids.has(line.guid)) continue;
+            const srcGuid = line.record?.guid || null;
+            if (!showSelf && srcGuid === recordGuid) continue;
+            if (this.lineHasRefToRecord(line, recordGuid)) continue;
+            if (!this.lineHasTextMentionOf(line, recordName)) continue;
+            candidateLines.push(line);
+          }
+          unlinkedGroups = this.groupBacklinkLines(candidateLines, recordGuid, { showSelf });
+        }
+      }
+    } catch (e) {
+      unlinkedError = 'Error loading unlinked references.';
+    }
+
+    if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
+
     state.lastResults = {
       propertyGroups,
       propertyError,
       linkedGroups,
       linkedError,
+      unlinkedGroups,
+      unlinkedError,
       maxResults
     };
     this.applyLiveSnapshot(state, this.buildResultsSnapshot(propertyGroups, linkedGroups));
@@ -2358,26 +2391,25 @@ class Plugin extends AppPlugin {
     state.bodyEl.appendChild(el);
   }
 
-  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, maxResults }) {
+  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, unlinkedGroups, unlinkedError, maxResults }) {
     if (!state?.bodyEl || !state?.countEl) return;
 
     const body = state.bodyEl;
     body.innerHTML = '';
 
-    const pinnedPhrases = (state.searchPhrases || []).map(p => p.toLowerCase()).filter(Boolean);
-    const typedPhrase = (state.searchTyped || '').trim().toLowerCase();
-    const phrases = typedPhrase ? [...pinnedPhrases, typedPhrase] : pinnedPhrases;
-    const query = phrases.join(' ');
-    const queryLower = query;
+    const query = (state.searchQuery || '').trim();
+    const queryLower = query.toLowerCase();
 
     const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
+    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
 
     const totalPropRefCount = propsAll.reduce((n, g) => n + (g?.records?.length || 0), 0);
     const totalLinkedRefCount = this.countLinkedReferences(linkedAll);
+    const totalUnlinkedRefCount = this.countLinkedReferences(unlinkedAll);
     const hasAnyErrors = Boolean(propertyError || linkedError);
-    const isEmptyWithoutFilter = !hasAnyErrors && totalPropRefCount === 0 && totalLinkedRefCount === 0;
-    const useCompactEmpty = isEmptyWithoutFilter && phrases.length === 0 && state.emptyStateExpanded !== true;
+    const isEmptyWithoutFilter = !hasAnyErrors && totalPropRefCount === 0 && totalLinkedRefCount === 0 && totalUnlinkedRefCount === 0;
+    const useCompactEmpty = isEmptyWithoutFilter && !queryLower && state.emptyStateExpanded !== true;
 
     if (useCompactEmpty) {
       state.rootEl?.classList?.add('tlr-empty-compact');
@@ -2390,31 +2422,29 @@ class Plugin extends AppPlugin {
 
     state.rootEl?.classList?.remove('tlr-empty-compact');
 
-    const totalUniquePages = new Set();
-    for (const g of propsAll) {
-      for (const r of g?.records || []) {
-        const guid = r?.guid || null;
-        if (guid) totalUniquePages.add(guid);
-      }
-    }
+    const totalUniqueLinkedPages = new Set();
     for (const g of linkedAll) {
       const guid = g?.record?.guid || null;
-      if (guid) totalUniquePages.add(guid);
+      if (guid) totalUniqueLinkedPages.add(guid);
+    }
+    const totalUniqueUnlinkedPages = new Set();
+    for (const g of unlinkedAll) {
+      const guid = g?.record?.guid || null;
+      if (guid) totalUniqueUnlinkedPages.add(guid);
     }
 
     let props = propsAll;
     let linked = linkedAll;
+    let unlinked = unlinkedAll;
 
-    if (phrases.length > 0) {
-      const allMatch = (text) => phrases.every(p => text.includes(p));
-
+    if (queryLower) {
       const nextProps = [];
       for (const g of propsAll) {
         const propertyName = (g?.propertyName || '').trim();
         if (!propertyName) continue;
         const recs = (g?.records || []).filter((r) => {
           const name = (r?.getName?.() || '').toLowerCase();
-          return allMatch(name);
+          return name.includes(queryLower);
         });
         if (recs.length > 0) nextProps.push({ propertyName, records: recs });
       }
@@ -2426,27 +2456,39 @@ class Plugin extends AppPlugin {
         const recordGuid = record?.guid || null;
         if (!recordGuid) continue;
         const lines = (g?.lines || []).filter((line) => {
-          const text = this.segmentsToPlainText(line?.segments || []).toLowerCase();
-          return allMatch(text);
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return text.toLowerCase().includes(queryLower);
         });
         if (lines.length > 0) nextLinked.push({ record, lines });
       }
       linked = nextLinked;
-    }
 
-    const filteredPropRefCount = props.reduce((n, g) => n + (g?.records?.length || 0), 0);
-    const filteredLinkedRefCount = this.countLinkedReferences(linked);
-
-    const filteredUniquePages = new Set();
-    for (const g of props) {
-      for (const r of g?.records || []) {
-        const guid = r?.guid || null;
-        if (guid) filteredUniquePages.add(guid);
+      const nextUnlinked = [];
+      for (const g of unlinkedAll) {
+        const record = g?.record || null;
+        const recordGuid = record?.guid || null;
+        if (!recordGuid) continue;
+        const lines = (g?.lines || []).filter((line) => {
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return text.toLowerCase().includes(queryLower);
+        });
+        if (lines.length > 0) nextUnlinked.push({ record, lines });
       }
+      unlinked = nextUnlinked;
     }
+
+    const filteredLinkedRefCount = this.countLinkedReferences(linked);
+    const filteredUnlinkedRefCount = this.countLinkedReferences(unlinked);
+
+    const filteredUniqueLinkedPages = new Set();
     for (const g of linked) {
       const guid = g?.record?.guid || null;
-      if (guid) filteredUniquePages.add(guid);
+      if (guid) filteredUniqueLinkedPages.add(guid);
+    }
+    const filteredUniqueUnlinkedPages = new Set();
+    for (const g of unlinked) {
+      const guid = g?.record?.guid || null;
+      if (guid) filteredUniqueUnlinkedPages.add(guid);
     }
 
     const sortSpec = {
@@ -2456,47 +2498,345 @@ class Plugin extends AppPlugin {
     const sortMetrics = this.computeRecordSortMetrics(props, linked);
     props = this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
     linked = this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
+    unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     const parts = [];
-    if (phrases.length > 0) {
+    if (queryLower) {
       const shortQuery = query.length > 24 ? `${query.slice(0, 24)}...` : query;
       parts.push(`Filter: "${shortQuery}"`);
-      if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
-      if (totalPropRefCount > 0) parts.push(`${filteredPropRefCount}/${totalPropRefCount} prop refs`);
-      if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} line refs`);
+      if (totalUniqueLinkedPages.size > 0) parts.push(`${filteredUniqueLinkedPages.size}/${totalUniqueLinkedPages.size} pages`);
+      if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} linked`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${filteredUnlinkedRefCount}/${totalUnlinkedRefCount} unlinked`);
     } else {
-      if (totalUniquePages.size > 0) parts.push(`${totalUniquePages.size} page${totalUniquePages.size === 1 ? '' : 's'}`);
-      if (totalPropRefCount > 0) parts.push(`${totalPropRefCount} prop ref${totalPropRefCount === 1 ? '' : 's'}`);
-      if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} line ref${totalLinkedRefCount === 1 ? '' : 's'}`);
+      if (totalUniqueLinkedPages.size > 0) parts.push(`${totalUniqueLinkedPages.size} page${totalUniqueLinkedPages.size === 1 ? '' : 's'}`);
+      if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} linked`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${totalUnlinkedRefCount} unlinked`);
     }
     state.countEl.textContent = parts.join(' | ');
 
-    this.appendSectionTitle(body, 'Property References');
-    if (propertyError) {
-      this.appendError(body, propertyError);
-    } else if (props.length === 0) {
-      this.appendEmpty(body, queryLower ? 'No matching property references.' : 'No property references.');
-    } else {
-      this.appendPropertyReferenceGroups(body, props, { query, state });
-    }
-
-    const divider = document.createElement('div');
-    divider.className = 'tlr-divider';
-    body.appendChild(divider);
-    this.appendSectionTitle(body, 'Linked References');
-
-    if (linkedError) {
-      this.appendError(body, linkedError);
-      return;
-    }
-
-    this.appendLinkedReferenceGroups(body, linked, {
-      state,
-      maxResults,
-      query,
-      totalLineCount: totalLinkedRefCount,
-      emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.'
+    // --- Property References section ---
+    const propBlock = this.buildSectionBlock({
+      sectionKey: 'property',
+      title: 'Property References',
+      count: props.reduce((n, g) => n + (g?.records?.length || 0), 0),
+      collapsed: this._propertyRefsCollapsed,
+      toggleAction: 'toggle-property-refs'
     });
+    body.appendChild(propBlock);
+    const propBody = propBlock.querySelector('.tlr-section-body');
+    if (propertyError) {
+      this.appendError(propBody, propertyError);
+    } else if (props.length === 0) {
+      this.appendEmpty(propBody, queryLower ? 'No matching property references.' : 'No property references.');
+    } else {
+      this.appendPropertyReferenceGroups(propBody, props, { query, state });
+    }
+
+    // --- Linked References section ---
+    const linkedBlock = this.buildSectionBlock({
+      sectionKey: 'linked',
+      title: 'Linked References',
+      count: filteredLinkedRefCount,
+      collapsed: this._linkedRefsCollapsed,
+      toggleAction: 'toggle-linked-refs'
+    });
+    body.appendChild(linkedBlock);
+    const linkedBody = linkedBlock.querySelector('.tlr-section-body');
+    if (linkedError) {
+      this.appendError(linkedBody, linkedError);
+    } else {
+      this.appendLinkedReferenceGroups(linkedBody, linked, {
+        state,
+        maxResults,
+        query,
+        totalLineCount: totalLinkedRefCount,
+        emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.'
+      });
+    }
+
+    // --- Unlinked References section ---
+    const unlinkedBlock = this.buildSectionBlock({
+      sectionKey: 'unlinked',
+      title: 'Unlinked References',
+      count: filteredUnlinkedRefCount,
+      collapsed: this._unlinkedCollapsed,
+      toggleAction: 'toggle-unlinked-refs',
+      extraHeaderContent: (filteredUnlinkedRefCount > 1) ? this.buildLinkAllButton() : null
+    });
+    body.appendChild(unlinkedBlock);
+    const unlinkedBody = unlinkedBlock.querySelector('.tlr-section-body');
+    if (unlinkedError) {
+      this.appendError(unlinkedBody, unlinkedError);
+    } else if (unlinked.length === 0) {
+      this.appendEmpty(unlinkedBody, queryLower ? 'No matching unlinked references.' : 'No unlinked references.');
+    } else {
+      this.appendUnlinkedReferenceGroups(unlinkedBody, unlinked, { query });
+    }
+  }
+
+  buildSectionBlock({ sectionKey, title, count, collapsed, toggleAction, extraHeaderContent }) {
+    const block = document.createElement('div');
+    block.className = 'tlr-section-block';
+    block.dataset.section = sectionKey || '';
+    if (collapsed) block.classList.add('tlr-section-collapsed');
+
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'tlr-section-header button-normal button-normal-hover';
+    header.dataset.action = toggleAction || '';
+
+    const caret = document.createElement('span');
+    caret.className = 'tlr-section-caret';
+    caret.setAttribute('aria-hidden', 'true');
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'tlr-section-title-text';
+    titleEl.textContent = title || '';
+
+    const countEl = document.createElement('span');
+    countEl.className = 'tlr-section-count text-details';
+    countEl.textContent = typeof count === 'number' ? `${count}` : '';
+
+    header.appendChild(caret);
+    header.appendChild(titleEl);
+    header.appendChild(countEl);
+
+    if (extraHeaderContent) {
+      header.appendChild(extraHeaderContent);
+    }
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'tlr-section-body';
+
+    block.appendChild(header);
+    block.appendChild(bodyEl);
+    return block;
+  }
+
+  buildLinkAllButton() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tlr-link-all-btn button-none button-small button-minimal-hover';
+    btn.dataset.action = 'link-all-unlinked';
+    btn.textContent = 'Link all';
+    btn.title = 'Create links for all unlinked references';
+    return btn;
+  }
+
+  appendUnlinkedReferenceGroups(container, groups, opts) {
+    if (!container) return;
+
+    const query = (opts?.query || '').trim();
+
+    for (const g of groups || []) {
+      const record = g.record || null;
+      const recordGuid = record?.guid || null;
+      if (!recordGuid) continue;
+
+      const isCollapsed = this.isRecordGroupCollapsed(recordGuid);
+
+      const groupEl = document.createElement('div');
+      groupEl.className = 'tlr-group';
+      if (isCollapsed) groupEl.classList.add('tlr-group-collapsed');
+
+      const header = document.createElement('button');
+      header.type = 'button';
+      header.className = 'tlr-group-header button-normal button-normal-hover';
+      header.dataset.action = 'toggle-record-group';
+      header.dataset.recordGuid = recordGuid;
+
+      const caret = document.createElement('span');
+      caret.className = 'tlr-group-caret';
+      caret.setAttribute('aria-hidden', 'true');
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'tlr-group-title';
+      titleEl.textContent = record.getName?.() || 'Untitled';
+
+      const meta = document.createElement('div');
+      meta.className = 'tlr-group-meta text-details';
+      meta.textContent = `${(g.lines || []).length}`;
+
+      header.appendChild(caret);
+      header.appendChild(titleEl);
+      header.appendChild(meta);
+
+      const linesEl = document.createElement('div');
+      linesEl.className = 'tlr-lines';
+
+      for (const line of g.lines || []) {
+        const lineEl = document.createElement('div');
+        lineEl.className = 'tlr-line-entry';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tlr-line button-none button-minimal-hover';
+        btn.dataset.action = 'open-line';
+        btn.dataset.recordGuid = recordGuid;
+        btn.dataset.lineGuid = line.guid;
+        this.appendLineText(btn, line, query);
+
+        const linkBtn = document.createElement('button');
+        linkBtn.type = 'button';
+        linkBtn.className = 'tlr-link-btn button-none button-small button-minimal-hover';
+        linkBtn.dataset.action = 'link-unlinked';
+        linkBtn.dataset.lineGuid = line.guid;
+        linkBtn.textContent = 'Link';
+        linkBtn.title = 'Create a link for this reference';
+
+        const mainRow = document.createElement('div');
+        mainRow.className = 'tlr-line-main';
+        mainRow.appendChild(btn);
+        mainRow.appendChild(linkBtn);
+
+        lineEl.appendChild(mainRow);
+        linesEl.appendChild(lineEl);
+      }
+
+      groupEl.appendChild(header);
+      groupEl.appendChild(linesEl);
+      container.appendChild(groupEl);
+    }
+  }
+
+  lineHasRefToRecord(line, recordGuid) {
+    for (const seg of line?.segments || []) {
+      if (seg?.type !== 'ref') continue;
+      if ((seg?.text?.guid || '') === recordGuid) return true;
+    }
+    return false;
+  }
+
+  lineHasTextMentionOf(line, name) {
+    const nameLower = name.toLowerCase();
+    for (const seg of line?.segments || []) {
+      if (seg?.type === 'text' || seg?.type === 'bold' || seg?.type === 'italic' || seg?.type === 'code') {
+        if (typeof seg.text === 'string' && seg.text.toLowerCase().includes(nameLower)) return true;
+      }
+    }
+    return false;
+  }
+
+  async linkUnlinkedReference(state, lineGuid) {
+    const targetRecordGuid = state?.recordGuid || null;
+    if (!targetRecordGuid || !lineGuid) return;
+
+    const groups = state?.lastResults?.unlinkedGroups || [];
+    let targetLine = null;
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if ((line?.guid || '') === lineGuid) { targetLine = line; break; }
+      }
+      if (targetLine) break;
+    }
+    if (!targetLine) return;
+
+    const record = this.data.getRecord?.(targetRecordGuid) || null;
+    const recordName = (record?.getName?.() || '').trim();
+    if (!recordName) return;
+
+    const segments = targetLine?.segments || [];
+    const newSegments = this.buildReplacedSegments(segments, recordName, targetRecordGuid);
+    try {
+      await targetLine.setSegments(newSegments);
+      this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'link-unlinked' });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  async linkAllUnlinkedReferences(state) {
+    const targetRecordGuid = state?.recordGuid || null;
+    if (!targetRecordGuid) return;
+
+    const record = this.data.getRecord?.(targetRecordGuid) || null;
+    const recordName = (record?.getName?.() || '').trim();
+    if (!recordName) return;
+
+    const groups = state?.lastResults?.unlinkedGroups || [];
+    const tasks = [];
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if (!line?.guid) continue;
+        const newSegments = this.buildReplacedSegments(line.segments || [], recordName, targetRecordGuid);
+        tasks.push(line.setSegments(newSegments).catch(() => {}));
+      }
+    }
+    await Promise.all(tasks);
+    this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'link-all-unlinked' });
+  }
+
+  buildReplacedSegments(segments, recordName, recordGuid) {
+    const result = [];
+    const nameLower = recordName.toLowerCase();
+    for (const seg of segments || []) {
+      if ((seg?.type === 'text' || seg?.type === 'bold' || seg?.type === 'italic' || seg?.type === 'code') && typeof seg.text === 'string') {
+        const textLower = seg.text.toLowerCase();
+        const idx = textLower.indexOf(nameLower);
+        if (idx >= 0) {
+          if (idx > 0) result.push({ type: seg.type, text: seg.text.slice(0, idx) });
+          result.push({ type: 'ref', text: { guid: recordGuid } });
+          const after = seg.text.slice(idx + recordName.length);
+          if (after) result.push({ type: seg.type, text: after });
+          continue;
+        }
+      }
+      result.push(seg);
+    }
+    return result;
+  }
+
+  isRecordGroupCollapsed(guid) {
+    if (!guid || !this._recordGroupCollapsed) return false;
+    return this._recordGroupCollapsed[guid] === true;
+  }
+
+  setRecordGroupCollapsed(guid, collapsed) {
+    if (!guid) return;
+    if (!this._recordGroupCollapsed) this._recordGroupCollapsed = {};
+    if (collapsed) {
+      this._recordGroupCollapsed[guid] = true;
+    } else {
+      delete this._recordGroupCollapsed[guid];
+    }
+    this.saveRecordGroupCollapsedSetting();
+  }
+
+  loadRecordGroupCollapsedSetting() {
+    try {
+      const raw = localStorage.getItem(this._storageKeyRecordGroupCollapsed);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {
+      // ignore
+    }
+    return {};
+  }
+
+  saveRecordGroupCollapsedSetting() {
+    try {
+      localStorage.setItem(this._storageKeyRecordGroupCollapsed, JSON.stringify(this._recordGroupCollapsed || {}));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  loadBoolSetting(key, defaultValue) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (e) {
+      // ignore
+    }
+    return defaultValue === true;
+  }
+
+  saveBoolSetting(key, value) {
+    try {
+      localStorage.setItem(key, value ? '1' : '0');
+    } catch (e) {
+      // ignore
+    }
   }
 
   appendSectionTitle(container, text) {
@@ -2638,14 +2978,21 @@ class Plugin extends AppPlugin {
       const recordGuid = record?.guid || null;
       if (!recordGuid) continue;
 
+      const isCollapsed = this.isRecordGroupCollapsed(recordGuid);
+
       const groupEl = document.createElement('div');
       groupEl.className = 'tlr-group';
+      if (isCollapsed) groupEl.classList.add('tlr-group-collapsed');
 
       const header = document.createElement('button');
       header.type = 'button';
       header.className = 'tlr-group-header button-normal button-normal-hover';
-      header.dataset.action = 'open-record';
+      header.dataset.action = 'toggle-record-group';
       header.dataset.recordGuid = recordGuid;
+
+      const caret = document.createElement('span');
+      caret.className = 'tlr-group-caret';
+      caret.setAttribute('aria-hidden', 'true');
 
       const title = document.createElement('div');
       title.className = 'tlr-group-title';
@@ -2655,6 +3002,7 @@ class Plugin extends AppPlugin {
       meta.className = 'tlr-group-meta text-details';
       meta.textContent = `${(g.lines || []).length}`;
 
+      header.appendChild(caret);
       header.appendChild(title);
       header.appendChild(meta);
 
@@ -2941,55 +3289,39 @@ class Plugin extends AppPlugin {
     const s = typeof text === 'string' ? text : '';
     if (!s) return;
 
-    const phrases = (typeof query === 'string' ? query.trim() : '')
-      .split(/\s+/).filter(Boolean).map(p => p.toLowerCase());
-
-    if (phrases.length === 0) {
+    const q = typeof query === 'string' ? query.trim() : '';
+    if (!q) {
       container.appendChild(document.createTextNode(s));
       return;
     }
 
     const hayLower = s.toLowerCase();
-
-    // Build merged highlight ranges for all phrases.
-    const ranges = [];
-    for (const needle of phrases) {
-      let i = 0;
-      while (i < s.length) {
-        const pos = hayLower.indexOf(needle, i);
-        if (pos === -1) break;
-        ranges.push([pos, pos + needle.length]);
-        i = pos + needle.length;
-      }
-    }
-
-    if (ranges.length === 0) {
+    const needleLower = q.toLowerCase();
+    if (!needleLower) {
       container.appendChild(document.createTextNode(s));
       return;
     }
 
-    // Sort and merge overlapping ranges.
-    ranges.sort((a, b) => a[0] - b[0]);
-    const merged = [ranges[0]];
-    for (let i = 1; i < ranges.length; i++) {
-      const last = merged[merged.length - 1];
-      if (ranges[i][0] <= last[1]) {
-        last[1] = Math.max(last[1], ranges[i][1]);
-      } else {
-        merged.push(ranges[i]);
-      }
-    }
-
     let idx = 0;
-    for (const [start, end] of merged) {
-      if (start > idx) container.appendChild(document.createTextNode(s.slice(idx, start)));
+    while (idx < s.length) {
+      const next = hayLower.indexOf(needleLower, idx);
+      if (next === -1) break;
+
+      if (next > idx) {
+        container.appendChild(document.createTextNode(s.slice(idx, next)));
+      }
+
       const mark = document.createElement('mark');
       mark.className = 'tlr-search-mark';
-      mark.textContent = s.slice(start, end);
+      mark.textContent = s.slice(next, next + needleLower.length);
       container.appendChild(mark);
-      idx = end;
+
+      idx = next + needleLower.length;
     }
-    if (idx < s.length) container.appendChild(document.createTextNode(s.slice(idx)));
+
+    if (idx < s.length) {
+      container.appendChild(document.createTextNode(s.slice(idx)));
+    }
   }
 
   appendSegments(container, segments, query) {
@@ -3696,44 +4028,85 @@ class Plugin extends AppPlugin {
       .tlr-loading .tlr-search-toggle { opacity: 0.6; cursor: default; }
       .tlr-loading .tlr-sort-toggle { opacity: 0.6; cursor: default; }
 
-      .tlr-chips-row {
-        display: none;
-        flex-wrap: wrap;
+      /* Collapsible section blocks */
+      .tlr-section-block { margin-bottom: 4px; }
+      .tlr-section-header {
+        display: flex;
+        align-items: center;
         gap: 4px;
-        padding: 4px 12px 6px;
-        align-items: center;
-      }
-
-      .tlr-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 3px;
-        padding: 2px 6px 2px 8px;
-        border-radius: 12px;
-        background: var(--accent, rgba(0,0,0,0.12));
-        color: var(--accent-contrast, inherit);
-        font-size: 11px;
-        line-height: 1.4;
-        max-width: 180px;
-        overflow: hidden;
-      }
-
-      .tlr-chip-label {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .tlr-chip-remove {
-        flex: 0 0 auto;
-        font-size: 13px;
-        line-height: 1;
-        opacity: 0.7;
-        padding: 0 2px;
+        width: 100%;
+        padding: 4px 0;
+        font-size: 0.8em;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
         cursor: pointer;
+        user-select: none;
       }
+      .tlr-section-title-text { flex: 1; text-align: left; }
+      .tlr-section-count { margin-left: 2px; }
+      .tlr-section-caret {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        transition: transform 0.15s;
+      }
+      .tlr-section-caret::before {
+        content: '';
+        display: block;
+        width: 0;
+        height: 0;
+        margin: 4px auto 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid currentColor;
+        transition: transform 0.15s;
+      }
+      .tlr-section-collapsed .tlr-section-caret::before { transform: rotate(-90deg); }
+      .tlr-section-body { overflow: hidden; }
+      .tlr-section-collapsed .tlr-section-body { display: none; }
 
-      .tlr-chip-remove:hover { opacity: 1; }
+      /* Collapsible group headers (linked + unlinked per-page) */
+      .tlr-group-header {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .tlr-group-caret {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+      }
+      .tlr-group-caret::before {
+        content: '';
+        display: block;
+        width: 0;
+        height: 0;
+        margin: 3px auto 0;
+        border-left: 3px solid transparent;
+        border-right: 3px solid transparent;
+        border-top: 4px solid currentColor;
+        transition: transform 0.15s;
+      }
+      .tlr-group-collapsed .tlr-group-caret::before { transform: rotate(-90deg); }
+      .tlr-group-collapsed .tlr-lines { display: none; }
+
+      /* Link buttons for unlinked references */
+      .tlr-link-btn {
+        flex-shrink: 0;
+        margin-left: 4px;
+        font-size: 0.75em;
+        opacity: 0;
+        transition: opacity 0.1s;
+      }
+      .tlr-line-main:hover .tlr-link-btn { opacity: 1; }
+      .tlr-link-all-btn {
+        font-size: 0.75em;
+        margin-left: auto;
+        flex-shrink: 0;
+      }
 
       @media (max-width: 760px) {
         .tlr-header {
