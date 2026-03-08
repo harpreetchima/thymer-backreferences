@@ -2895,16 +2895,26 @@ class Plugin extends AppPlugin {
 
   buildReplacedSegments(segments, recordName, recordGuid) {
     const result = [];
-    const nameLower = recordName.toLowerCase();
+    const escaped = recordName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Word-start: must be at beginning of string or after a non-alphanumeric char
+    const re = new RegExp(`(?:^|(?<=[^a-zA-Z0-9]))${escaped}`, 'gi');
     for (const seg of segments || []) {
       if ((seg?.type === 'text' || seg?.type === 'bold' || seg?.type === 'italic' || seg?.type === 'code') && typeof seg.text === 'string') {
-        const textLower = seg.text.toLowerCase();
-        const idx = textLower.indexOf(nameLower);
-        if (idx >= 0) {
-          if (idx > 0) result.push({ type: seg.type, text: seg.text.slice(0, idx) });
+        const text = seg.text;
+        let lastIndex = 0;
+        let matched = false;
+        let m;
+        re.lastIndex = 0;
+        while ((m = re.exec(text)) !== null) {
+          matched = true;
+          const start = m.index;
+          if (start > lastIndex) result.push({ type: seg.type, text: text.slice(lastIndex, start) });
           result.push({ type: 'ref', text: { guid: recordGuid } });
-          const after = seg.text.slice(idx + recordName.length);
-          if (after) result.push({ type: seg.type, text: after });
+          lastIndex = start + recordName.length;
+          re.lastIndex = lastIndex;
+        }
+        if (matched) {
+          if (lastIndex < text.length) result.push({ type: seg.type, text: text.slice(lastIndex) });
           continue;
         }
       }
