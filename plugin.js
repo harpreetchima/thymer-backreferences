@@ -2467,10 +2467,10 @@ class Plugin extends AppPlugin {
     const phrases = typedPhrase ? [...pinnedPhrases, typedPhrase] : [...pinnedPhrases];
     const hasFilter = phrases.length > 0;
 
-    // AND-match helper: text must contain ALL phrases
+    // AND-match helper: every phrase must appear at a word boundary (word-start)
+    const wordStartRe = (p) => new RegExp(`(?:^|[^a-z0-9])${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
     const allMatch = (text) => {
-      const t = text.toLowerCase();
-      return phrases.every((p) => t.includes(p));
+      return phrases.every((p) => wordStartRe(p).test(text));
     };
 
     // For compact empty state, use first phrase or empty string for display
@@ -3415,9 +3415,9 @@ class Plugin extends AppPlugin {
     const s = typeof text === 'string' ? text : '';
     if (!s) return;
 
-    // Support space-separated phrases: highlight each one independently
+    // Support space-separated phrases: highlight each at word-start positions only
     const rawPhrases = typeof query === 'string'
-      ? query.split(' ').map((p) => p.trim().toLowerCase()).filter(Boolean)
+      ? query.split(' ').map((p) => p.trim()).filter(Boolean)
       : [];
 
     if (rawPhrases.length === 0) {
@@ -3425,17 +3425,17 @@ class Plugin extends AppPlugin {
       return;
     }
 
-    const hayLower = s.toLowerCase();
-
-    // Collect all match ranges for all phrases
+    // Collect all word-start match ranges for all phrases
     const ranges = [];
     for (const phrase of rawPhrases) {
-      let idx = 0;
-      while (idx < s.length) {
-        const next = hayLower.indexOf(phrase, idx);
-        if (next === -1) break;
-        ranges.push([next, next + phrase.length]);
-        idx = next + phrase.length;
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(?:^|(?<=[^a-zA-Z0-9]))${escaped}`, 'gi');
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        // m[0] may include a leading non-word char from the lookbehind alternative
+        // Since we use lookbehind, m.index is the start of phrase itself
+        const start = m.index;
+        ranges.push([start, start + phrase.length]);
       }
     }
 
