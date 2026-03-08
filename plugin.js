@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.6';
+    this._version = '0.4.7';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -2641,20 +2641,17 @@ class Plugin extends AppPlugin {
     const controls = document.createElement('div');
     controls.className = 'tlr-line-actions text-details';
 
-    const primary = document.createElement('div');
-    primary.className = 'tlr-line-actions-primary';
-
-    const nav = document.createElement('div');
-    nav.className = 'tlr-line-actions-nav';
+    const group = document.createElement('div');
+    group.className = 'tlr-line-actions-group';
 
     if (ctx?.showMoreContext === true) {
-      nav.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
+      group.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
         icon: 'up',
         label: this.getAboveToggleLabel(ctx),
         disabled: ctx?.loaded === true && this.getAvailableAboveContextCount(ctx) === 0,
         active: (ctx?.siblingAboveCount || 0) > 0
       }));
-      nav.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, {
+      group.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, {
         icon: 'down',
         label: this.getBelowToggleLabel(ctx),
         disabled: ctx?.loaded === true && this.getAvailableBelowContextCount(ctx) === 0,
@@ -2662,15 +2659,14 @@ class Plugin extends AppPlugin {
       }));
     }
 
-    primary.appendChild(this.buildLinkedContextButton('toggle-context-more', lineGuid, {
+    group.appendChild(this.buildLinkedContextButton('toggle-context-more', lineGuid, {
       icon: 'toggle',
       label: ctx?.showMoreContext === true ? 'Hide context' : 'Show more context',
       disabled: ctx?.showMoreContext !== true && ctx?.loaded === true && !this.hasAnyLinkedContext(ctx),
       active: ctx?.showMoreContext === true
     }));
 
-    controls.appendChild(primary);
-    if (nav.childElementCount > 0) controls.appendChild(nav);
+    controls.appendChild(group);
     return controls;
   }
 
@@ -3456,14 +3452,7 @@ class Plugin extends AppPlugin {
         padding: 0 10px 2px;
       }
 
-      .tlr-line-actions-primary {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        flex: 0 0 auto;
-      }
-
-      .tlr-line-actions-nav {
+      .tlr-line-actions-group {
         display: flex;
         align-items: center;
         gap: 4px;
