@@ -321,6 +321,7 @@ class Plugin extends AppPlugin {
       state.rootEl = this.buildFooterRoot(state);
       state.bodyEl = state.rootEl.querySelector('[data-role="body"]');
       state.countEl = state.rootEl.querySelector('[data-role="count"]');
+      state.chipsRowEl = state.rootEl.querySelector('.tlr-chips-row') || null;
       this.setSearchOpen(state, state.searchOpen === true);
       this.renderSortMenu(state);
       this.syncSortControlState(state);
@@ -2596,7 +2597,7 @@ class Plugin extends AppPlugin {
     if (propertyError) {
       this.appendError(propBody, propertyError);
     } else if (props.length === 0) {
-      this.appendEmpty(propBody, queryLower ? 'No matching property references.' : 'No property references.');
+      this.appendEmpty(propBody, hasFilter ? 'No matching property references.' : 'No property references.');
     } else {
       this.appendPropertyReferenceGroups(propBody, props, { query, state });
     }
@@ -2619,7 +2620,7 @@ class Plugin extends AppPlugin {
         maxResults,
         query,
         totalLineCount: totalLinkedRefCount,
-        emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.'
+        emptyMessage: hasFilter ? 'No matching linked references.' : 'No linked references.'
       });
     }
 
