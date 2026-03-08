@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.0';
+    this._version = '0.4.1';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -14,6 +14,12 @@ class Plugin extends AppPlugin {
     this._storageKeyPropGroupCollapsed = 'thymer_backreferences_prop_group_collapsed_v2';
     this._legacyStorageKeyPropGroupCollapsed = null;
     this._propGroupCollapsed = this.loadPropGroupCollapsedSetting();
+
+    this._storageKeyPropertyRefsCollapsed = 'thymer_backreferences_property_refs_collapsed_v1';
+    this._propertyRefsCollapsed = this.loadBoolSetting(this._storageKeyPropertyRefsCollapsed, false);
+
+    this._storageKeyLinkedRefsCollapsed = 'thymer_backreferences_linked_refs_collapsed_v1';
+    this._linkedRefsCollapsed = this.loadBoolSetting(this._storageKeyLinkedRefsCollapsed, false);
 
     this._storageKeyUnlinkedCollapsed = 'thymer_backreferences_unlinked_collapsed_v1';
     this._unlinkedCollapsed = this.loadUnlinkedCollapsedSetting();
@@ -541,13 +547,35 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (action === 'toggle-property-refs') {
+      this._propertyRefsCollapsed = !this._propertyRefsCollapsed;
+      this.saveBoolSetting(this._storageKeyPropertyRefsCollapsed, this._propertyRefsCollapsed);
+      for (const s of this._panelStates.values()) {
+        if (!s?.rootEl) continue;
+        const el = s.rootEl.querySelector?.('.tlr-section-block[data-section="property"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._propertyRefsCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'toggle-linked-refs') {
+      this._linkedRefsCollapsed = !this._linkedRefsCollapsed;
+      this.saveBoolSetting(this._storageKeyLinkedRefsCollapsed, this._linkedRefsCollapsed);
+      for (const s of this._panelStates.values()) {
+        if (!s?.rootEl) continue;
+        const el = s.rootEl.querySelector?.('.tlr-section-block[data-section="linked"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._linkedRefsCollapsed);
+      }
+      return;
+    }
+
     if (action === 'toggle-unlinked') {
       this._unlinkedCollapsed = !this._unlinkedCollapsed;
       this.saveUnlinkedCollapsedSetting(this._unlinkedCollapsed);
       for (const s of this._panelStates.values()) {
         if (!s?.rootEl) continue;
-        const unlinkedSection = s.rootEl.querySelector?.('.tlr-unlinked-section') || null;
-        if (unlinkedSection) unlinkedSection.classList.toggle('tlr-unlinked-collapsed', this._unlinkedCollapsed);
+        const el = s.rootEl.querySelector?.('.tlr-section-block[data-section="unlinked"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._unlinkedCollapsed);
       }
       return;
     }
@@ -959,6 +987,25 @@ class Plugin extends AppPlugin {
     try {
       const arr = Array.from(this._propGroupCollapsed || []);
       localStorage.setItem(this._storageKeyPropGroupCollapsed, JSON.stringify(arr));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  loadBoolSetting(key, defaultValue) {
+    try {
+      const v = localStorage.getItem(key);
+      if (v === '1') return true;
+      if (v === '0') return false;
+    } catch (e) {
+      // ignore
+    }
+    return defaultValue === true;
+  }
+
+  saveBoolSetting(key, value) {
+    try {
+      localStorage.setItem(key, value ? '1' : '0');
     } catch (e) {
       // ignore
     }
@@ -2077,54 +2124,122 @@ class Plugin extends AppPlugin {
     }
     state.countEl.textContent = parts.join(' | ');
 
-    this.appendSectionTitle(body, 'Property References');
+    // --- Property References Section ---
+    const propBlock = this.buildSectionBlock({
+      sectionKey: 'property',
+      title: 'Property References',
+      count: filteredPropRefCount,
+      collapsed: this._propertyRefsCollapsed,
+      toggleAction: 'toggle-property-refs'
+    });
+    body.appendChild(propBlock);
+    const propBody = propBlock.querySelector('.tlr-section-body');
     if (propertyError) {
-      this.appendError(body, propertyError);
+      this.appendError(propBody, propertyError);
     } else if (props.length === 0) {
-      this.appendEmpty(body, queryLower ? 'No matching property references.' : 'No property references.');
+      this.appendEmpty(propBody, queryLower ? 'No matching property references.' : 'No property references.');
     } else {
-      this.appendPropertyReferenceGroups(body, props, { query });
+      this.appendPropertyReferenceGroups(propBody, props, { query });
     }
 
-    const divider = document.createElement('div');
-    divider.className = 'tlr-divider';
-    body.appendChild(divider);
-    this.appendSectionTitle(body, 'Linked References');
-
+    // --- Linked References Section ---
+    const linkedBlock = this.buildSectionBlock({
+      sectionKey: 'linked',
+      title: 'Linked References',
+      count: filteredLinkedRefCount,
+      collapsed: this._linkedRefsCollapsed,
+      toggleAction: 'toggle-linked-refs'
+    });
+    body.appendChild(linkedBlock);
+    const linkedBody = linkedBlock.querySelector('.tlr-section-body');
     if (linkedError) {
-      this.appendError(body, linkedError);
-      return;
+      this.appendError(linkedBody, linkedError);
+    } else {
+      this.appendLinkedReferenceGroups(linkedBody, linked, {
+        maxResults,
+        query,
+        totalLineCount: totalLinkedRefCount,
+        emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.',
+        treeContextMap: treeContextMap || new Map()
+      });
     }
 
-    this.appendLinkedReferenceGroups(body, linked, {
-      maxResults,
-      query,
-      totalLineCount: totalLinkedRefCount,
-      emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.',
-      treeContextMap: treeContextMap || new Map()
+    // --- Unlinked References Section ---
+    const unlinkedBlock = this.buildSectionBlock({
+      sectionKey: 'unlinked',
+      title: 'Unlinked References',
+      count: filteredUnlinkedRefCount,
+      collapsed: this._unlinkedCollapsed,
+      toggleAction: 'toggle-unlinked',
+      extraHeaderContent: (filteredUnlinkedRefCount > 1) ? this.buildLinkAllButton() : null
     });
-
-    // --- Unlinked References ---
-    const divider2 = document.createElement('div');
-    divider2.className = 'tlr-divider';
-    body.appendChild(divider2);
-
-    this.appendUnlinkedReferenceSection(body, unlinked, {
-      unlinkedError: unlinkedError || '',
-      query,
-      queryLower,
-      totalUnlinkedRefCount,
-      filteredUnlinkedRefCount,
-      treeContextMap: unlinkedTreeContextMap || new Map()
-    });
+    body.appendChild(unlinkedBlock);
+    const unlinkedBody = unlinkedBlock.querySelector('.tlr-section-body');
+    if (unlinkedError) {
+      this.appendError(unlinkedBody, unlinkedError);
+    } else if (unlinked.length === 0) {
+      this.appendEmpty(unlinkedBody, queryLower ? 'No matching unlinked references.' : 'No unlinked references.');
+    } else {
+      this.appendUnlinkedReferenceGroups(unlinkedBody, unlinked, {
+        query,
+        treeContextMap: unlinkedTreeContextMap || new Map()
+      });
+    }
   }
 
-  appendSectionTitle(container, text) {
-    if (!container) return;
-    const el = document.createElement('div');
-    el.className = 'tlr-section-title text-details';
-    el.textContent = text || '';
-    container.appendChild(el);
+  buildSectionBlock({ sectionKey, title, count, collapsed, toggleAction, extraHeaderContent }) {
+    const block = document.createElement('div');
+    block.className = 'tlr-section-block';
+    block.dataset.section = sectionKey || '';
+    if (collapsed) block.classList.add('tlr-section-collapsed');
+
+    const header = document.createElement('div');
+    header.className = 'tlr-section-header';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'tlr-section-toggle button-none button-small button-minimal-hover';
+    toggleBtn.dataset.action = toggleAction || '';
+    toggleBtn.title = `Collapse/expand ${(title || '').toLowerCase()}`;
+
+    const caret = document.createElement('span');
+    caret.className = 'tlr-section-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    toggleBtn.appendChild(caret);
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'tlr-section-label';
+    titleEl.textContent = title || '';
+    toggleBtn.appendChild(titleEl);
+
+    const countEl = document.createElement('span');
+    countEl.className = 'tlr-section-count text-details';
+    countEl.textContent = (typeof count === 'number' && count > 0) ? `${count}` : '0';
+
+    header.appendChild(toggleBtn);
+    header.appendChild(countEl);
+
+    if (extraHeaderContent instanceof HTMLElement) {
+      header.appendChild(extraHeaderContent);
+    }
+
+    block.appendChild(header);
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'tlr-section-body';
+    block.appendChild(bodyEl);
+
+    return block;
+  }
+
+  buildLinkAllButton() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tlr-link-all-btn button-none button-small button-minimal-hover';
+    btn.dataset.action = 'link-all-unlinked';
+    btn.title = 'Convert all unlinked mentions to linked references';
+    btn.textContent = 'Link All';
+    return btn;
   }
 
   appendError(container, message) {
@@ -2371,169 +2486,106 @@ class Plugin extends AppPlugin {
     }
   }
 
-  appendUnlinkedReferenceSection(container, groups, opts) {
+  appendUnlinkedReferenceGroups(container, groups, opts) {
     if (!container) return;
 
-    const unlinkedError = opts?.unlinkedError || '';
     const query = (opts?.query || '').trim();
-    const queryLower = (opts?.queryLower || '').trim();
-    const totalUnlinkedRefCount = opts?.totalUnlinkedRefCount || 0;
-    const filteredUnlinkedRefCount = opts?.filteredUnlinkedRefCount || 0;
 
-    const section = document.createElement('div');
-    section.className = 'tlr-unlinked-section';
-    if (this._unlinkedCollapsed) section.classList.add('tlr-unlinked-collapsed');
+    for (const g of groups) {
+      const record = g.record || null;
+      const recordGuid = record?.guid || null;
+      if (!recordGuid) continue;
 
-    // Section header with toggle + count + Link All button
-    const sectionHeader = document.createElement('div');
-    sectionHeader.className = 'tlr-unlinked-header';
+      const groupEl = document.createElement('div');
+      groupEl.className = 'tlr-group';
 
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.className = 'tlr-unlinked-toggle-btn button-none button-small button-minimal-hover';
-    toggleBtn.dataset.action = 'toggle-unlinked';
-    toggleBtn.title = 'Collapse/expand unlinked references';
+      const header = document.createElement('button');
+      header.type = 'button';
+      header.className = 'tlr-group-header button-normal button-normal-hover';
+      header.dataset.action = 'open-record';
+      header.dataset.recordGuid = recordGuid;
 
-    const caret = document.createElement('span');
-    caret.className = 'tlr-unlinked-caret';
-    caret.setAttribute('aria-hidden', 'true');
-    toggleBtn.appendChild(caret);
+      const groupTitle = document.createElement('div');
+      groupTitle.className = 'tlr-group-title';
+      groupTitle.textContent = record.getName?.() || 'Untitled';
 
-    const titleEl = document.createElement('span');
-    titleEl.className = 'tlr-section-title text-details';
-    titleEl.style.margin = '0';
-    titleEl.textContent = 'Unlinked References';
-    toggleBtn.appendChild(titleEl);
+      const groupMeta = document.createElement('div');
+      groupMeta.className = 'tlr-group-meta text-details';
+      groupMeta.textContent = `${g.lines?.length || 0}`;
 
-    const refCount = groups.reduce((n, g) => n + (g?.lines?.length || 0), 0);
+      header.appendChild(groupTitle);
+      header.appendChild(groupMeta);
 
-    const countEl = document.createElement('span');
-    countEl.className = 'tlr-unlinked-count text-details';
-    countEl.textContent = refCount > 0 ? ` ${refCount}` : '';
+      const linesEl = document.createElement('div');
+      linesEl.className = 'tlr-lines';
 
-    sectionHeader.appendChild(toggleBtn);
-    sectionHeader.appendChild(countEl);
+      for (const line of g.lines || []) {
+        const ctx = opts?.treeContextMap?.get?.(line.guid) || null;
+        const ancestors = ctx?.ancestors || [];
 
-    if (refCount > 1) {
-      const linkAllBtn = document.createElement('button');
-      linkAllBtn.type = 'button';
-      linkAllBtn.className = 'tlr-link-all-btn button-none button-small button-minimal-hover';
-      linkAllBtn.dataset.action = 'link-all-unlinked';
-      linkAllBtn.title = 'Convert all unlinked mentions to linked references';
-      linkAllBtn.textContent = 'Link All';
-      sectionHeader.appendChild(linkAllBtn);
-    }
+        const blockEl = document.createElement('div');
+        blockEl.className = 'tlr-line-block';
 
-    section.appendChild(sectionHeader);
-
-    // Section body
-    const sectionBody = document.createElement('div');
-    sectionBody.className = 'tlr-unlinked-body';
-
-    if (unlinkedError) {
-      this.appendError(sectionBody, unlinkedError);
-    } else if (groups.length === 0) {
-      this.appendEmpty(sectionBody, queryLower ? 'No matching unlinked references.' : 'No unlinked references.');
-    } else {
-      for (const g of groups) {
-        const record = g.record || null;
-        const recordGuid = record?.guid || null;
-        if (!recordGuid) continue;
-
-        const groupEl = document.createElement('div');
-        groupEl.className = 'tlr-group';
-
-        const header = document.createElement('button');
-        header.type = 'button';
-        header.className = 'tlr-group-header button-normal button-normal-hover';
-        header.dataset.action = 'open-record';
-        header.dataset.recordGuid = recordGuid;
-
-        const groupTitle = document.createElement('div');
-        groupTitle.className = 'tlr-group-title';
-        groupTitle.textContent = record.getName?.() || 'Untitled';
-
-        const groupMeta = document.createElement('div');
-        groupMeta.className = 'tlr-group-meta text-details';
-        groupMeta.textContent = `${g.lines?.length || 0}`;
-
-        header.appendChild(groupTitle);
-        header.appendChild(groupMeta);
-
-        const linesEl = document.createElement('div');
-        linesEl.className = 'tlr-lines';
-
-        for (const line of g.lines || []) {
-          const ctx = opts?.treeContextMap?.get?.(line.guid) || null;
-          const ancestors = ctx?.ancestors || [];
-
-          const blockEl = document.createElement('div');
-          blockEl.className = 'tlr-line-block';
-
-          if (ancestors.length > 0) {
-            const breadcrumbsEl = document.createElement('div');
-            breadcrumbsEl.className = 'tlr-breadcrumbs text-details';
-            for (let i = ancestors.length - 1; i >= 0; i--) {
-              const anc = ancestors[i];
-              const ancEl = document.createElement('span');
-              ancEl.className = 'tlr-breadcrumb-item';
-              this.appendSegments(ancEl, anc.segments || [], query);
-              breadcrumbsEl.appendChild(ancEl);
-              if (i > 0) {
-                const sep = document.createElement('span');
-                sep.className = 'tlr-breadcrumb-sep';
-                sep.textContent = ' > ';
-                breadcrumbsEl.appendChild(sep);
-              }
+        if (ancestors.length > 0) {
+          const breadcrumbsEl = document.createElement('div');
+          breadcrumbsEl.className = 'tlr-breadcrumbs text-details';
+          for (let i = ancestors.length - 1; i >= 0; i--) {
+            const anc = ancestors[i];
+            const ancEl = document.createElement('span');
+            ancEl.className = 'tlr-breadcrumb-item';
+            this.appendSegments(ancEl, anc.segments || [], query);
+            breadcrumbsEl.appendChild(ancEl);
+            if (i > 0) {
+              const sep = document.createElement('span');
+              sep.className = 'tlr-breadcrumb-sep';
+              sep.textContent = ' > ';
+              breadcrumbsEl.appendChild(sep);
             }
-            blockEl.appendChild(breadcrumbsEl);
           }
-
-          const lineRow = document.createElement('div');
-          lineRow.className = 'tlr-unlinked-line-row';
-
-          const lineEl = document.createElement('button');
-          lineEl.type = 'button';
-          lineEl.className = 'tlr-line button-none button-minimal-hover';
-          lineEl.dataset.action = 'open-line';
-          lineEl.dataset.recordGuid = recordGuid;
-          lineEl.dataset.lineGuid = line.guid;
-
-          const prefix = this.getLinePrefix(line);
-          if (prefix) {
-            const p = document.createElement('span');
-            p.className = 'tlr-prefix';
-            p.textContent = prefix;
-            lineEl.appendChild(p);
-          }
-
-          const content = document.createElement('span');
-          content.className = 'tlr-line-content';
-          this.appendSegments(content, line.segments || [], query);
-          lineEl.appendChild(content);
-
-          const linkBtn = document.createElement('button');
-          linkBtn.type = 'button';
-          linkBtn.className = 'tlr-link-btn button-none button-small button-minimal-hover';
-          linkBtn.dataset.action = 'link-unlinked';
-          linkBtn.dataset.lineGuid = line.guid;
-          linkBtn.title = 'Convert this mention to a linked reference';
-          linkBtn.textContent = 'Link';
-
-          lineRow.appendChild(lineEl);
-          lineRow.appendChild(linkBtn);
-          blockEl.appendChild(lineRow);
-          linesEl.appendChild(blockEl);
+          blockEl.appendChild(breadcrumbsEl);
         }
 
-        groupEl.appendChild(header);
-        groupEl.appendChild(linesEl);
-        sectionBody.appendChild(groupEl);
-      }
-    }
+        const lineRow = document.createElement('div');
+        lineRow.className = 'tlr-unlinked-line-row';
 
-    section.appendChild(sectionBody);
-    container.appendChild(section);
+        const lineEl = document.createElement('button');
+        lineEl.type = 'button';
+        lineEl.className = 'tlr-line button-none button-minimal-hover';
+        lineEl.dataset.action = 'open-line';
+        lineEl.dataset.recordGuid = recordGuid;
+        lineEl.dataset.lineGuid = line.guid;
+
+        const prefix = this.getLinePrefix(line);
+        if (prefix) {
+          const p = document.createElement('span');
+          p.className = 'tlr-prefix';
+          p.textContent = prefix;
+          lineEl.appendChild(p);
+        }
+
+        const content = document.createElement('span');
+        content.className = 'tlr-line-content';
+        this.appendSegments(content, line.segments || [], query);
+        lineEl.appendChild(content);
+
+        const linkBtn = document.createElement('button');
+        linkBtn.type = 'button';
+        linkBtn.className = 'tlr-link-btn button-none button-small button-minimal-hover';
+        linkBtn.dataset.action = 'link-unlinked';
+        linkBtn.dataset.lineGuid = line.guid;
+        linkBtn.title = 'Convert this mention to a linked reference';
+        linkBtn.textContent = 'Link';
+
+        lineRow.appendChild(lineEl);
+        lineRow.appendChild(linkBtn);
+        blockEl.appendChild(lineRow);
+        linesEl.appendChild(blockEl);
+      }
+
+      groupEl.appendChild(header);
+      groupEl.appendChild(linesEl);
+      container.appendChild(groupEl);
+    }
   }
 
   getLinePrefix(line) {
@@ -3058,19 +3110,68 @@ class Plugin extends AppPlugin {
         font-size: 12px;
       }
 
-      .tlr-section-title {
-        margin-top: 16px;
-        margin-bottom: 8px;
+      .tlr-section-block {
+        margin-top: 6px;
+      }
+
+      .tlr-section-block + .tlr-section-block {
+        margin-top: 2px;
+        padding-top: 6px;
+        border-top: 1px solid var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+      }
+
+      .tlr-section-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 30px;
+      }
+
+      .tlr-section-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 6px;
+      }
+
+      .tlr-section-caret {
+        width: 0;
+        height: 0;
+        border-top: 5px solid transparent;
+        border-bottom: 5px solid transparent;
+        border-left: 6px solid var(--text-muted, rgba(0, 0, 0, 0.6));
+        opacity: 0.85;
+        transform: rotate(90deg);
+        transition: transform 140ms ease;
+        flex: 0 0 auto;
+      }
+
+      .tlr-section-collapsed .tlr-section-caret {
+        transform: rotate(0deg);
+      }
+
+      .tlr-section-label {
         font-size: 12px;
         font-weight: 650;
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
-        text-transform: none;
-        letter-spacing: 0;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        white-space: nowrap;
       }
 
-      .tlr-divider {
-        margin: 14px 0 10px;
-        border-top: 1px solid var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+      .tlr-section-count {
+        color: var(--text-muted, rgba(0, 0, 0, 0.6));
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        opacity: 0.8;
+      }
+
+      .tlr-section-body {
+        display: block;
+      }
+
+      .tlr-section-collapsed .tlr-section-body {
+        display: none;
       }
 
       .tlr-prop-group { margin: 12px 0 16px; }
@@ -3269,54 +3370,6 @@ class Plugin extends AppPlugin {
         border-radius: 4px;
         display: inline;
         line-height: inherit;
-      }
-
-      .tlr-unlinked-section {
-        margin-top: 4px;
-      }
-
-      .tlr-unlinked-header {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        min-height: 28px;
-      }
-
-      .tlr-unlinked-toggle-btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 2px 4px;
-      }
-
-      .tlr-unlinked-caret {
-        width: 0;
-        height: 0;
-        border-top: 5px solid transparent;
-        border-bottom: 5px solid transparent;
-        border-left: 6px solid var(--text-muted, rgba(0, 0, 0, 0.6));
-        opacity: 0.85;
-        transform: rotate(90deg);
-        transition: transform 140ms ease;
-        flex: 0 0 auto;
-      }
-
-      .tlr-unlinked-collapsed .tlr-unlinked-caret {
-        transform: rotate(0deg);
-      }
-
-      .tlr-unlinked-count {
-        color: var(--text-muted, rgba(0, 0, 0, 0.6));
-        font-size: 12px;
-        font-variant-numeric: tabular-nums;
-      }
-
-      .tlr-unlinked-body {
-        display: block;
-      }
-
-      .tlr-unlinked-collapsed .tlr-unlinked-body {
-        display: none;
       }
 
       .tlr-unlinked-line-row {
