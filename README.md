@@ -17,6 +17,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 
 - **Property References**: references to the active note through record-link properties, grouped by property name.
 - **Linked References**: line-level mentions grouped by source note.
+- **Unlinked References**: text-only mentions of the active note title, grouped by source note and kept visually consistent with linked references.
 - **Live Activity**: new references added after a page opens are marked in place, and remote edits are called out inline.
 
 ## Options
@@ -40,6 +41,10 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 - **Expand linked context**
   - Each linked mention starts with a compact `Show more context` control.
   - Clicking it expands the full child subtree for that mention and exposes up/down controls for nearby sibling lines.
+
+- **Review unlinked mentions**
+  - Text mentions of the current note title appear in a separate `Unlinked References` section.
+  - The section reuses the existing search, sort, grouping, and context controls instead of adding a separate interaction model.
 
 - **Compact empty state**
   - When a page has no references yet, the footer stays minimal until you click `Show sections`.
@@ -76,9 +81,10 @@ Edit `custom` in `plugin.json`:
 2. Confirm Backreferences appears at the bottom.
 3. Confirm Property References are grouped by property when applicable.
 4. Confirm Linked References are grouped by source note.
-5. Toggle search and verify filtering/highlighting.
-6. Change sort field and direction and verify order updates.
-7. Expand a linked reference and verify descendants load first, then above/below context can be added with the arrow controls.
-8. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
-9. Confirm the status bar count matches the footer.
-10. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
+5. Confirm Unlinked References appear separately when the note title is mentioned without a record link.
+6. Toggle search and verify filtering/highlighting.
+7. Change sort field and direction and verify order updates.
+8. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
+9. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
+10. Confirm the status bar count matches the footer.
+11. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.

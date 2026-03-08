@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.10';
+    this._version = '0.4.11';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -1498,12 +1498,14 @@ class Plugin extends AppPlugin {
     const maxResults = this.coercePositiveInt(cfg.custom?.maxResults, this._defaultMaxResults);
     const showSelf = cfg.custom?.showSelf === true;
 
+    const recordName = (record?.getName?.() || '').trim();
     const query = `@linkto = "${recordGuid}"`;
-    const searchSettled = await Promise.allSettled([
-      this.data.searchByQuery(query, maxResults)
-    ]).then((x) => x[0]);
+    const searchPromises = [
+      this.data.searchByQuery(query, maxResults),
+      recordName ? this.data.searchByQuery(recordName, maxResults) : Promise.resolve({ lines: [], records: [] })
+    ];
+    const [searchSettled, unlinkedSettled] = await Promise.allSettled(searchPromises);
 
-    // Ignore stale refreshes.
     if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
 
     let linkedError = '';
@@ -1533,11 +1535,31 @@ class Plugin extends AppPlugin {
       propertyError = 'Error loading property references.';
     }
 
+    let unlinkedError = '';
+    let unlinkedGroups = [];
+    if (recordName) {
+      if (unlinkedSettled.status === 'fulfilled') {
+        const result = unlinkedSettled.value;
+        if (result?.error) {
+          unlinkedError = result.error;
+        } else {
+          const lines = Array.isArray(result?.lines) ? result.lines : [];
+          unlinkedGroups = this.groupUnlinkedReferenceLines(lines, linkedGroups, recordGuid, recordName, { showSelf });
+        }
+      } else {
+        unlinkedError = 'Error loading unlinked references.';
+      }
+    }
+
+    if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
+
     state.lastResults = {
       propertyGroups,
       propertyError,
       linkedGroups,
       linkedError,
+      unlinkedGroups,
+      unlinkedError,
       maxResults
     };
     this.applyLiveSnapshot(state, this.buildResultsSnapshot(propertyGroups, linkedGroups));
@@ -2184,6 +2206,76 @@ class Plugin extends AppPlugin {
     return groups;
   }
 
+  groupUnlinkedReferenceLines(lines, linkedGroups, targetGuid, targetName, { showSelf }) {
+    const linkedLineGuids = new Set();
+    for (const group of linkedGroups || []) {
+      for (const line of group?.lines || []) {
+        const guid = line?.guid || null;
+        if (guid) linkedLineGuids.add(guid);
+      }
+    }
+
+    const candidates = [];
+    for (const line of lines || []) {
+      const guid = line?.guid || null;
+      if (!guid || linkedLineGuids.has(guid)) continue;
+
+      const srcGuid = line?.record?.guid || null;
+      if (!showSelf && srcGuid === targetGuid) continue;
+      if (this.lineHasRefToRecord(line, targetGuid)) continue;
+      if (!this.lineHasTextMentionOfRecord(line, targetName)) continue;
+      candidates.push(line);
+    }
+
+    return this.groupBacklinkLines(candidates, targetGuid, { showSelf });
+  }
+
+  lineHasRefToRecord(line, recordGuid) {
+    const targetGuid = (recordGuid || '').trim();
+    if (!targetGuid) return false;
+
+    for (const seg of line?.segments || []) {
+      if (seg?.type !== 'ref') continue;
+      if ((seg?.text?.guid || '') === targetGuid) return true;
+    }
+    return false;
+  }
+
+  lineHasTextMentionOfRecord(line, recordName) {
+    const matcher = this.buildPhraseBoundaryMatcher(recordName);
+    if (!matcher) return false;
+    const text = this.getLineTextMentionSource(line);
+    if (!text) return false;
+    return matcher.test(text);
+  }
+
+  getLineTextMentionSource(line) {
+    let out = '';
+
+    for (const seg of line?.segments || []) {
+      if (!seg) continue;
+      if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code') {
+        if (typeof seg.text === 'string') out += seg.text;
+      }
+    }
+
+    return out;
+  }
+
+  buildPhraseBoundaryMatcher(phrase) {
+    const trimmed = typeof phrase === 'string' ? phrase.trim() : '';
+    if (!trimmed) return null;
+
+    const parts = trimmed.split(/\s+/).filter(Boolean).map((part) => this.escapeRegExp(part));
+    if (parts.length === 0) return null;
+
+    return new RegExp(`(^|[^a-z0-9])${parts.join('\\s+')}(?=$|[^a-z0-9])`, 'i');
+  }
+
+  escapeRegExp(value) {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
   sortPropertyGroupsForRender(groups, sortSpec, sortMetrics) {
     return (groups || []).map((g) => {
       const records = Array.isArray(g?.records) ? Array.from(g.records) : [];
@@ -2350,7 +2442,7 @@ class Plugin extends AppPlugin {
     state.bodyEl.appendChild(el);
   }
 
-  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, maxResults }) {
+  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, unlinkedGroups, unlinkedError, maxResults }) {
     if (!state?.bodyEl || !state?.countEl) return;
 
     const body = state.bodyEl;
@@ -2361,11 +2453,16 @@ class Plugin extends AppPlugin {
 
     const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
+    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
 
     const totalPropRefCount = propsAll.reduce((n, g) => n + (g?.records?.length || 0), 0);
     const totalLinkedRefCount = this.countLinkedReferences(linkedAll);
-    const hasAnyErrors = Boolean(propertyError || linkedError);
-    const isEmptyWithoutFilter = !hasAnyErrors && totalPropRefCount === 0 && totalLinkedRefCount === 0;
+    const totalUnlinkedRefCount = this.countLinkedReferences(unlinkedAll);
+    const hasAnyErrors = Boolean(propertyError || linkedError || unlinkedError);
+    const isEmptyWithoutFilter = !hasAnyErrors
+      && totalPropRefCount === 0
+      && totalLinkedRefCount === 0
+      && totalUnlinkedRefCount === 0;
     const useCompactEmpty = isEmptyWithoutFilter && !queryLower && state.emptyStateExpanded !== true;
 
     if (useCompactEmpty) {
@@ -2390,9 +2487,14 @@ class Plugin extends AppPlugin {
       const guid = g?.record?.guid || null;
       if (guid) totalUniquePages.add(guid);
     }
+    for (const g of unlinkedAll) {
+      const guid = g?.record?.guid || null;
+      if (guid) totalUniquePages.add(guid);
+    }
 
     let props = propsAll;
     let linked = linkedAll;
+    let unlinked = unlinkedAll;
 
     if (queryLower) {
       const nextProps = [];
@@ -2419,10 +2521,24 @@ class Plugin extends AppPlugin {
         if (lines.length > 0) nextLinked.push({ record, lines });
       }
       linked = nextLinked;
+
+      const nextUnlinked = [];
+      for (const g of unlinkedAll) {
+        const record = g?.record || null;
+        const recordGuid = record?.guid || null;
+        if (!recordGuid) continue;
+        const lines = (g?.lines || []).filter((line) => {
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return text.toLowerCase().includes(queryLower);
+        });
+        if (lines.length > 0) nextUnlinked.push({ record, lines });
+      }
+      unlinked = nextUnlinked;
     }
 
     const filteredPropRefCount = props.reduce((n, g) => n + (g?.records?.length || 0), 0);
     const filteredLinkedRefCount = this.countLinkedReferences(linked);
+    const filteredUnlinkedRefCount = this.countLinkedReferences(unlinked);
 
     const filteredUniquePages = new Set();
     for (const g of props) {
@@ -2435,14 +2551,19 @@ class Plugin extends AppPlugin {
       const guid = g?.record?.guid || null;
       if (guid) filteredUniquePages.add(guid);
     }
+    for (const g of unlinked) {
+      const guid = g?.record?.guid || null;
+      if (guid) filteredUniquePages.add(guid);
+    }
 
     const sortSpec = {
       sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
       sortDir: this.normalizeSortDir(state?.sortDir) || this._defaultSortDir
     };
-    const sortMetrics = this.computeRecordSortMetrics(props, linked);
+    const sortMetrics = this.computeRecordSortMetrics(props, [...linked, ...unlinked]);
     props = this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
     linked = this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
+    unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     const parts = [];
     if (queryLower) {
@@ -2451,10 +2572,12 @@ class Plugin extends AppPlugin {
       if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
       if (totalPropRefCount > 0) parts.push(`${filteredPropRefCount}/${totalPropRefCount} prop refs`);
       if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} line refs`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${filteredUnlinkedRefCount}/${totalUnlinkedRefCount} unlinked refs`);
     } else {
       if (totalUniquePages.size > 0) parts.push(`${totalUniquePages.size} page${totalUniquePages.size === 1 ? '' : 's'}`);
       if (totalPropRefCount > 0) parts.push(`${totalPropRefCount} prop ref${totalPropRefCount === 1 ? '' : 's'}`);
       if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} line ref${totalLinkedRefCount === 1 ? '' : 's'}`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${totalUnlinkedRefCount} unlinked ref${totalUnlinkedRefCount === 1 ? '' : 's'}`);
     }
     state.countEl.textContent = parts.join(' | ');
 
@@ -2474,15 +2597,32 @@ class Plugin extends AppPlugin {
 
     if (linkedError) {
       this.appendError(body, linkedError);
+    } else {
+      this.appendLinkedReferenceGroups(body, linked, {
+        state,
+        maxResults,
+        query,
+        totalLineCount: totalLinkedRefCount,
+        emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.'
+      });
+    }
+
+    const unlinkedDivider = document.createElement('div');
+    unlinkedDivider.className = 'tlr-divider';
+    body.appendChild(unlinkedDivider);
+    this.appendSectionTitle(body, 'Unlinked References');
+
+    if (unlinkedError) {
+      this.appendError(body, unlinkedError);
       return;
     }
 
-    this.appendLinkedReferenceGroups(body, linked, {
+    this.appendLinkedReferenceGroups(body, unlinked, {
       state,
       maxResults,
       query,
-      totalLineCount: totalLinkedRefCount,
-      emptyMessage: queryLower ? 'No matching linked references.' : 'No linked references.'
+      totalLineCount: totalUnlinkedRefCount,
+      emptyMessage: queryLower ? 'No matching unlinked references.' : 'No unlinked references.'
     });
   }
 
