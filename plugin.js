@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.13';
+    this._version = '0.4.14';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -28,6 +28,9 @@ class Plugin extends AppPlugin {
 
     this._defaultMaxResults = 200;
     this._refreshDebounceMs = 350;
+    this._queryFilterDebounceMs = 180;
+    this._queryFilterChunkSize = 24;
+    this._queryFilterMaxResults = 1000;
     this._legacyIgnoreMetaKey = 'plugin.refs.v1.ignore';
     this._storageKeyIgnoreCleanupDone = 'thymer_backreferences_ignore_cleanup_v1';
     this._ignoreCleanupPromise = null;
@@ -161,6 +164,11 @@ class Plugin extends AppPlugin {
       state.liveRemoteBadgesByKey = new Map();
       state.pendingRemoteSync = false;
       state.pendingRemoteUsers = new Set();
+      if (state.queryFilterTimer) {
+        clearTimeout(state.queryFilterTimer);
+        state.queryFilterTimer = null;
+      }
+      state.queryFilterState = null;
       const pref = this.getSortPreferenceForRecord(recordGuid);
       state.sortBy = pref.sortBy;
       state.sortDir = pref.sortDir;
@@ -232,6 +240,9 @@ class Plugin extends AppPlugin {
         sortDir: this._defaultSortDir,
         sortMenuOpen: false,
         sortMenuDismissHandler: null,
+        queryFilterTimer: null,
+        queryFilterSeq: 0,
+        queryFilterState: null,
         lastResults: null,
         observer: null,
         refreshTimer: null,
@@ -280,6 +291,9 @@ class Plugin extends AppPlugin {
       sortDir: this._defaultSortDir,
       sortMenuOpen: false,
       sortMenuDismissHandler: null,
+      queryFilterTimer: null,
+      queryFilterSeq: 0,
+      queryFilterState: null,
       lastResults: null,
       observer: null,
       refreshTimer: null,
@@ -298,6 +312,11 @@ class Plugin extends AppPlugin {
     if (state.refreshTimer) {
       clearTimeout(state.refreshTimer);
       state.refreshTimer = null;
+    }
+
+    if (state.queryFilterTimer) {
+      clearTimeout(state.queryFilterTimer);
+      state.queryFilterTimer = null;
     }
 
     try {
@@ -413,40 +432,6 @@ class Plugin extends AppPlugin {
     const spacer = document.createElement('div');
     spacer.className = 'tlr-spacer';
 
-    const filterWrap = document.createElement('div');
-    filterWrap.className = 'tlr-filter-wrap';
-
-    const filterToggle = document.createElement('button');
-    filterToggle.className = 'tlr-btn tlr-filter-toggle button-none button-small button-minimal-hover';
-    filterToggle.type = 'button';
-    filterToggle.dataset.action = 'toggle-filter-menu';
-    filterToggle.setAttribute('aria-haspopup', 'menu');
-    filterToggle.setAttribute('aria-expanded', state.filterMenuOpen === true ? 'true' : 'false');
-    filterToggle.title = 'Advanced filters';
-    const filterGlyph = document.createElement('span');
-    filterGlyph.className = 'tlr-filter-glyph';
-    filterGlyph.setAttribute('aria-hidden', 'true');
-    filterToggle.appendChild(filterGlyph);
-
-    const filterMenu = document.createElement('div');
-    filterMenu.className = 'tlr-filter-menu cmdpal--inline dropdown active focused-component';
-    filterMenu.setAttribute('role', 'menu');
-
-    filterWrap.appendChild(filterToggle);
-    filterWrap.appendChild(filterMenu);
-
-    const searchToggle = document.createElement('button');
-    searchToggle.className = 'tlr-btn tlr-search-toggle button-none button-small button-minimal-hover';
-    searchToggle.type = 'button';
-    searchToggle.dataset.action = 'toggle-search';
-    searchToggle.title = 'Filter references';
-    searchToggle.setAttribute('aria-expanded', state.searchOpen === true ? 'true' : 'false');
-    try {
-      searchToggle.appendChild(this.ui.createIcon('ti-search'));
-    } catch (e) {
-      searchToggle.textContent = 'Search';
-    }
-
     const searchWrap = document.createElement('div');
     searchWrap.className = 'tlr-search-wrap query-input';
 
@@ -462,7 +447,8 @@ class Plugin extends AppPlugin {
     input.className = 'tlr-search-input query-input--field form-input';
     input.type = 'text';
     input.name = 'backreferences-filter';
-    input.placeholder = 'Filter references...';
+    input.placeholder = 'Text or query, e.g. @task AND "meeting"';
+    input.title = 'Filter backreferences with plain text or Thymer query syntax';
     input.autocomplete = 'off';
     input.spellcheck = false;
     input.value = state.searchQuery || '';
@@ -480,16 +466,25 @@ class Plugin extends AppPlugin {
         if (q) {
           state.searchQuery = '';
           input.value = '';
-          this.renderFromCache(state);
+          this.handleSearchQueryChanged(state, { immediate: true });
         } else {
-          this.setSearchOpen(state, false);
+          input.blur();
+        }
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        const mode = this.getSearchMode(state.searchQuery || '');
+        if (mode === 'query') {
+          e.preventDefault();
+          this.scheduleQueryFilterRefresh(state, { immediate: true, reason: 'enter' });
         }
       }
     });
 
     input.addEventListener('input', () => {
       state.searchQuery = input.value;
-      this.renderFromCache(state);
+      this.handleSearchQueryChanged(state, { immediate: false });
     });
 
     const clearBtn = document.createElement('button');
@@ -535,8 +530,6 @@ class Plugin extends AppPlugin {
     header.appendChild(title);
     header.appendChild(count);
     header.appendChild(spacer);
-    header.appendChild(filterWrap);
-    header.appendChild(searchToggle);
     header.appendChild(searchWrap);
     header.appendChild(sortWrap);
 
@@ -550,14 +543,13 @@ class Plugin extends AppPlugin {
     root.addEventListener('click', (e) => this.handleFooterClick(e));
 
     this.applyCollapsedState(root, this._collapsed);
-    root.classList.toggle('tlr-search-open', state.searchOpen === true);
     root.classList.toggle('tlr-sort-open', state.sortMenuOpen === true);
 
-    state.filterToggleEl = filterToggle;
-    state.filterMenuEl = filterMenu;
+    state.filterToggleEl = null;
+    state.filterMenuEl = null;
     state.sortToggleEl = sortToggle;
     state.sortMenuEl = sortMenu;
-    state.searchToggleEl = searchToggle;
+    state.searchToggleEl = null;
     state.searchWrapEl = searchWrap;
     state.searchInputEl = input;
     return root;
@@ -618,33 +610,10 @@ class Plugin extends AppPlugin {
           // ignore
         });
       }
-      return;
-    }
-
-    if (action === 'toggle-filter-menu') {
-      if (!state) return;
-      if (state.filterMenuOpen === true) {
-        this.setFilterMenuOpen(state, false);
-      } else {
-        this.setSortMenuOpen(state, false);
-        this.setFilterMenuOpen(state, true);
+      if (sectionId === 'unlinked') {
+        this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'toggle-unlinked-section' });
+        this.renderFromCache(state);
       }
-      return;
-    }
-
-    if (action === 'set-filter-preset') {
-      if (!state) return;
-      const nextPreset = this.normalizeFilterPreset(actionEl.dataset.filterPreset);
-      if (!nextPreset) return;
-      this.handleFilterPresetSelected(state, nextPreset).catch(() => {
-        // ignore
-      });
-      return;
-    }
-
-    if (action === 'toggle-search') {
-      if (!state) return;
-      this.setSearchOpen(state, !(state.searchOpen === true));
       return;
     }
 
@@ -683,11 +652,9 @@ class Plugin extends AppPlugin {
       if (q) {
         state.searchQuery = '';
         if (state.searchInputEl) state.searchInputEl.value = '';
-        this.renderFromCache(state);
-        // Keep the input open for continued searching.
-        this.setSearchOpen(state, true);
+        this.handleSearchQueryChanged(state, { immediate: true, keepFocus: true });
       } else {
-        this.setSearchOpen(state, false);
+        state.searchInputEl?.blur?.();
       }
       return;
     }
@@ -853,6 +820,306 @@ class Plugin extends AppPlugin {
 
   filterPresetNeedsCollectionMeta(filterPreset) {
     return this.normalizeFilterPreset(filterPreset) === 'same_collection';
+  }
+
+  getSearchMode(rawQuery) {
+    const query = (rawQuery || '').trim();
+    if (!query) return 'none';
+    if (query.includes('@') || query.includes('#') || query.includes('"')) return 'query';
+    if (query.includes('(') || query.includes(')')) return 'query';
+    if (query.includes('&&') || query.includes('||')) return 'query';
+    if (/\b(?:AND|OR|NOT)\b/.test(query)) return 'query';
+    return 'text';
+  }
+
+  createQueryFilterState(query, { loading, ready, error, includesUnlinked, matchedRecordGuids, matchedLineGuids, matchedLineRecordGuids } = {}) {
+    return {
+      query: (query || '').trim(),
+      loading: loading === true,
+      ready: ready === true,
+      error: typeof error === 'string' ? error : '',
+      includesUnlinked: includesUnlinked === true,
+      matchedRecordGuids: matchedRecordGuids instanceof Set ? matchedRecordGuids : new Set(),
+      matchedLineGuids: matchedLineGuids instanceof Set ? matchedLineGuids : new Set(),
+      matchedLineRecordGuids: matchedLineRecordGuids instanceof Set ? matchedLineRecordGuids : new Set()
+    };
+  }
+
+  getQueryFilterState(state, query) {
+    const current = state?.queryFilterState || null;
+    const normalizedQuery = (query || '').trim();
+    if (!current) return null;
+    if ((current.query || '') !== normalizedQuery) return null;
+    return current;
+  }
+
+  clearQueryFilterState(state) {
+    if (!state) return;
+    if (state.queryFilterTimer) {
+      clearTimeout(state.queryFilterTimer);
+      state.queryFilterTimer = null;
+    }
+    state.queryFilterState = null;
+  }
+
+  handleSearchQueryChanged(state, { immediate, keepFocus } = {}) {
+    if (!state) return;
+    this.syncScopedQueryWithCurrentInput(state, { immediate: immediate === true, reason: 'input' });
+    this.renderFromCache(state);
+
+    if (keepFocus === true && state.searchInputEl) {
+      setTimeout(() => {
+        try {
+          state.searchInputEl?.focus?.();
+        } catch (e) {
+          // ignore
+        }
+      }, 0);
+    }
+  }
+
+  syncScopedQueryWithCurrentInput(state, { immediate, reason } = {}) {
+    if (!state) return;
+    const query = (state.searchQuery || '').trim();
+    if (this.getSearchMode(query) !== 'query') {
+      this.clearQueryFilterState(state);
+      return;
+    }
+    this.scheduleQueryFilterRefresh(state, { immediate: immediate === true, reason: reason || 'sync' });
+  }
+
+  shouldIncludeUnlinkedInQueryScope(state, results) {
+    if (!state || !results) return false;
+    if (this.isSectionCollapsed(state, 'unlinked')) return false;
+    if (results.unlinkedDeferred === true) return false;
+    if (results.unlinkedLoading === true) return false;
+    return true;
+  }
+
+  collectQueryScopeRecordGuids(results, { includeUnlinked } = {}) {
+    const out = [];
+    const seen = new Set();
+
+    const add = (record) => {
+      const guid = (record?.guid || '').trim();
+      if (!guid || seen.has(guid)) return;
+      seen.add(guid);
+      out.push(guid);
+    };
+
+    for (const group of results?.propertyGroups || []) {
+      for (const record of group?.records || []) add(record);
+    }
+    for (const group of results?.linkedGroups || []) add(group?.record || null);
+    if (includeUnlinked === true) {
+      for (const group of results?.unlinkedGroups || []) add(group?.record || null);
+    }
+
+    return out;
+  }
+
+  buildScopedQueryChunks(query, recordGuids) {
+    const trimmedQuery = (query || '').trim();
+    if (!trimmedQuery) return [];
+
+    const guids = Array.isArray(recordGuids) ? recordGuids.filter(Boolean) : [];
+    if (guids.length === 0) return [];
+
+    const chunkSize = Math.max(1, this._queryFilterChunkSize || 40);
+    const queries = [];
+    for (let i = 0; i < guids.length; i += chunkSize) {
+      const chunk = guids.slice(i, i + chunkSize);
+      const scope = chunk
+        .map((guid) => `(@rguid = "${guid}" OR @guid = "${guid}")`)
+        .join(' OR ');
+      queries.push(`(${trimmedQuery}) AND (${scope})`);
+    }
+    return queries;
+  }
+
+  mergeScopedQuerySearchResults(resultList) {
+    const records = [];
+    const lines = [];
+    const seenRecordGuids = new Set();
+    const seenLineGuids = new Set();
+
+    for (const result of resultList || []) {
+      for (const record of result?.records || []) {
+        const guid = (record?.guid || '').trim();
+        if (!guid || seenRecordGuids.has(guid)) continue;
+        seenRecordGuids.add(guid);
+        records.push(record);
+      }
+      for (const line of result?.lines || []) {
+        const guid = (line?.guid || '').trim();
+        if (!guid || seenLineGuids.has(guid)) continue;
+        seenLineGuids.add(guid);
+        lines.push(line);
+      }
+    }
+
+    return { records, lines };
+  }
+
+  scheduleQueryFilterRefresh(state, { immediate, reason } = {}) {
+    if (!state) return;
+
+    const query = (state.searchQuery || '').trim();
+    if (this.getSearchMode(query) !== 'query') {
+      this.clearQueryFilterState(state);
+      return;
+    }
+
+    const previous = this.getQueryFilterState(state, query);
+    state.queryFilterState = previous
+      ? this.createQueryFilterState(query, {
+          loading: true,
+          ready: previous.ready === true,
+          error: '',
+          includesUnlinked: previous.includesUnlinked === true,
+          matchedRecordGuids: previous.matchedRecordGuids,
+          matchedLineGuids: previous.matchedLineGuids,
+          matchedLineRecordGuids: previous.matchedLineRecordGuids
+        })
+      : this.createQueryFilterState(query, { loading: true });
+
+    if (state.queryFilterTimer) {
+      clearTimeout(state.queryFilterTimer);
+      state.queryFilterTimer = null;
+    }
+
+    const seq = (state.queryFilterSeq || 0) + 1;
+    state.queryFilterSeq = seq;
+    const delay = immediate === true ? 0 : this._queryFilterDebounceMs;
+    state.queryFilterTimer = setTimeout(() => {
+      state.queryFilterTimer = null;
+      this.refreshScopedQueryFilter(state.panelId, seq, { reason: reason || 'scheduled-query-filter' }).catch(() => {
+        // ignore
+      });
+    }, delay);
+  }
+
+  async refreshScopedQueryFilter(panelId, seq, { reason } = {}) {
+    const state = this._panelStates.get(panelId) || null;
+    if (!state) return;
+
+    const results = state.lastResults || null;
+    const query = (state.searchQuery || '').trim();
+    if (!results || this.getSearchMode(query) !== 'query') {
+      this.clearQueryFilterState(state);
+      this.renderFromCache(state);
+      return;
+    }
+
+    const includeUnlinked = this.shouldIncludeUnlinkedInQueryScope(state, results);
+    const recordGuids = this.collectQueryScopeRecordGuids(results, { includeUnlinked });
+    if (recordGuids.length === 0) {
+      if (!this._panelStates.has(panelId) || state.queryFilterSeq !== seq) return;
+      state.queryFilterState = this.createQueryFilterState(query, {
+        ready: true,
+        includesUnlinked: includeUnlinked
+      });
+      this.renderFromCache(state);
+      return;
+    }
+
+    const scopedQueries = this.buildScopedQueryChunks(query, recordGuids);
+    let merged = { records: [], lines: [] };
+    let error = '';
+    try {
+      const settled = await Promise.all(scopedQueries.map((scopedQuery) => this.data.searchByQuery(scopedQuery, this._queryFilterMaxResults)));
+      const firstError = settled.find((result) => typeof result?.error === 'string' && result.error.trim());
+      if (firstError?.error) {
+        error = firstError.error.trim();
+      } else {
+        merged = this.mergeScopedQuerySearchResults(settled);
+      }
+    } catch (e) {
+      error = 'Could not apply query filter.';
+    }
+
+    if (!this._panelStates.has(panelId)) return;
+    if (state.queryFilterSeq !== seq) return;
+    if ((state.searchQuery || '').trim() !== query) return;
+
+    const previous = this.getQueryFilterState(state, query);
+    if (error) {
+      state.queryFilterState = this.createQueryFilterState(query, {
+        loading: false,
+        ready: previous?.ready === true,
+        error,
+        includesUnlinked,
+        matchedRecordGuids: previous?.matchedRecordGuids,
+        matchedLineGuids: previous?.matchedLineGuids,
+        matchedLineRecordGuids: previous?.matchedLineRecordGuids
+      });
+      this.renderFromCache(state);
+      return;
+    }
+
+    const matchedRecordGuids = new Set();
+    const matchedLineGuids = new Set();
+    const matchedLineRecordGuids = new Set();
+
+    for (const record of merged.records || []) {
+      const guid = (record?.guid || '').trim();
+      if (!guid) continue;
+      matchedRecordGuids.add(guid);
+      matchedLineRecordGuids.add(guid);
+    }
+
+    for (const line of merged.lines || []) {
+      const guid = (line?.guid || '').trim();
+      if (guid) matchedLineGuids.add(guid);
+      const recordGuid = (line?.getRecord?.()?.guid || '').trim();
+      if (recordGuid) matchedLineRecordGuids.add(recordGuid);
+    }
+
+    state.queryFilterState = this.createQueryFilterState(query, {
+      loading: false,
+      ready: true,
+      includesUnlinked,
+      matchedRecordGuids,
+      matchedLineGuids,
+      matchedLineRecordGuids
+    });
+    this.renderFromCache(state);
+  }
+
+  filterPropertyGroupsByScopedQuery(groups, queryFilterState) {
+    const matchedRecordGuids = queryFilterState?.matchedRecordGuids || new Set();
+    const matchedLineRecordGuids = queryFilterState?.matchedLineRecordGuids || new Set();
+    return this.filterPropertyGroups(groups, (record) => {
+      const guid = (record?.guid || '').trim();
+      if (!guid) return false;
+      return matchedRecordGuids.has(guid) || matchedLineRecordGuids.has(guid);
+    });
+  }
+
+  filterLineGroupsByScopedQuery(groups, queryFilterState) {
+    const matchedRecordGuids = queryFilterState?.matchedRecordGuids || new Set();
+    const matchedLineGuids = queryFilterState?.matchedLineGuids || new Set();
+    const out = [];
+
+    for (const group of groups || []) {
+      const record = group?.record || null;
+      const recordGuid = (record?.guid || '').trim();
+      if (!recordGuid) continue;
+
+      if (matchedRecordGuids.has(recordGuid)) {
+        out.push({
+          record,
+          lines: Array.isArray(group?.lines) ? Array.from(group.lines) : []
+        });
+        continue;
+      }
+
+      const lines = (group?.lines || []).filter((line) => matchedLineGuids.has((line?.guid || '').trim()));
+      if (lines.length === 0) continue;
+      out.push({ record, lines });
+    }
+
+    return out;
   }
 
   setSearchOpen(state, open) {
@@ -1865,24 +2132,8 @@ class Plugin extends AppPlugin {
 
     if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
 
-    if (this.filterPresetNeedsCollectionMeta(state.filterPreset)) {
-      state.filterMetaLoading = true;
-      this.syncFilterControlState(state);
-      try {
-        await this.ensureCollectionMetaForResults(state, {
-          propertyGroups,
-          linkedGroups,
-          unlinkedGroups
-        });
-      } finally {
-        if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
-        state.filterMetaLoading = false;
-        this.syncFilterControlState(state);
-      }
-    } else {
-      state.filterMetaLoading = false;
-      this.syncFilterControlState(state);
-    }
+    state.filterMetaLoading = false;
+    this.syncFilterControlState(state);
 
     state.lastResults = {
       propertyGroups,
@@ -1895,6 +2146,7 @@ class Plugin extends AppPlugin {
       unlinkedLoading: false,
       maxResults
     };
+    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: reason || 'refresh' });
     this.applyLiveSnapshot(state, this.buildResultsSnapshot(propertyGroups, linkedGroups));
     this.invalidateLinkedContextCache(state);
     this.renderFromCache(state);
@@ -1953,29 +2205,14 @@ class Plugin extends AppPlugin {
     if (state.refreshSeq !== seq) return;
     if ((state.recordGuid || '') !== recordGuid) return;
 
-    if (this.filterPresetNeedsCollectionMeta(state.filterPreset)) {
-      state.filterMetaLoading = true;
-      this.syncFilterControlState(state);
-      try {
-        await this.ensureCollectionMetaForResults(state, {
-          propertyGroups: results.propertyGroups,
-          linkedGroups: results.linkedGroups,
-          unlinkedGroups: nextGroups
-        });
-      } finally {
-        if (!this._panelStates.has(state.panelId)) return;
-        if (state.lastResults !== results) return;
-        if (state.refreshSeq !== seq) return;
-        if ((state.recordGuid || '') !== recordGuid) return;
-        state.filterMetaLoading = false;
-        this.syncFilterControlState(state);
-      }
-    }
+    state.filterMetaLoading = false;
+    this.syncFilterControlState(state);
 
     results.unlinkedGroups = nextGroups;
     results.unlinkedError = nextError;
     results.unlinkedDeferred = false;
     results.unlinkedLoading = false;
+    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
     this.renderFromCache(state);
     this.syncStatusItem();
   }
@@ -3105,7 +3342,14 @@ class Plugin extends AppPlugin {
     body.innerHTML = '';
 
     const query = (state.searchQuery || '').trim();
-    const queryLower = query.toLowerCase();
+    const searchMode = this.getSearchMode(query);
+    const textQueryLower = searchMode === 'text' ? query.toLowerCase() : '';
+    const queryFilterState = searchMode === 'query' ? this.getQueryFilterState(state, query) : null;
+    const canApplyScopedQuery = searchMode === 'query' && queryFilterState?.ready === true;
+    const shouldScopeUnlinked = searchMode === 'query'
+      ? this.shouldIncludeUnlinkedInQueryScope(state, state.lastResults || {})
+      : true;
+    const highlightQuery = searchMode === 'text' ? query : '';
 
     const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
@@ -3120,13 +3364,12 @@ class Plugin extends AppPlugin {
       && totalLinkedRefCount === 0
       && totalUnlinkedRefCount === 0;
     const useCompactEmpty = isEmptyWithoutFilter
-      && !queryLower
+      && searchMode === 'none'
       && state.emptyStateExpanded !== true
       && unlinkedDeferred !== true;
 
     if (useCompactEmpty) {
       state.rootEl?.classList?.add('tlr-empty-compact');
-      this.setSearchOpen(state, false);
       this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
       state.countEl.textContent = 'No references yet';
@@ -3152,26 +3395,26 @@ class Plugin extends AppPlugin {
       if (guid) totalUniquePages.add(guid);
     }
 
-    const presetResults = this.applyPresetFilter(state, {
-      propertyGroups: propsAll,
-      linkedGroups: linkedAll,
-      unlinkedGroups: unlinkedAll
-    });
-    const filterPreset = presetResults.filterPreset;
-    const hasPresetFilter = filterPreset !== this._defaultFilterPreset;
+    let props = propsAll;
+    let linked = linkedAll;
+    let unlinked = shouldScopeUnlinked ? unlinkedAll : [];
 
-    let props = presetResults.propertyGroups;
-    let linked = presetResults.linkedGroups;
-    let unlinked = presetResults.unlinkedGroups;
-
-    if (queryLower) {
+    if (searchMode === 'query') {
+      if (canApplyScopedQuery) {
+        props = this.filterPropertyGroupsByScopedQuery(propsAll, queryFilterState);
+        linked = this.filterLineGroupsByScopedQuery(linkedAll, queryFilterState);
+        unlinked = shouldScopeUnlinked
+          ? this.filterLineGroupsByScopedQuery(unlinkedAll, queryFilterState)
+          : [];
+      }
+    } else if (textQueryLower) {
       const nextProps = [];
       for (const g of props) {
         const propertyName = (g?.propertyName || '').trim();
         if (!propertyName) continue;
         const recs = (g?.records || []).filter((r) => {
           const name = (r?.getName?.() || '').toLowerCase();
-          return name.includes(queryLower);
+          return name.includes(textQueryLower);
         });
         if (recs.length > 0) nextProps.push({ propertyName, records: recs });
       }
@@ -3184,7 +3427,7 @@ class Plugin extends AppPlugin {
         if (!recordGuid) continue;
         const lines = (g?.lines || []).filter((line) => {
           const text = this.segmentsToPlainText(line?.segments || []);
-          return text.toLowerCase().includes(queryLower);
+          return text.toLowerCase().includes(textQueryLower);
         });
         if (lines.length > 0) nextLinked.push({ record, lines });
       }
@@ -3197,7 +3440,7 @@ class Plugin extends AppPlugin {
         if (!recordGuid) continue;
         const lines = (g?.lines || []).filter((line) => {
           const text = this.segmentsToPlainText(line?.segments || []);
-          return text.toLowerCase().includes(queryLower);
+          return text.toLowerCase().includes(textQueryLower);
         });
         if (lines.length > 0) nextUnlinked.push({ record, lines });
       }
@@ -3207,7 +3450,8 @@ class Plugin extends AppPlugin {
     const filteredPropRefCount = props.reduce((n, g) => n + (g?.records?.length || 0), 0);
     const filteredLinkedRefCount = this.countLinkedReferences(linked);
     const filteredUnlinkedRefCount = this.countLinkedReferences(unlinked);
-    const hasScopedView = hasPresetFilter || Boolean(queryLower);
+    const hasScopedView = (searchMode === 'text' && Boolean(textQueryLower)) || (searchMode === 'query' && canApplyScopedQuery);
+    const showUnlinkedCounts = searchMode !== 'query' || shouldScopeUnlinked;
 
     const filteredUniquePages = new Set();
     for (const g of props) {
@@ -3235,9 +3479,30 @@ class Plugin extends AppPlugin {
     unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     const parts = [];
-    if (hasScopedView) {
-      if (hasPresetFilter) parts.push(`Preset: ${this.getFilterLabel(filterPreset)}`);
-      if (queryLower) {
+    if (searchMode === 'query') {
+      if (query) {
+        const shortQuery = query.length > 24 ? `${query.slice(0, 24)}...` : query;
+        parts.push(`Query: "${shortQuery}"`);
+      }
+      if (queryFilterState?.error) {
+        parts.push('Invalid query');
+      } else if (queryFilterState?.loading === true && canApplyScopedQuery !== true) {
+        parts.push('Applying...');
+      }
+
+      if (canApplyScopedQuery) {
+        if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
+        if (totalPropRefCount > 0) parts.push(`${filteredPropRefCount}/${totalPropRefCount} prop refs`);
+        if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} line refs`);
+        if (showUnlinkedCounts && totalUnlinkedRefCount > 0) parts.push(`${filteredUnlinkedRefCount}/${totalUnlinkedRefCount} unlinked refs`);
+      } else {
+        if (totalUniquePages.size > 0) parts.push(`${totalUniquePages.size} pages`);
+        if (totalPropRefCount > 0) parts.push(`${totalPropRefCount} prop refs`);
+        if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} line refs`);
+        if (showUnlinkedCounts && totalUnlinkedRefCount > 0) parts.push(`${totalUnlinkedRefCount} unlinked refs`);
+      }
+    } else if (hasScopedView) {
+      if (textQueryLower) {
         const shortQuery = query.length > 24 ? `${query.slice(0, 24)}...` : query;
         parts.push(`Search: "${shortQuery}"`);
       }
@@ -3253,8 +3518,10 @@ class Plugin extends AppPlugin {
     }
     state.countEl.textContent = parts.join(' | ');
 
-    if (filterPreset === 'same_collection' && state.filterMetaLoading === true) {
-      this.appendNote(body, 'Resolving collection matches...');
+    if (searchMode === 'query' && queryFilterState?.error) {
+      this.appendError(body, queryFilterState.error);
+    } else if (searchMode === 'query' && queryFilterState?.loading === true) {
+      this.appendNote(body, canApplyScopedQuery ? 'Refreshing query results...' : 'Applying query to current backreferences...');
     }
 
     const propertySection = this.appendCollapsibleSection(body, state, {
@@ -3266,7 +3533,7 @@ class Plugin extends AppPlugin {
     } else if (props.length === 0) {
       this.appendEmpty(propertySection.bodyEl, hasScopedView ? 'No matching property references.' : 'No property references.');
     } else {
-      this.appendPropertyReferenceGroups(propertySection.bodyEl, props, { query, state });
+      this.appendPropertyReferenceGroups(propertySection.bodyEl, props, { query: highlightQuery, state });
     }
 
     const divider = document.createElement('div');
@@ -3283,7 +3550,7 @@ class Plugin extends AppPlugin {
       this.appendLinkedReferenceGroups(linkedSection.bodyEl, linked, {
         state,
         maxResults,
-        query,
+        query: highlightQuery,
         totalLineCount: totalLinkedRefCount,
         emptyMessage: hasScopedView ? 'No matching linked references.' : 'No linked references.'
       });
@@ -3317,7 +3584,7 @@ class Plugin extends AppPlugin {
     this.appendLinkedReferenceGroups(unlinkedSection.bodyEl, unlinked, {
       state,
       maxResults,
-      query,
+      query: highlightQuery,
       totalLineCount: totalUnlinkedRefCount,
       emptyMessage: hasScopedView ? 'No matching unlinked references.' : 'No unlinked references.'
     });
@@ -3988,8 +4255,10 @@ class Plugin extends AppPlugin {
       .tlr-header {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 8px;
         min-height: 30px;
+        row-gap: 8px;
         margin-bottom: 10px;
       }
 
@@ -4249,20 +4518,19 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-search-wrap {
-        display: none;
+        display: flex;
         align-items: center;
         gap: 6px;
         padding: 0 8px;
         height: 30px;
         min-height: 30px;
+        flex: 0 1 clamp(240px, 36vw, 440px);
+        min-width: min(100%, 240px);
         border: 1px solid var(--input-border-color, var(--divider-color, var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)))));
-        border-radius: 3px;
+        border-radius: 999px;
         background: var(--input-bg-color, var(--cmdpal-input-bg-color, var(--bg-panel, transparent)));
         box-sizing: border-box;
       }
-
-      .tlr-search-open .tlr-search-wrap { display: flex; }
-      .tlr-search-open .tlr-search-toggle { display: none; }
 
       .tlr-empty-compact .tlr-search-toggle,
       .tlr-empty-compact .tlr-search-wrap,
@@ -4282,8 +4550,10 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-search-input {
-        width: clamp(150px, 22vw, 260px);
+        width: 100%;
         max-width: none;
+        min-width: 0;
+        flex: 1 1 auto;
         height: 20px;
         min-height: 20px;
         border: 0;
@@ -4654,14 +4924,18 @@ class Plugin extends AppPlugin {
         line-height: inherit;
       }
 
-      .tlr-loading .tlr-filter-toggle,
-      .tlr-loading .tlr-search-toggle { opacity: 0.6; cursor: default; }
+      .tlr-loading .tlr-search-wrap { opacity: 0.78; }
       .tlr-loading .tlr-sort-toggle { opacity: 0.6; cursor: default; }
 
       @media (max-width: 760px) {
-        .tlr-header {
-          flex-wrap: wrap;
-          row-gap: 8px;
+        .tlr-spacer {
+          display: none;
+        }
+
+        .tlr-search-wrap {
+          order: 10;
+          flex: 1 1 100%;
+          min-width: 0;
         }
 
         .tlr-sort-menu {
@@ -4678,10 +4952,7 @@ class Plugin extends AppPlugin {
           max-width: min(92vw, 300px);
         }
 
-        .tlr-search-input {
-          width: min(58vw, 220px);
-          max-width: none;
-        }
+        .tlr-search-input { max-width: none; }
       }
     `);
   }

@@ -35,18 +35,12 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - `Page Created Date`: sort by source note creation date.
   - Direction can be `Ascending` or `Descending`.
 
-- **Use advanced filter presets**
-  - `All References`: show the full footer.
-  - `Tasks`: only show task backlinks.
-  - `Recently Active`: only show sources updated in the last 7 days.
-  - `This Collection`: only show source notes from the same collection as the active note.
-  - `Mentions`: only show backlinks whose line contains a person mention.
-  - `Journal Pages`: only show sources that come from journal pages.
-  - Presets stack with the text search, so you can narrow first by preset and then by text.
-
-- **Show search filter**
-  - Clicking the search icon toggles a text field.
-  - Typing filters mentions and highlights matching text.
+- **Use the inline filter/query bar**
+  - Plain text keeps the lightweight local filter behavior.
+  - Query syntax like `@task`, `@Journey`, `"exact phrase"`, and `foo AND bar` uses Thymer's search language, but stays scoped to the current page's backreferences.
+  - Record-level queries narrow Property References and Linked References together.
+  - Unlinked References join the scoped query only when that section is expanded.
+  - Plain-text matches still highlight inside rendered titles and lines.
 
 - **Expand linked context**
   - Each linked mention starts with a compact `Show more context` control.
@@ -93,10 +87,11 @@ Edit `custom` in `plugin.json`:
 3. Confirm Property References are grouped by property when applicable.
 4. Confirm Linked References are grouped by source note.
 5. Confirm Unlinked References appear separately when the note title is mentioned without a record link.
-6. Choose an advanced preset and verify the footer narrows to the expected sources.
-7. Toggle search and verify filtering/highlighting.
-8. Change sort field and direction and verify order updates.
-9. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
-10. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
-11. Confirm the status bar count matches the footer.
-12. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
+6. Type plain text and verify the footer filters/highlights matching titles and lines.
+7. Type query syntax such as `@task`, `@Journey`, and `foo AND bar` and verify only matching backreferences remain.
+8. Expand `Unlinked References`, repeat a query, and verify that section joins the scoped results.
+9. Change sort field and direction and verify order updates.
+10. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
+11. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
+12. Confirm the status bar count matches the footer.
+13. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
