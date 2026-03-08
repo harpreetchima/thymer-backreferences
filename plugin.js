@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.8';
+    this._version = '0.4.9';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -2011,9 +2011,14 @@ class Plugin extends AppPlugin {
       out.push(t);
     };
 
-    // Most record-link properties currently expose their referenced record GUID via .text().
-    // We also look at .choice() as a fallback for older/quirky configs.
     let raw = [];
+    try {
+      if (prop && 'value' in prop) {
+        raw.push(prop.value);
+      }
+    } catch (e) {
+      // ignore
+    }
     try {
       raw.push(prop.text?.());
     } catch (e) {
@@ -2026,12 +2031,58 @@ class Plugin extends AppPlugin {
     }
 
     for (const r of raw) {
-      for (const v of this.expandPossibleListString(r)) {
-        push(v);
-      }
+      this.collectPropertyCandidateValues(r, push);
     }
 
     return out;
+  }
+
+  collectPropertyCandidateValues(raw, push) {
+    if (raw == null) return;
+
+    if (typeof raw === 'string') {
+      for (const v of this.expandPossibleListString(raw)) {
+        push(v);
+      }
+      return;
+    }
+
+    if (Array.isArray(raw)) {
+      const kind = typeof raw[0] === 'string' ? raw[0].trim().toLowerCase() : '';
+      if (raw.length === 2 && kind) {
+        if (kind === 'record' || kind === 'records') {
+          this.collectPropertyCandidateValues(raw[1], push);
+          return;
+        }
+        if (kind === 'text' || kind === 'url' || kind === 'hashtag' || kind === 'choice'
+          || kind === 'datetime' || kind === 'number' || kind === 'banner' || kind === 'file'
+          || kind === 'image') {
+          this.collectPropertyCandidateValues(raw[1], push);
+          return;
+        }
+      }
+
+      for (const item of raw) {
+        this.collectPropertyCandidateValues(item, push);
+      }
+      return;
+    }
+
+    if (typeof raw === 'object') {
+      const guidKeys = ['guid', 'recordGuid', 'record_guid', 'targetGuid', 'target_guid'];
+      for (const key of guidKeys) {
+        const value = raw?.[key];
+        if (typeof value === 'string') push(value);
+      }
+
+      if ('value' in raw) {
+        this.collectPropertyCandidateValues(raw.value, push);
+      }
+
+      if (Array.isArray(raw.records)) {
+        this.collectPropertyCandidateValues(raw.records, push);
+      }
+    }
   }
 
   expandPossibleListString(v) {
