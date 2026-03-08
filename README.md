@@ -35,6 +35,15 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - `Page Created Date`: sort by source note creation date.
   - Direction can be `Ascending` or `Descending`.
 
+- **Use advanced filter presets**
+  - `All References`: show the full footer.
+  - `Tasks`: only show task backlinks.
+  - `Recently Active`: only show sources updated in the last 7 days.
+  - `This Collection`: only show source notes from the same collection as the active note.
+  - `Mentions`: only show backlinks whose line contains a person mention.
+  - `Journal Pages`: only show sources that come from journal pages.
+  - Presets stack with the text search, so you can narrow first by preset and then by text.
+
 - **Show search filter**
   - Clicking the search icon toggles a text field.
   - Typing filters mentions and highlights matching text.
@@ -84,9 +93,10 @@ Edit `custom` in `plugin.json`:
 3. Confirm Property References are grouped by property when applicable.
 4. Confirm Linked References are grouped by source note.
 5. Confirm Unlinked References appear separately when the note title is mentioned without a record link.
-6. Toggle search and verify filtering/highlighting.
-7. Change sort field and direction and verify order updates.
-8. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
-9. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
-10. Confirm the status bar count matches the footer.
-11. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
+6. Choose an advanced preset and verify the footer narrows to the expected sources.
+7. Toggle search and verify filtering/highlighting.
+8. Change sort field and direction and verify order updates.
+9. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
+10. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
+11. Confirm the status bar count matches the footer.
+12. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
