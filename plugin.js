@@ -2632,7 +2632,7 @@ class Plugin extends AppPlugin {
       count: filteredUnlinkedRefCount,
       collapsed: this._unlinkedCollapsed,
       toggleAction: 'toggle-unlinked-refs',
-      extraHeaderContent: (filteredUnlinkedRefCount > 1) ? this.buildLinkAllButton() : null
+      extraHeaderContent: (filteredUnlinkedRefCount > 1) ? this.buildLinkAllButton(filteredUnlinkedRefCount) : null
     });
     body.appendChild(unlinkedBlock);
     const unlinkedBody = unlinkedBlock.querySelector('.tlr-section-body');
@@ -2650,6 +2650,9 @@ class Plugin extends AppPlugin {
     block.className = 'tlr-section-block';
     block.dataset.section = sectionKey || '';
     if (collapsed) block.classList.add('tlr-section-collapsed');
+
+    const headerRow = document.createElement('div');
+    headerRow.className = 'tlr-section-header-row';
 
     const header = document.createElement('button');
     header.type = 'button';
@@ -2671,26 +2674,35 @@ class Plugin extends AppPlugin {
     header.appendChild(caret);
     header.appendChild(titleEl);
     header.appendChild(countEl);
+    headerRow.appendChild(header);
 
     if (extraHeaderContent) {
-      header.appendChild(extraHeaderContent);
+      headerRow.appendChild(extraHeaderContent);
     }
 
     const bodyEl = document.createElement('div');
     bodyEl.className = 'tlr-section-body';
 
-    block.appendChild(header);
+    block.appendChild(headerRow);
     block.appendChild(bodyEl);
     return block;
   }
 
-  buildLinkAllButton() {
+  buildLinkAllButton(count) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'tlr-link-all-btn button-none button-small button-minimal-hover';
+    btn.className = 'tlr-link-all-btn button-none';
     btn.dataset.action = 'link-all-unlinked';
-    btn.textContent = 'Link all';
     btn.title = 'Create links for all unlinked references';
+    const label = document.createElement('span');
+    label.textContent = 'Link all';
+    btn.appendChild(label);
+    if (typeof count === 'number') {
+      const countSpan = document.createElement('span');
+      countSpan.className = 'tlr-link-all-count text-details';
+      countSpan.textContent = `${count}`;
+      btn.appendChild(countSpan);
+    }
     return btn;
   }
 
@@ -2766,18 +2778,16 @@ class Plugin extends AppPlugin {
         const mainRow = document.createElement('div');
         mainRow.className = 'tlr-line-main';
         mainRow.appendChild(btn);
-        entryEl.appendChild(mainRow);
 
-        // Sub-row: context controls (left) + Link button (right), centered
+        // Inline actions: Link button + context toggle, right-aligned
         const actionsRow = document.createElement('div');
         actionsRow.className = 'tlr-unlinked-actions-row';
-
+        actionsRow.appendChild(linkBtn);
         if (state && ctx) {
           actionsRow.appendChild(this.buildLinkedContextControls(line.guid, ctx));
         }
-
-        actionsRow.appendChild(linkBtn);
-        entryEl.appendChild(actionsRow);
+        mainRow.appendChild(actionsRow);
+        entryEl.appendChild(mainRow);
 
         if (state && ctx) {
           if (ctx.loading === true) {
@@ -4152,11 +4162,17 @@ class Plugin extends AppPlugin {
 
       /* Collapsible section blocks */
       .tlr-section-block { margin-bottom: 4px; }
+      .tlr-section-header-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
       .tlr-section-header {
         display: flex;
         align-items: center;
         gap: 4px;
-        width: 100%;
+        flex: 1;
+        min-width: 0;
         padding: 4px 0;
         font-size: 0.8em;
         font-weight: 600;
@@ -4221,17 +4237,17 @@ class Plugin extends AppPlugin {
       .tlr-group-collapsed .tlr-group-caret::before { transform: rotate(-90deg); }
       .tlr-group-collapsed .tlr-lines { display: none; }
 
-      /* Actions row for unlinked refs: context controls left, Link button right */
+      /* Inline actions for unlinked refs: right-aligned inside tlr-line-main */
       .tlr-unlinked-actions-row {
         display: flex;
         align-items: center;
-        justify-content: center;
-        gap: 6px;
-        padding: 1px 0 2px;
+        gap: 4px;
+        flex-shrink: 0;
+        margin-left: auto;
         opacity: 0;
         transition: opacity 0.12s;
       }
-      .tlr-line-entry:hover .tlr-unlinked-actions-row { opacity: 1; }
+      .tlr-line-main:hover .tlr-unlinked-actions-row { opacity: 1; }
       .tlr-unlinked-actions-row .tlr-line-actions { margin: 0; }
 
       /* Link button */
@@ -4247,8 +4263,10 @@ class Plugin extends AppPlugin {
       }
       .tlr-link-btn:hover { opacity: 0.75; }
       .tlr-link-all-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         font-size: 0.8em;
-        margin-left: auto;
         flex-shrink: 0;
         color: var(--accent, var(--link-color, #4a90e2));
         padding: 0;
@@ -4262,6 +4280,7 @@ class Plugin extends AppPlugin {
         opacity: 0.8;
       }
       .tlr-link-all-btn:hover { opacity: 1; }
+      .tlr-link-all-count { text-decoration: none; }
 
       /* Filter chips */
       .tlr-chips-row {
