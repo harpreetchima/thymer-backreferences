@@ -3464,8 +3464,6 @@ class Plugin extends AppPlugin {
       const re = new RegExp(`(?:^|(?<=[^a-zA-Z0-9]))${escaped}`, 'gi');
       let m;
       while ((m = re.exec(s)) !== null) {
-        // m[0] may include a leading non-word char from the lookbehind alternative
-        // Since we use lookbehind, m.index is the start of phrase itself
         const start = m.index;
         ranges.push([start, start + phrase.length]);
       }
