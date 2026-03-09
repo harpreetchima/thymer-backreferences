@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.25';
+    this._version = '0.4.26';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -5245,6 +5245,8 @@ class Plugin extends AppPlugin {
   injectCss() {
     this.ui.injectCSS(`
       .tlr-footer {
+        --tlr-child-indent: 26px;
+        --tlr-context-rail-gap: 8px;
         margin-top: 16px;
         color: var(--text, inherit);
         font-size: 13px;
@@ -5825,7 +5827,15 @@ class Plugin extends AppPlugin {
         flex: 0 0 auto;
       }
 
-      .tlr-prop-records { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+      .tlr-prop-records {
+        margin-top: 10px;
+        margin-left: var(--tlr-child-indent);
+        padding-left: 10px;
+        border-left: 1px solid var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
 
       .tlr-prop-record {
         display: block;
@@ -5892,12 +5902,20 @@ class Plugin extends AppPlugin {
         flex: 0 0 auto;
       }
 
-      .tlr-lines { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+      .tlr-lines {
+        margin-top: 10px;
+        margin-left: var(--tlr-child-indent);
+        padding-left: 10px;
+        border-left: 1px solid var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
 
       .tlr-line-entry {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
       }
 
       .tlr-line-main {
@@ -6005,13 +6023,15 @@ class Plugin extends AppPlugin {
       .tlr-context-list {
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        gap: 3px;
+        margin-left: 16px;
+        padding-left: var(--tlr-context-rail-gap);
       }
 
       .tlr-context-line {
         display: block;
         width: 100%;
-        padding: 6px 10px 6px calc(10px + var(--tlr-context-indent, 0px));
+        padding: 5px 10px 5px calc(8px + var(--tlr-context-indent, 0px));
         text-align: left;
         color: var(--text, inherit);
         line-height: 1.35;
@@ -6072,6 +6092,11 @@ class Plugin extends AppPlugin {
       .tlr-loading .tlr-sort-toggle { opacity: 0.6; cursor: default; }
 
       @media (max-width: 760px) {
+        .tlr-footer {
+          --tlr-child-indent: 22px;
+          --tlr-context-rail-gap: 6px;
+        }
+
         .tlr-header {
           gap: 8px;
           align-items: flex-start;
