@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.19';
+    this._version = '0.4.20';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -1328,8 +1328,9 @@ class Plugin extends AppPlugin {
       row.appendChild(right);
 
       row.addEventListener('mouseenter', () => {
+        if (state.searchAutocompleteSelectedIndex === index) return;
         state.searchAutocompleteSelectedIndex = index;
-        this.renderSearchAutocomplete(state);
+        this.syncRenderedSearchAutocompleteSelection(state);
       });
       row.addEventListener('mousedown', (e) => {
         e.preventDefault();
@@ -1405,6 +1406,17 @@ class Plugin extends AppPlugin {
     } else if (rowBottom > viewportBottom) {
       scroll.scrollTop = rowBottom - scroll.clientHeight;
     }
+  }
+
+  syncRenderedSearchAutocompleteSelection(state) {
+    const menu = state?.searchAutocompleteEl || null;
+    if (!menu) return;
+    const selectedIndex = state?.searchAutocompleteSelectedIndex || 0;
+    const rows = menu.querySelectorAll?.('.autocomplete--option[data-index]') || [];
+    rows.forEach((row) => {
+      const rowIndex = Number(row.dataset.index);
+      row.classList.toggle('autocomplete--option-selected', rowIndex === selectedIndex);
+    });
   }
 
   syncSearchAutocompleteScrollbar(state) {
