@@ -39,6 +39,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - The header keeps `Filter` and `Sort` pinned in the top-right.
   - Clicking `Filter` reveals the query bar on its own row below the header.
   - The query bar borrows Thymer's native collection-filter styling and only shows the accent outline while focused.
+  - Query autocomplete supports collections, built-in keys, users, and collection properties; long property lists stay scrollable in a native-style dropdown.
   - Plain text keeps the lightweight local filter behavior.
   - Query syntax like `@task`, `@Journey`, `"exact phrase"`, and `foo AND bar` uses Thymer's search language, but stays scoped to the current page's backreferences.
   - Record-level queries narrow Property References and Linked References together.
@@ -93,11 +94,13 @@ Edit `custom` in `plugin.json`:
 6. Confirm only the Filter and Sort buttons appear in the header's top-right before the filter bar is opened.
 7. Click `Filter` and verify the query bar appears on its own row below the header.
 8. Focus the query bar and verify the accent outline appears only while focused.
-9. Type plain text and verify the footer filters/highlights matching titles and lines.
-10. Type query syntax such as `@task`, `@Journey`, and `foo AND bar` and verify only matching backreferences remain.
-11. Expand `Unlinked References`, repeat a query, and verify that section joins the scoped results.
-12. Change sort field and direction and verify order updates.
-13. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
-14. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
-15. Confirm the status bar count matches the footer.
-16. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
+9. Type `@Sources`, accept the collection autocomplete, and verify the query remains `@Sources` rather than `@@Sources`.
+10. Type `@Sources.` and verify all properties are available in a scrollable autocomplete list.
+11. Type plain text and verify the footer filters/highlights matching titles and lines.
+12. Type query syntax such as `@task`, `@Journey`, and `foo AND bar` and verify only matching backreferences remain.
+13. Expand `Unlinked References`, repeat a query, and verify that section joins the scoped results.
+14. Change sort field and direction and verify order updates.
+15. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
+16. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
+17. Confirm the status bar count matches the footer.
+18. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.

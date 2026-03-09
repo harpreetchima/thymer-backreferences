@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.17';
+    this._version = '0.4.19';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -1204,7 +1204,7 @@ class Plugin extends AppPlugin {
           replaceEnd: fieldContext.replaceEnd
         }));
       }
-      return this.dedupeSearchAutocompleteItems(items).slice(0, 10);
+      return this.dedupeSearchAutocompleteItems(items);
     }
 
     const operatorContext = this.parseQueryOperatorContext(query, caret);
@@ -1231,7 +1231,7 @@ class Plugin extends AppPlugin {
         label: `@${keyword}`,
         icon: 'ti-at',
         detail: 'Filter',
-        insertText: `@${keyword}`,
+        insertText: keyword,
         replaceStart: tokenContext.replaceStart,
         replaceEnd: tokenContext.replaceEnd
       }));
@@ -1243,7 +1243,7 @@ class Plugin extends AppPlugin {
         label: `@${key}`,
         icon: 'ti-key',
         detail: 'Built-in key',
-        insertText: `@${key}`,
+        insertText: key,
         replaceStart: tokenContext.replaceStart,
         replaceEnd: tokenContext.replaceEnd
       }));
@@ -1255,7 +1255,7 @@ class Plugin extends AppPlugin {
         label: `@${user.name}`,
         icon: 'ti-user',
         detail: 'User',
-        insertText: `@${this.formatQueryIdentifier(user.name)}`,
+        insertText: this.formatQueryIdentifier(user.name),
         replaceStart: tokenContext.replaceStart,
         replaceEnd: tokenContext.replaceEnd
       }));
@@ -1267,7 +1267,7 @@ class Plugin extends AppPlugin {
         label: `@${collection.name}`,
         icon: 'ti-database',
         detail: 'Collection',
-        insertText: `@${this.formatQueryIdentifier(collection.name)}`,
+        insertText: this.formatQueryIdentifier(collection.name),
         replaceStart: tokenContext.replaceStart,
         replaceEnd: tokenContext.replaceEnd
       }));
@@ -1290,6 +1290,11 @@ class Plugin extends AppPlugin {
     scroll.className = 'vscroll-node';
     const content = document.createElement('div');
     content.className = 'vcontent';
+    const scrollbar = document.createElement('div');
+    scrollbar.className = 'vscrollbar scrollbar';
+    const thumb = document.createElement('div');
+    thumb.className = 'vscrollbar-thumb scrollbar-thumb clickable';
+    thumb.innerHTML = '&nbsp;';
 
     items.forEach((item, index) => {
       const row = document.createElement('div');
@@ -1339,8 +1344,94 @@ class Plugin extends AppPlugin {
     });
 
     scroll.appendChild(content);
+    scroll.addEventListener('scroll', () => {
+      this.syncSearchAutocompleteScrollbar(state);
+    });
+
+    thumb.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const startY = e.clientY;
+      const startScrollTop = scroll.scrollTop;
+      const onMouseMove = (moveEvent) => {
+        const trackHeight = scrollbar.clientHeight || scroll.clientHeight || 0;
+        const thumbHeight = thumb.clientHeight || 0;
+        const maxThumbTop = Math.max(1, trackHeight - thumbHeight);
+        const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+        if (maxScrollTop <= 0) return;
+        const deltaRatio = (moveEvent.clientY - startY) / maxThumbTop;
+        scroll.scrollTop = Math.max(0, Math.min(maxScrollTop, startScrollTop + (deltaRatio * maxScrollTop)));
+      };
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove, true);
+        document.removeEventListener('mouseup', onMouseUp, true);
+      };
+
+      document.addEventListener('mousemove', onMouseMove, true);
+      document.addEventListener('mouseup', onMouseUp, true);
+    });
+
     list.appendChild(scroll);
+    scrollbar.appendChild(thumb);
+    list.appendChild(scrollbar);
     menu.appendChild(list);
+
+    const sync = () => {
+      this.scrollSelectedSearchAutocompleteItemIntoView(state);
+      this.syncSearchAutocompleteScrollbar(state);
+    };
+    sync();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(sync);
+    } else {
+      setTimeout(sync, 0);
+    }
+  }
+
+  scrollSelectedSearchAutocompleteItemIntoView(state) {
+    const menu = state?.searchAutocompleteEl || null;
+    const scroll = menu?.querySelector?.('.vscroll-node') || null;
+    const selected = menu?.querySelector?.(`.autocomplete--option[data-index="${state?.searchAutocompleteSelectedIndex || 0}"]`) || null;
+    if (!scroll || !selected) return;
+
+    const rowTop = selected.offsetTop;
+    const rowBottom = rowTop + selected.offsetHeight;
+    const viewportTop = scroll.scrollTop;
+    const viewportBottom = viewportTop + scroll.clientHeight;
+    if (rowTop < viewportTop) {
+      scroll.scrollTop = rowTop;
+    } else if (rowBottom > viewportBottom) {
+      scroll.scrollTop = rowBottom - scroll.clientHeight;
+    }
+  }
+
+  syncSearchAutocompleteScrollbar(state) {
+    const menu = state?.searchAutocompleteEl || null;
+    const scroll = menu?.querySelector?.('.vscroll-node') || null;
+    const scrollbar = menu?.querySelector?.('.vscrollbar') || null;
+    const thumb = menu?.querySelector?.('.vscrollbar-thumb') || null;
+    if (!scroll || !scrollbar || !thumb) return;
+
+    const viewportHeight = scroll.clientHeight || 0;
+    const scrollHeight = scroll.scrollHeight || 0;
+    const trackHeight = scrollbar.clientHeight || viewportHeight;
+    if (!viewportHeight || !scrollHeight || !trackHeight || scrollHeight <= viewportHeight + 1) {
+      scrollbar.classList.remove('has-thumb');
+      thumb.style.height = '0px';
+      thumb.style.transform = 'translateY(0px)';
+      return;
+    }
+
+    const thumbHeight = Math.max(16, Math.round((viewportHeight / scrollHeight) * trackHeight));
+    const maxScrollTop = Math.max(1, scrollHeight - viewportHeight);
+    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+    const thumbTop = maxThumbTop * (scroll.scrollTop / maxScrollTop);
+
+    scrollbar.classList.add('has-thumb');
+    thumb.style.height = `${thumbHeight}px`;
+    thumb.style.transform = `translateY(${thumbTop}px)`;
   }
 
   syncSearchAutocompleteControlState(state) {
@@ -5244,10 +5335,9 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-search-input:focus {
-        border-color: var(--text-hilite, var(--link-color, var(--accent, #39a98c))) !important;
-        outline: 1px solid var(--text-hilite, var(--link-color, var(--accent, #39a98c))) !important;
-        box-shadow: 0 0 10px rgba(57, 169, 140, 0.28) !important;
-        box-shadow: 0 0 10px color-mix(in srgb, var(--text-hilite, var(--link-color, var(--accent, #39a98c))) 40%, transparent) !important;
+        border: var(--input-border-focus, 1px solid var(--input-border-color, var(--divider-color, rgba(0, 0, 0, 0.12)))) !important;
+        outline: var(--input-border-focus, 1px solid var(--input-border-color, var(--divider-color, rgba(0, 0, 0, 0.12)))) !important;
+        box-shadow: var(--input-border-shadow, none) !important;
       }
 
       .tlr-search-autocomplete {
@@ -5267,6 +5357,47 @@ class Plugin extends AppPlugin {
 
       .tlr-search-autocomplete .autocomplete--option {
         border-radius: 6px;
+      }
+
+      .tlr-search-autocomplete .autocomplete {
+        position: relative;
+        overflow: hidden;
+        max-height: 300px;
+      }
+
+      .tlr-search-autocomplete .vscroll-node {
+        max-height: 300px;
+        overflow-y: auto;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        touch-action: pan-y;
+      }
+
+      .tlr-search-autocomplete .vscroll-node::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+
+      .tlr-search-autocomplete .vcontent {
+        position: relative;
+      }
+
+      .tlr-search-autocomplete .vscrollbar {
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: 15px;
+        user-select: none;
+        display: none;
+      }
+
+      .tlr-search-autocomplete .vscrollbar.has-thumb {
+        display: block;
+      }
+
+      .tlr-search-autocomplete .vscrollbar-thumb {
+        min-height: 16px;
       }
 
       .tlr-search-autocomplete .autocomplete--option-right {
