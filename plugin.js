@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.16';
+    this._version = '0.4.17';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -189,6 +189,7 @@ class Plugin extends AppPlugin {
       state.sortBy = pref.sortBy;
       state.sortDir = pref.sortDir;
       state.sortMenuOpen = false;
+      state.searchOpen = Boolean((state.searchQuery || '').trim());
     }
 
     this.mountFooter(panel, state);
@@ -235,8 +236,12 @@ class Plugin extends AppPlugin {
         sortToggleEl: null,
         sortMenuEl: null,
         searchToggleEl: null,
+        searchRowEl: null,
         searchWrapEl: null,
         searchInputEl: null,
+        searchHighlightTextEl: null,
+        searchClearEl: null,
+        searchRefreshEl: null,
         searchAutocompleteEl: null,
         searchAutocompleteItems: [],
         searchAutocompleteSelectedIndex: 0,
@@ -292,8 +297,12 @@ class Plugin extends AppPlugin {
       sortToggleEl: null,
       sortMenuEl: null,
       searchToggleEl: null,
+      searchRowEl: null,
       searchWrapEl: null,
       searchInputEl: null,
+      searchHighlightTextEl: null,
+      searchClearEl: null,
+      searchRefreshEl: null,
       searchAutocompleteEl: null,
       searchAutocompleteItems: [],
       searchAutocompleteSelectedIndex: 0,
@@ -382,10 +391,10 @@ class Plugin extends AppPlugin {
       state.rootEl = this.buildFooterRoot(state);
       state.bodyEl = state.rootEl.querySelector('[data-role="body"]');
       state.countEl = state.rootEl.querySelector('[data-role="count"]');
-      this.setSearchOpen(state, state.searchOpen === true);
+      this.setSearchOpen(state, state.searchOpen === true || Boolean((state.searchQuery || '').trim()));
       this.syncSearchAutocompleteControlState(state);
       this.renderSearchAutocomplete(state);
-      this.setSearchAutocompleteOpen(state, state.searchAutocompleteOpen === true);
+      this.setSearchAutocompleteOpen(state, state.searchOpen === true && state.searchAutocompleteOpen === true);
       this.renderFilterMenu(state);
       this.syncFilterControlState(state);
       this.setFilterMenuOpen(state, state.filterMenuOpen === true);
@@ -445,6 +454,12 @@ class Plugin extends AppPlugin {
     const header = document.createElement('div');
     header.className = 'tlr-header';
 
+    const headerMain = document.createElement('div');
+    headerMain.className = 'tlr-header-main';
+
+    const headerControls = document.createElement('div');
+    headerControls.className = 'tlr-header-controls';
+
     const toggleBtn = document.createElement('button');
     toggleBtn.className = 'tlr-btn tlr-toggle button-none button-small button-minimal-hover';
     toggleBtn.type = 'button';
@@ -461,25 +476,45 @@ class Plugin extends AppPlugin {
     count.dataset.role = 'count';
     count.textContent = '';
 
-    const spacer = document.createElement('div');
-    spacer.className = 'tlr-spacer';
+    const filterWrap = document.createElement('div');
+    filterWrap.className = 'tlr-filter-wrap';
+
+    const filterToggle = document.createElement('button');
+    filterToggle.className = 'tlr-btn tlr-filter-toggle tlr-search-toggle button-none button-small button-minimal-hover tooltip id--filter-button';
+    filterToggle.type = 'button';
+    filterToggle.dataset.action = 'toggle-search';
+    filterToggle.setAttribute('aria-expanded', state.searchOpen === true ? 'true' : 'false');
+    filterToggle.setAttribute('data-tooltip', 'Filter');
+    filterToggle.setAttribute('data-tooltip-dir', 'top');
+    try {
+      const filterIcon = this.ui.createIcon('ti-filter');
+      filterIcon.classList.add('id--filter-icon');
+      filterToggle.appendChild(filterIcon);
+    } catch (e) {
+      filterToggle.textContent = 'Filter';
+    }
+    filterWrap.appendChild(filterToggle);
+
+    const searchRow = document.createElement('div');
+    searchRow.className = 'tlr-search-row';
 
     const searchWrap = document.createElement('div');
-    searchWrap.className = 'tlr-search-wrap query-input';
+    searchWrap.className = 'tlr-search-wrap tlr-query-input query-input';
 
-    const searchIcon = document.createElement('div');
-    searchIcon.className = 'tlr-search-icon';
-    try {
-      searchIcon.appendChild(this.ui.createIcon('ti-search'));
-    } catch (e) {
-      searchIcon.textContent = 'Search';
-    }
+    const queryWrap = document.createElement('div');
+    queryWrap.className = 'query-input--wrapper';
+
+    const highlight = document.createElement('div');
+    highlight.className = 'query-input--highlight';
+
+    const highlightText = document.createElement('span');
+    highlight.appendChild(highlightText);
 
     const input = document.createElement('input');
-    input.className = 'tlr-search-input query-input--field form-input';
+    input.className = 'tlr-search-input query-input--field w-full form-input is-collection-filter';
     input.type = 'text';
     input.name = 'backreferences-filter';
-    input.placeholder = 'Text or query, e.g. @task or @Project.status = "In progress"';
+    input.placeholder = '@Collection.property = "value" AND title';
     input.title = 'Filter backreferences with plain text or Thymer query syntax';
     input.autocomplete = 'off';
     input.spellcheck = false;
@@ -544,40 +579,67 @@ class Plugin extends AppPlugin {
     });
 
     input.addEventListener('focus', () => {
+      this.updateSearchFieldState(state);
       this.updateSearchAutocomplete(state);
     });
 
     input.addEventListener('click', () => {
+      this.updateSearchFieldState(state);
       this.updateSearchAutocomplete(state);
+    });
+
+    input.addEventListener('blur', () => {
+      this.updateSearchFieldState(state);
     });
 
     input.addEventListener('keyup', (e) => {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape') {
         return;
       }
+      this.updateSearchFieldState(state);
       this.updateSearchAutocomplete(state);
     });
 
     input.addEventListener('input', () => {
       state.searchQuery = input.value;
+      this.updateSearchFieldState(state);
       this.handleSearchQueryChanged(state, { immediate: false });
       this.updateSearchAutocomplete(state);
     });
 
     const clearBtn = document.createElement('button');
-    clearBtn.className = 'tlr-search-clear button-none button-small button-minimal-hover';
+    clearBtn.className = 'tlr-search-clear query-input--clear-btn button-none button-small button-minimal-hover tooltip';
     clearBtn.type = 'button';
     clearBtn.dataset.action = 'clear-search';
-    clearBtn.title = 'Clear';
-    clearBtn.textContent = 'x';
+    clearBtn.setAttribute('data-tooltip', 'Clear query');
+    clearBtn.setAttribute('data-tooltip-dir', 'top');
+    try {
+      clearBtn.appendChild(this.ui.createIcon('ti-x'));
+    } catch (e) {
+      clearBtn.textContent = 'x';
+    }
+
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'tlr-search-refresh query-input--refresh-btn button-none button-small button-minimal-hover tooltip';
+    refreshBtn.type = 'button';
+    refreshBtn.dataset.action = 'refresh-search';
+    refreshBtn.setAttribute('data-tooltip', 'Refresh now');
+    refreshBtn.setAttribute('data-tooltip-dir', 'top');
+    try {
+      refreshBtn.appendChild(this.ui.createIcon('ti-refresh'));
+    } catch (e) {
+      refreshBtn.textContent = 'Refresh';
+    }
 
     const autocomplete = document.createElement('div');
     autocomplete.className = 'tlr-search-autocomplete cmdpal--inline dropdown active focused-component';
     autocomplete.setAttribute('role', 'listbox');
 
-    searchWrap.appendChild(searchIcon);
-    searchWrap.appendChild(input);
-    searchWrap.appendChild(clearBtn);
+    queryWrap.appendChild(highlight);
+    queryWrap.appendChild(input);
+    queryWrap.appendChild(clearBtn);
+    queryWrap.appendChild(refreshBtn);
+    searchWrap.appendChild(queryWrap);
     searchWrap.appendChild(autocomplete);
 
     const sortWrap = document.createElement('div');
@@ -608,18 +670,23 @@ class Plugin extends AppPlugin {
     sortWrap.appendChild(sortToggle);
     sortWrap.appendChild(sortMenu);
 
-    header.appendChild(toggleBtn);
-    header.appendChild(title);
-    header.appendChild(count);
-    header.appendChild(spacer);
-    header.appendChild(searchWrap);
-    header.appendChild(sortWrap);
+    headerMain.appendChild(toggleBtn);
+    headerMain.appendChild(title);
+    headerMain.appendChild(count);
+
+    headerControls.appendChild(filterWrap);
+    headerControls.appendChild(sortWrap);
+
+    header.appendChild(headerMain);
+    header.appendChild(headerControls);
 
     const body = document.createElement('div');
     body.className = 'tlr-body';
     body.dataset.role = 'body';
 
     root.appendChild(header);
+    searchRow.appendChild(searchWrap);
+    root.appendChild(searchRow);
     root.appendChild(body);
 
     root.addEventListener('click', (e) => this.handleFooterClick(e));
@@ -631,9 +698,13 @@ class Plugin extends AppPlugin {
     state.filterMenuEl = null;
     state.sortToggleEl = sortToggle;
     state.sortMenuEl = sortMenu;
-    state.searchToggleEl = null;
+    state.searchToggleEl = filterToggle;
+    state.searchRowEl = searchRow;
     state.searchWrapEl = searchWrap;
     state.searchInputEl = input;
+    state.searchHighlightTextEl = highlightText;
+    state.searchClearEl = clearBtn;
+    state.searchRefreshEl = refreshBtn;
     state.searchAutocompleteEl = autocomplete;
     return root;
   }
@@ -700,6 +771,12 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (action === 'toggle-search') {
+      if (!state) return;
+      this.setSearchOpen(state, state.searchOpen !== true);
+      return;
+    }
+
     if (action === 'toggle-sort-menu') {
       if (!state) return;
       if (state.sortMenuOpen === true) {
@@ -708,6 +785,12 @@ class Plugin extends AppPlugin {
         this.setFilterMenuOpen(state, false);
         this.setSortMenuOpen(state, true);
       }
+      return;
+    }
+
+    if (action === 'refresh-search') {
+      if (!state) return;
+      this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'search-refresh' });
       return;
     }
 
@@ -1433,6 +1516,7 @@ class Plugin extends AppPlugin {
 
   handleSearchQueryChanged(state, { immediate, keepFocus } = {}) {
     if (!state) return;
+    this.syncSearchControlState(state);
     this.syncScopedQueryWithCurrentInput(state, { immediate: immediate === true, reason: 'input' });
     this.renderFromCache(state);
     this.updateSearchAutocomplete(state);
@@ -1660,29 +1744,79 @@ class Plugin extends AppPlugin {
     return out;
   }
 
+  hasSearchQuery(state) {
+    return Boolean((state?.searchQuery || '').trim());
+  }
+
+  updateSearchFieldState(state) {
+    if (!state) return;
+    const query = state.searchQuery || '';
+    const hasValue = query.length > 0;
+
+    if (state.searchInputEl && state.searchInputEl.value !== query) {
+      state.searchInputEl.value = query;
+    }
+    if (state.searchHighlightTextEl) {
+      state.searchHighlightTextEl.textContent = query;
+    }
+    if (state.searchClearEl) {
+      state.searchClearEl.style.display = hasValue ? 'flex' : 'none';
+    }
+    if (state.searchRefreshEl) {
+      state.searchRefreshEl.style.display = hasValue ? 'none' : 'flex';
+    }
+  }
+
+  syncSearchControlState(state) {
+    if (!state) return;
+    const open = state.searchOpen === true;
+    const active = open || this.hasSearchQuery(state);
+
+    if (state.rootEl) {
+      state.rootEl.classList.toggle('tlr-search-open', open);
+      state.rootEl.classList.toggle('tlr-search-active', active);
+    }
+    if (state.searchRowEl) {
+      state.searchRowEl.style.display = open ? 'block' : 'none';
+    }
+    if (state.searchToggleEl) {
+      state.searchToggleEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+      state.searchToggleEl.classList.toggle('is-active', active);
+      state.searchToggleEl.setAttribute('data-tooltip', open ? 'Hide filter bar' : 'Filter');
+      state.searchToggleEl.title = open ? 'Hide filter bar' : 'Filter';
+      const icon = state.searchToggleEl.querySelector?.('.id--filter-icon') || null;
+      icon?.classList?.toggle?.('text-primary-icon', active);
+      icon?.classList?.toggle?.('bold', active);
+    }
+
+    this.updateSearchFieldState(state);
+  }
+
   setSearchOpen(state, open) {
     if (!state) return;
     state.searchOpen = open === true;
     if (state.searchOpen === true) {
       this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
-    }
-    if (!state.rootEl) return;
-
-    state.rootEl.classList.toggle('tlr-search-open', state.searchOpen === true);
-    state.searchToggleEl?.setAttribute?.('aria-expanded', state.searchOpen === true ? 'true' : 'false');
-
-    if (state.searchInputEl) {
-      state.searchInputEl.value = state.searchQuery || '';
-      if (state.searchOpen === true) {
-        setTimeout(() => {
-          try {
-            state.searchInputEl?.focus?.();
-          } catch (e) {
-            // ignore
-          }
-        }, 0);
+    } else {
+      this.setSearchAutocompleteOpen(state, false);
+      try {
+        state.searchInputEl?.blur?.();
+      } catch (e) {
+        // ignore
       }
+    }
+
+    this.syncSearchControlState(state);
+
+    if (state.searchOpen === true && state.searchInputEl) {
+      setTimeout(() => {
+        try {
+          state.searchInputEl?.focus?.();
+        } catch (e) {
+          // ignore
+        }
+      }, 0);
     }
   }
 
@@ -4798,19 +4932,34 @@ class Plugin extends AppPlugin {
       .tlr-header {
         display: flex;
         align-items: center;
-        flex-wrap: wrap;
-        gap: 8px;
+        gap: 12px;
         min-height: 30px;
-        row-gap: 8px;
-        margin-bottom: 10px;
+        margin-bottom: 0;
+      }
+
+      .tlr-header-main {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .tlr-header-controls {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
       }
 
       .tlr-title {
+        flex: 0 0 auto;
         font-weight: 600;
         white-space: nowrap;
       }
 
       .tlr-count {
+        flex: 1 1 auto;
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
         font-size: 12px;
         white-space: nowrap;
@@ -4818,11 +4967,6 @@ class Plugin extends AppPlugin {
         overflow: hidden;
         text-overflow: ellipsis;
         min-width: 0;
-      }
-
-      .tlr-spacer {
-        flex: 1 1 auto;
-        min-width: 8px;
       }
 
       .tlr-btn {
@@ -4855,40 +4999,11 @@ class Plugin extends AppPlugin {
 
       .tlr-filter-toggle.is-active {
         color: var(--text-default, var(--text, inherit));
-        background: var(--bg-selected, var(--bg-hover, rgba(0, 0, 0, 0.06)));
       }
 
-      .tlr-filter-glyph {
-        position: relative;
-        display: inline-block;
-        width: 12px;
-        height: 12px;
-      }
-
-      .tlr-filter-glyph::before {
-        content: '';
-        position: absolute;
-        top: 1px;
-        left: 0;
-        width: 0;
-        height: 0;
-        border-left: 6px solid transparent;
-        border-right: 6px solid transparent;
-        border-top: 0;
-        border-bottom: 6px solid currentColor;
-        opacity: 0.95;
-      }
-
-      .tlr-filter-glyph::after {
-        content: '';
-        position: absolute;
-        top: 7px;
-        left: 5px;
-        width: 2px;
-        height: 4px;
-        border-radius: 999px;
-        background: currentColor;
-        opacity: 0.95;
+      .tlr-filter-toggle.is-active .id--filter-icon {
+        color: var(--text-hilite, var(--link-color, var(--accent, #39a98c)));
+        font-weight: 700;
       }
 
       .tlr-sort-wrap {
@@ -5060,24 +5175,38 @@ class Plugin extends AppPlugin {
         color: var(--cmdpal-selected-fg-color, var(--text, inherit));
       }
 
+      .tlr-search-row {
+        display: none;
+        width: 100%;
+        margin-top: 8px;
+        margin-bottom: 10px;
+      }
+
+      .tlr-search-open .tlr-search-row {
+        display: block;
+      }
+
       .tlr-search-wrap {
         position: relative;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 0 8px;
-        height: 30px;
-        min-height: 30px;
-        flex: 0 1 clamp(240px, 36vw, 440px);
-        min-width: min(100%, 240px);
-        border: 1px solid var(--input-border-color, var(--divider-color, var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)))));
-        border-radius: 999px;
-        background: var(--input-bg-color, var(--cmdpal-input-bg-color, var(--bg-panel, transparent)));
-        box-sizing: border-box;
+        width: 100%;
+      }
+
+      .tlr-query-input {
+        position: relative;
+        width: 100%;
+      }
+
+      .tlr-query-input .query-input--wrapper {
+        position: relative;
+        display: block;
+      }
+
+      .tlr-query-input .query-input--highlight {
+        display: none;
       }
 
       .tlr-empty-compact .tlr-search-toggle,
-      .tlr-empty-compact .tlr-search-wrap,
+      .tlr-empty-compact .tlr-search-row,
       .tlr-empty-compact .tlr-filter-wrap,
       .tlr-empty-compact .tlr-sort-wrap {
         display: none !important;
@@ -5087,33 +5216,38 @@ class Plugin extends AppPlugin {
         margin-bottom: 6px;
       }
 
-      .tlr-search-icon {
-        display: flex;
-        align-items: center;
-        color: var(--text-muted, rgba(0, 0, 0, 0.6));
-      }
-
       .tlr-search-input {
         width: 100%;
         max-width: none;
         min-width: 0;
-        flex: 1 1 auto;
-        height: 20px;
-        min-height: 20px;
-        border: 0;
-        outline: none;
-        background: transparent;
-        color: var(--input-fg-color, var(--text-default, var(--text, inherit)));
-        -webkit-text-fill-color: var(--input-fg-color, var(--text-default, var(--text, inherit)));
+        position: relative;
+        min-height: 35px;
+        border: 1px solid var(--input-border-color, var(--divider-color, var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12))))) !important;
+        outline: none !important;
+        background: var(--input-bg-color, var(--cmdpal-input-bg-color, var(--bg-panel, transparent))) !important;
+        color: var(--input-fg-color, var(--text-default, var(--text, inherit))) !important;
+        -webkit-text-fill-color: var(--input-fg-color, var(--text-default, var(--text, inherit))) !important;
         caret-color: var(--input-fg-color, var(--text-default, var(--text, inherit)));
         opacity: 1;
-        font-size: 13px;
-        line-height: 20px;
-        padding: 0;
+        font-size: 14px;
+        line-height: 24px;
+        font-family: "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-weight: 300;
+        padding: 5px 54px 5px 10px;
+        border-radius: var(--radius-rounded, 999px);
+        box-shadow: none !important;
+        transition: border-color 0.15s, box-shadow 0.15s, outline-color 0.15s;
       }
 
       .tlr-search-input::placeholder {
-        color: var(--text-muted, rgba(0, 0, 0, 0.6));
+        color: var(--text-xmuted, var(--text-muted, rgba(0, 0, 0, 0.6)));
+      }
+
+      .tlr-search-input:focus {
+        border-color: var(--text-hilite, var(--link-color, var(--accent, #39a98c))) !important;
+        outline: 1px solid var(--text-hilite, var(--link-color, var(--accent, #39a98c))) !important;
+        box-shadow: 0 0 10px rgba(57, 169, 140, 0.28) !important;
+        box-shadow: 0 0 10px color-mix(in srgb, var(--text-hilite, var(--link-color, var(--accent, #39a98c))) 40%, transparent) !important;
       }
 
       .tlr-search-autocomplete {
@@ -5144,10 +5278,34 @@ class Plugin extends AppPlugin {
         display: block;
       }
 
-      .tlr-search-clear {
-        min-width: 20px;
-        padding: 0 4px;
+      .tlr-search-clear,
+      .tlr-search-refresh {
+        display: none;
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        border-radius: 50%;
+        cursor: pointer;
+        z-index: 2;
+        font-size: 12px;
+        line-height: 1;
         color: var(--text-muted, rgba(0, 0, 0, 0.6));
+        opacity: 0.7;
+        transition: opacity 0.15s, background 0.15s, color 0.15s;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .tlr-search-clear:hover,
+      .tlr-search-refresh:hover {
+        opacity: 1;
+        background: var(--bg-hover, rgba(0, 0, 0, 0.05));
       }
 
       .tlr-toggle {
@@ -5500,26 +5658,33 @@ class Plugin extends AppPlugin {
       .tlr-loading .tlr-sort-toggle { opacity: 0.6; cursor: default; }
 
       @media (max-width: 760px) {
-        .tlr-spacer {
-          display: none;
+        .tlr-header {
+          gap: 8px;
+          align-items: flex-start;
         }
 
-        .tlr-search-wrap {
-          order: 10;
-          flex: 1 1 100%;
+        .tlr-header-main {
           min-width: 0;
         }
 
+        .tlr-count {
+          min-width: 0;
+        }
+
+        .tlr-search-row {
+          margin-top: 10px;
+        }
+
         .tlr-sort-menu {
-          right: auto;
-          left: 0;
+          right: 0;
+          left: auto;
           min-width: 240px;
           max-width: min(92vw, 320px);
         }
 
         .tlr-filter-menu {
-          right: auto;
-          left: 0;
+          right: 0;
+          left: auto;
           min-width: 220px;
           max-width: min(92vw, 300px);
         }
