@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.22';
+    this._version = '0.4.23';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -750,8 +750,15 @@ class Plugin extends AppPlugin {
 
       this.setPropGroupCollapsed(propName, nextCollapsed);
       if (groupEl) groupEl.classList.toggle('tlr-prop-collapsed', nextCollapsed);
-      actionEl.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
-      this.syncChevronIcon(actionEl.querySelector?.('.tlr-prop-caret') || null, nextCollapsed);
+      const propControls = groupEl?.querySelectorAll?.('[data-action="toggle-prop-group"]') || [];
+      propControls.forEach((el) => {
+        el.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
+        if (el.classList?.contains?.('tlr-prop-toggle')) {
+          el.title = nextCollapsed ? 'Expand' : 'Collapse';
+          el.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
+        }
+      });
+      this.syncChevronIcon(groupEl?.querySelector?.('.tlr-prop-caret') || null, nextCollapsed);
       return;
     }
 
@@ -4592,14 +4599,25 @@ class Plugin extends AppPlugin {
 
       if (isCollapsed) groupEl.classList.add('tlr-prop-collapsed');
 
+      const rowEl = document.createElement('div');
+      rowEl.className = 'tlr-prop-row';
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.className = 'tlr-btn tlr-prop-toggle button-none button-small button-minimal-hover';
+      toggleBtn.dataset.action = 'toggle-prop-group';
+      toggleBtn.dataset.propName = propName;
+      toggleBtn.title = isCollapsed ? 'Expand' : 'Collapse';
+      toggleBtn.setAttribute('aria-label', isCollapsed ? 'Expand' : 'Collapse');
+      toggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      toggleBtn.appendChild(this.buildChevronIcon(isCollapsed, 'tlr-prop-caret'));
+
       const header = document.createElement('button');
       header.type = 'button';
       header.className = 'tlr-prop-header button-normal button-normal-hover';
       header.dataset.action = 'toggle-prop-group';
       header.dataset.propName = propName;
       header.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-
-      const caret = this.buildChevronIcon(isCollapsed, 'tlr-prop-caret');
 
       const title = document.createElement('div');
       title.className = 'tlr-prop-title';
@@ -4609,9 +4627,11 @@ class Plugin extends AppPlugin {
       meta.className = 'tlr-prop-meta text-details';
       meta.textContent = `${g?.records?.length || 0}`;
 
-      header.appendChild(caret);
       header.appendChild(title);
       header.appendChild(meta);
+
+      rowEl.appendChild(toggleBtn);
+      rowEl.appendChild(header);
 
       const recsEl = document.createElement('div');
       recsEl.className = 'tlr-prop-records';
@@ -4632,7 +4652,7 @@ class Plugin extends AppPlugin {
         recsEl.appendChild(btn);
       }
 
-      groupEl.appendChild(header);
+      groupEl.appendChild(rowEl);
       groupEl.appendChild(recsEl);
       container.appendChild(groupEl);
     }
@@ -5668,12 +5688,29 @@ class Plugin extends AppPlugin {
 
       .tlr-prop-group { margin: 12px 0 16px; }
 
+      .tlr-prop-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .tlr-prop-toggle {
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        text-align: center;
+        font-weight: 700;
+        color: var(--text-muted, rgba(0, 0, 0, 0.6));
+        flex: 0 0 auto;
+      }
+
       .tlr-prop-header {
         display: flex;
         align-items: center;
-        justify-content: flex-start;
+        justify-content: space-between;
         gap: 10px;
         width: 100%;
+        flex: 1 1 auto;
         padding: 8px 10px;
         text-align: left;
       }

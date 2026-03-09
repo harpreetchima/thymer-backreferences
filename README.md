@@ -89,7 +89,7 @@ Edit `custom` in `plugin.json`:
 
 1. Open a note that is referenced elsewhere.
 2. Confirm Backreferences appears at the bottom.
-3. Confirm Property References are grouped by property when applicable.
+3. Confirm Property References are grouped by property with an outside-chevron collapse toggle when applicable.
 4. Confirm Linked References are grouped by source note.
 5. Confirm Unlinked References appear separately when the note title is mentioned without a record link.
 6. Confirm only the Filter and Sort buttons appear in the header's top-right before the filter bar is opened.
