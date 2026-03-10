@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.31';
+    this._version = '0.4.32';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -3458,6 +3458,8 @@ class Plugin extends AppPlugin {
     const descendants = [];
     const depthByGuid = {};
     const seen = new Set();
+    const rootGuid = line?.guid || null;
+    if (rootGuid) seen.add(rootGuid);
 
     const walk = async (items, depth) => {
       for (const item of items || []) {
