@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.30';
+    this._version = '0.4.31';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -6205,14 +6205,14 @@ class Plugin extends AppPlugin {
         display: flex;
         flex-direction: column;
         gap: 3px;
-        margin-left: 16px;
-        padding-left: var(--tlr-context-rail-gap);
+        margin-left: 0;
+        padding-left: 0;
       }
 
       .tlr-context-line {
         display: block;
         width: 100%;
-        padding: 5px 10px 5px calc(8px + var(--tlr-context-indent, 0px));
+        padding: 5px 10px 5px calc(12px + var(--tlr-context-indent, 0px));
         text-align: left;
         color: var(--text, inherit);
         line-height: 1.35;
