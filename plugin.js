@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.29';
+    this._version = '0.4.30';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -3437,10 +3437,13 @@ class Plugin extends AppPlugin {
     ctx.error = '';
   }
 
-  findLinkedLineByGuid(state, lineGuid) {
+  findContextLineByGuid(state, lineGuid) {
     const target = (lineGuid || '').trim();
     if (!target || !state?.lastResults) return null;
-    const groups = Array.isArray(state.lastResults?.linkedGroups) ? state.lastResults.linkedGroups : [];
+    const groups = [
+      ...(Array.isArray(state.lastResults?.linkedGroups) ? state.lastResults.linkedGroups : []),
+      ...(Array.isArray(state.lastResults?.unlinkedGroups) ? state.lastResults.unlinkedGroups : [])
+    ];
 
     for (const g of groups) {
       for (const line of g?.lines || []) {
@@ -3600,7 +3603,7 @@ class Plugin extends AppPlugin {
   }
 
   async handleLinkedContextAction(state, action, lineGuid) {
-    const line = this.findLinkedLineByGuid(state, lineGuid);
+    const line = this.findContextLineByGuid(state, lineGuid);
     if (!line) return;
 
     const ctx = this.getLinkedContextState(state, lineGuid);
