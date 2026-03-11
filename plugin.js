@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.33';
+    this._version = '0.4.34';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -926,6 +926,10 @@ class Plugin extends AppPlugin {
 
     try {
       const result = panel.navigateTo({
+        type: 'edit_panel',
+        rootId: recordGuid,
+        subId: lineGuid || null,
+        workspaceGuid,
         itemGuid: lineGuid,
         highlight: true
       });
@@ -946,23 +950,32 @@ class Plugin extends AppPlugin {
     }
   }
 
-  openRecord(panel, recordGuid, lineGuid, e) {
+  waitForPanelNavigationFrame() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+        return;
+      }
+      setTimeout(resolve, 0);
+    });
+  }
+
+  async openRecord(panel, recordGuid, lineGuid, e) {
     const workspaceGuid = this.getWorkspaceGuid?.() || null;
     if (!workspaceGuid) return;
 
     const openInNew = e?.metaKey || e?.ctrlKey;
 
     if (openInNew) {
-      this.ui
-        .createPanel({ afterPanel: panel })
-        .then((newPanel) => {
-          if (!newPanel) return;
-          this.navigatePanelToRecord(newPanel, recordGuid, lineGuid || null, workspaceGuid);
-          this.ui.setActivePanel(newPanel);
-        })
-        .catch(() => {
-          // ignore
-        });
+      try {
+        const newPanel = await this.ui.createPanel({ afterPanel: panel });
+        if (!newPanel) return;
+        this.ui.setActivePanel(newPanel);
+        await this.waitForPanelNavigationFrame();
+        await this.navigatePanelToRecord(newPanel, recordGuid, lineGuid || null, workspaceGuid);
+      } catch (_err) {
+        // ignore
+      }
       return;
     }
 
