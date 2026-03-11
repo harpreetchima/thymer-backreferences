@@ -92,6 +92,11 @@ Edit `custom` in `plugin.json`:
 - `maxResults` (number): cap for search results.
 - `showSelf` (boolean): include references originating from the active note.
 
+## Local Checks
+
+- `node --check plugin.js`
+- `node scripts/refactor-smoke.js`
+
 ## Verification Checklist
 
 1. Open a note that is referenced elsewhere.

@@ -5391,49 +5391,8 @@ class Plugin extends AppPlugin {
         z-index: 120;
       }
 
-      .tlr-filter-menu {
-        display: none;
-        position: absolute;
-        top: calc(100% + 6px);
-        right: 0;
-        min-width: 220px;
-        max-width: min(90vw, 320px);
-        padding: 6px;
-        border-radius: 5px;
-        border: 1px solid var(--cmdpal-border-color, var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12))));
-        background: var(--cmdpal-bg-color, var(--panel-bg-color, var(--bg-default, var(--bg-panel, rgba(22, 26, 24, 0.96)))));
-        box-shadow: var(--cmdpal-box-shadow, 0 12px 34px rgba(0, 0, 0, 0.18));
-        z-index: 120;
-      }
-
-      .tlr-filter-open .tlr-filter-menu {
-        display: block;
-      }
-
       .tlr-sort-open .tlr-sort-menu {
         display: block;
-      }
-
-      .tlr-filter-menu-title {
-        margin: 2px 6px 6px;
-        font-size: 11px;
-      }
-
-      .tlr-filter-option {
-        width: 100%;
-        display: flex;
-        align-items: center;
-        line-height: 1.35;
-        text-align: left;
-      }
-
-      .tlr-filter-option.is-active {
-        background: var(--cmdpal-selected-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
-        color: var(--cmdpal-selected-fg-color, var(--text, inherit));
-      }
-
-      .tlr-filter-option-label {
-        flex: 1 1 auto;
       }
 
       .tlr-sort-menu-title {
@@ -6132,14 +6091,6 @@ class Plugin extends AppPlugin {
           min-width: 240px;
           max-width: min(92vw, 320px);
         }
-
-        .tlr-filter-menu {
-          right: 0;
-          left: auto;
-          min-width: 220px;
-          max-width: min(92vw, 300px);
-        }
-
         .tlr-search-input { max-width: none; }
       }
     `);
