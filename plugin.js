@@ -24,11 +24,6 @@ class Plugin extends AppPlugin {
     this._legacyStorageKeySortByRecord = 'thymer_backlinks_sort_by_record_v1';
     this._sortByRecord = this.loadSortByRecordSetting();
 
-    this._defaultFilterPreset = 'all';
-    this._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
-    this._recordCollectionGuidCache = new Map();
-    this._recordCollectionGuidPending = new Map();
-
     this._defaultMaxResults = 200;
     this._refreshDebounceMs = 350;
     this._queryFilterDebounceMs = 180;
@@ -126,8 +121,6 @@ class Plugin extends AppPlugin {
       this.disposePanelState(panelId);
     }
     this._panelStates?.clear?.();
-    this._recordCollectionGuidCache?.clear?.();
-    this._recordCollectionGuidPending?.clear?.();
   }
 
   // ---------- Panel lifecycle ----------
@@ -169,8 +162,6 @@ class Plugin extends AppPlugin {
     }
     const recordChanged = state.recordGuid !== recordGuid;
     state.recordGuid = recordGuid;
-    state.filterPreset = this.normalizeFilterPreset(state.filterPreset) || this._defaultFilterPreset;
-
     if (recordChanged) {
       const viewPrefs = this.getPageViewPreference(recordGuid);
       state.footerCollapsed = viewPrefs.footerCollapsed;
@@ -180,8 +171,6 @@ class Plugin extends AppPlugin {
 
     if (recordChanged || !this.isValidSortBy(state.sortBy) || !this.isValidSortDir(state.sortDir)) {
       state.linkedContextByLine = new Map();
-      state.filterMetaLoading = false;
-      state.filterMenuOpen = false;
       state.searchAutocompleteItems = [];
       state.searchAutocompleteSelectedIndex = 0;
       state.searchAutocompleteOpen = false;
@@ -260,8 +249,6 @@ class Plugin extends AppPlugin {
       bodyEl: null,
       countEl: null,
       footerToggleEl: null,
-      filterToggleEl: null,
-      filterMenuEl: null,
       sortToggleEl: null,
       sortMenuEl: null,
       searchToggleEl: null,
@@ -279,10 +266,6 @@ class Plugin extends AppPlugin {
       searchAutocompleteRequestSeq: 0,
       searchQuery: '',
       searchOpen: false,
-      filterPreset: this._defaultFilterPreset,
-      filterMenuOpen: false,
-      filterMenuDismissHandler: null,
-      filterMetaLoading: false,
       footerCollapsed: null,
       sectionCollapsed: this.createDefaultSectionCollapsedState(),
       emptyStateExpanded: false,
@@ -329,7 +312,6 @@ class Plugin extends AppPlugin {
     }
     state.observer = null;
 
-    this.setFilterMenuOpen(state, false);
     this.setSortMenuOpen(state, false);
     this.setSearchAutocompleteOpen(state, false);
 
@@ -361,9 +343,6 @@ class Plugin extends AppPlugin {
       this.syncSearchAutocompleteControlState(state);
       this.renderSearchAutocomplete(state);
       this.setSearchAutocompleteOpen(state, state.searchOpen === true && state.searchAutocompleteOpen === true);
-      this.renderFilterMenu(state);
-      this.syncFilterControlState(state);
-      this.setFilterMenuOpen(state, state.filterMenuOpen === true);
       this.renderSortMenu(state);
       this.syncSortControlState(state);
       this.setSortMenuOpen(state, state.sortMenuOpen === true);
@@ -378,8 +357,6 @@ class Plugin extends AppPlugin {
       state.mountedIn = container;
     }
 
-    this.renderFilterMenu(state);
-    this.syncFilterControlState(state);
     this.renderSortMenu(state);
     this.syncSortControlState(state);
 
@@ -664,8 +641,6 @@ class Plugin extends AppPlugin {
     this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, this.getCollapseMetrics(state.lastResults)));
     root.classList.toggle('tlr-sort-open', state.sortMenuOpen === true);
 
-    state.filterToggleEl = null;
-    state.filterMenuEl = null;
     state.sortToggleEl = sortToggle;
     state.sortMenuEl = sortMenu;
     state.searchToggleEl = filterToggle;
@@ -762,7 +737,6 @@ class Plugin extends AppPlugin {
       if (state.sortMenuOpen === true) {
         this.setSortMenuOpen(state, false);
       } else {
-        this.setFilterMenuOpen(state, false);
         this.setSortMenuOpen(state, true);
       }
       return;
@@ -833,7 +807,6 @@ class Plugin extends AppPlugin {
     if (action === 'open-record') {
       const guid = actionEl.dataset.recordGuid || null;
       if (!guid) return;
-      this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
       this.openRecord(panel, guid, null, e);
       return;
@@ -843,7 +816,6 @@ class Plugin extends AppPlugin {
       const guid = actionEl.dataset.recordGuid || null;
       const lineGuid = actionEl.dataset.lineGuid || null;
       if (!guid) return;
-      this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
       this.openRecord(panel, guid, lineGuid || null, e);
       return;
@@ -852,7 +824,6 @@ class Plugin extends AppPlugin {
     if (action === 'open-ref') {
       const guid = actionEl.dataset.refGuid || null;
       if (!guid) return;
-      this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
       this.openRecord(panel, guid, null, e);
       return;
@@ -1164,38 +1135,6 @@ class Plugin extends AppPlugin {
       state.sectionCollapsed = this.createDefaultSectionCollapsedState();
     }
     state.sectionCollapsed[id] = collapsed === true;
-  }
-
-  getFilterOptions() {
-    return [
-      { id: 'all', label: 'All References' },
-      { id: 'tasks', label: 'Tasks' },
-      { id: 'recent', label: 'Recently Active' },
-      { id: 'same_collection', label: 'This Collection' },
-      { id: 'mentions', label: 'Mentions' },
-      { id: 'journal', label: 'Journal Pages' }
-    ];
-  }
-
-  getFilterLabel(filterPreset) {
-    const id = this.normalizeFilterPreset(filterPreset) || this._defaultFilterPreset;
-    for (const option of this.getFilterOptions()) {
-      if (option.id === id) return option.label;
-    }
-    return 'All References';
-  }
-
-  isValidFilterPreset(filterPreset) {
-    if (typeof filterPreset !== 'string') return false;
-    return this.getFilterOptions().some((x) => x.id === filterPreset);
-  }
-
-  normalizeFilterPreset(filterPreset) {
-    return this.isValidFilterPreset(filterPreset) ? filterPreset : null;
-  }
-
-  filterPresetNeedsCollectionMeta(filterPreset) {
-    return this.normalizeFilterPreset(filterPreset) === 'same_collection';
   }
 
   getSearchMode(rawQuery) {
@@ -2122,7 +2061,6 @@ class Plugin extends AppPlugin {
     if (!state) return;
     state.searchOpen = open === true;
     if (state.searchOpen === true) {
-      this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
     } else {
       this.setSearchAutocompleteOpen(state, false);
@@ -2143,107 +2081,6 @@ class Plugin extends AppPlugin {
           // ignore
         }
       }, 0);
-    }
-  }
-
-  renderFilterMenu(state) {
-    const menu = state?.filterMenuEl || null;
-    if (!menu) return;
-
-    const filterPreset = this.normalizeFilterPreset(state.filterPreset) || this._defaultFilterPreset;
-    state.filterPreset = filterPreset;
-
-    menu.innerHTML = '';
-
-    const title = document.createElement('div');
-    title.className = 'tlr-filter-menu-title text-details';
-    title.textContent = 'Advanced Filter';
-    menu.appendChild(title);
-
-    for (const option of this.getFilterOptions()) {
-      const row = document.createElement('button');
-      row.type = 'button';
-      row.className = 'tlr-filter-option button-normal button-normal-hover';
-      row.dataset.action = 'set-filter-preset';
-      row.dataset.filterPreset = option.id;
-      if (option.id === filterPreset) row.classList.add('is-active');
-
-      const label = document.createElement('span');
-      label.className = 'tlr-filter-option-label';
-      label.textContent = option.label;
-
-      row.appendChild(label);
-      menu.appendChild(row);
-    }
-  }
-
-  syncFilterControlState(state) {
-    if (!state) return;
-    const filterPreset = this.normalizeFilterPreset(state.filterPreset) || this._defaultFilterPreset;
-    state.filterPreset = filterPreset;
-
-    if (state.filterToggleEl) {
-      state.filterToggleEl.title = `Filter: ${this.getFilterLabel(filterPreset)}`;
-      state.filterToggleEl.setAttribute('aria-expanded', state.filterMenuOpen === true ? 'true' : 'false');
-      state.filterToggleEl.classList.toggle('is-active', filterPreset !== this._defaultFilterPreset);
-      state.filterToggleEl.classList.toggle('is-loading', state.filterMetaLoading === true);
-    }
-
-    if (state.rootEl) {
-      state.rootEl.classList.toggle('tlr-filter-open', state.filterMenuOpen === true);
-    }
-  }
-
-  setFilterMenuOpen(state, open) {
-    if (!state) return;
-    state.filterMenuOpen = open === true;
-
-    this.clearPointerDismissHandler(state, 'filterMenuDismissHandler');
-
-    this.syncFilterControlState(state);
-
-    if (state.filterMenuOpen !== true) return;
-
-    const onOutsideMouseDown = (ev) => {
-      const menu = state.filterMenuEl || null;
-      const toggle = state.filterToggleEl || null;
-      if (!menu || !menu.isConnected) {
-        this.setFilterMenuOpen(state, false);
-        return;
-      }
-
-      const target = ev.target;
-      if (menu.contains(target)) return;
-      if (toggle && toggle.contains(target)) return;
-      this.setFilterMenuOpen(state, false);
-    };
-
-    this.setPointerDismissHandler(state, 'filterMenuDismissHandler', onOutsideMouseDown);
-  }
-
-  async handleFilterPresetSelected(state, nextPreset) {
-    if (!state) return;
-    const filterPreset = this.normalizeFilterPreset(nextPreset) || this._defaultFilterPreset;
-    state.filterPreset = filterPreset;
-    this.setFilterMenuOpen(state, false);
-
-    if (!this.filterPresetNeedsCollectionMeta(filterPreset) || !state.lastResults) {
-      state.filterMetaLoading = false;
-      this.renderFromCache(state);
-      return;
-    }
-
-    state.filterMetaLoading = true;
-    this.syncFilterControlState(state);
-    this.renderFromCache(state);
-
-    try {
-      await this.ensureCollectionMetaForResults(state, state.lastResults);
-    } finally {
-      if ((this._panelStates.get(state.panelId) || null) !== state) return;
-      state.filterMetaLoading = false;
-      this.syncFilterControlState(state);
-      this.renderFromCache(state);
     }
   }
 
@@ -3234,9 +3071,6 @@ class Plugin extends AppPlugin {
   }
 
   applyRefreshedResults(state, results, { reason } = {}) {
-    state.filterMetaLoading = false;
-    this.syncFilterControlState(state);
-
     state.lastResults = results;
     this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: reason || 'refresh' });
     this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
@@ -3338,9 +3172,6 @@ class Plugin extends AppPlugin {
     if (state.refreshSeq !== seq) return;
     if ((state.recordGuid || '') !== recordGuid) return;
 
-    state.filterMetaLoading = false;
-    this.syncFilterControlState(state);
-
     results.unlinkedGroups = nextGroups;
     results.unlinkedError = nextError;
     results.unlinkedDeferred = false;
@@ -3363,17 +3194,14 @@ class Plugin extends AppPlugin {
     // Refresh footers when key-value properties change so property backlinks stay fresh.
     if (!ev) return;
     if (!ev.properties) return;
-    this.invalidateRecordCollectionGuid(ev.recordGuid || null);
     this.handleWorkspaceInvalidation(ev, 'record.updated');
   }
 
   handleRecordCreated(ev) {
-    this.invalidateRecordCollectionGuid(ev?.recordGuid || null);
     this.handleWorkspaceInvalidation(ev, 'record.created');
   }
 
   handleRecordMoved(ev) {
-    this.invalidateRecordCollectionGuid(ev?.recordGuid || null);
     this.handleWorkspaceInvalidation(ev, 'record.moved');
   }
 
@@ -3736,143 +3564,6 @@ class Plugin extends AppPlugin {
     return out;
   }
 
-  invalidateRecordCollectionGuid(recordGuid) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return;
-    this._recordCollectionGuidCache?.delete?.(guid);
-    this._recordCollectionGuidPending?.delete?.(guid);
-  }
-
-  getActiveCollectionGuid(state) {
-    const panel = state?.panel || null;
-    const collection = panel?.getActiveCollection?.() || null;
-    const guid = typeof collection?.guid === 'string' ? collection.guid.trim() : '';
-    return guid || null;
-  }
-
-  getKnownRecordCollectionGuid(record) {
-    const guid = (record?.guid || '').trim();
-    if (!guid) return null;
-
-    if (this._recordCollectionGuidCache?.has?.(guid)) {
-      const cached = this._recordCollectionGuidCache.get(guid);
-      if (typeof cached === 'string' && cached.trim()) return cached.trim();
-      return null;
-    }
-
-    const direct = this.readRecordCollectionGuidFast(record);
-    if (direct) {
-      this._recordCollectionGuidCache?.set?.(guid, direct);
-      return direct;
-    }
-
-    return null;
-  }
-
-  readRecordCollectionGuidFast(record) {
-    if (!record) return null;
-
-    const directFields = [
-      record?.collectionGuid,
-      record?.collection_guid,
-      record?.collection?.guid,
-      record?.collection?.collectionGuid,
-      record?.collection?.collection_guid
-    ];
-
-    for (const value of directFields) {
-      const guid = typeof value === 'string' ? value.trim() : '';
-      if (guid) return guid;
-    }
-
-    try {
-      const collection = record.getCollection?.() || null;
-      const guid = typeof collection?.guid === 'string' ? collection.guid.trim() : '';
-      if (guid) return guid;
-    } catch (e) {
-      // ignore
-    }
-
-    return null;
-  }
-
-  parseFrontmatterValue(markdown, key) {
-    const source = typeof markdown === 'string' ? markdown : '';
-    const targetKey = typeof key === 'string' ? key.trim() : '';
-    if (!source || !targetKey) return null;
-
-    const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    if (!match) return null;
-
-    const lines = match[1].split(/\r?\n/);
-    for (const line of lines) {
-      const m = line.match(/^([^:]+):\s*(.*)$/);
-      if (!m) continue;
-      if ((m[1] || '').trim() !== targetKey) continue;
-      const raw = (m[2] || '').trim();
-      return raw.replace(/^"|"$/g, '').trim() || null;
-    }
-
-    return null;
-  }
-
-  async ensureRecordCollectionGuid(record) {
-    const guid = (record?.guid || '').trim();
-    if (!guid) return null;
-
-    const known = this.getKnownRecordCollectionGuid(record);
-    if (known) return known;
-
-    const pending = this._recordCollectionGuidPending?.get?.(guid) || null;
-    if (pending) return pending;
-
-    const loadPromise = (async () => {
-      let collectionGuid = null;
-      try {
-        const markdown = await record.getAsMarkdown?.({ experimental: true });
-        collectionGuid = this.parseFrontmatterValue(markdown?.content || '', 'collection_guid');
-      } catch (e) {
-        collectionGuid = null;
-      }
-
-      this._recordCollectionGuidCache?.set?.(guid, collectionGuid || '');
-      this._recordCollectionGuidPending?.delete?.(guid);
-      return collectionGuid;
-    })();
-
-    this._recordCollectionGuidPending?.set?.(guid, loadPromise);
-    return loadPromise;
-  }
-
-  collectSourceRecordsFromResults(results) {
-    const out = [];
-    const seen = new Set();
-
-    const add = (record) => {
-      const guid = (record?.guid || '').trim();
-      if (!guid || seen.has(guid)) return;
-      seen.add(guid);
-      out.push(record);
-    };
-
-    for (const group of results?.propertyGroups || []) {
-      for (const record of group?.records || []) add(record);
-    }
-    for (const group of results?.linkedGroups || []) add(group?.record || null);
-    for (const group of results?.unlinkedGroups || []) add(group?.record || null);
-
-    return out;
-  }
-
-  async ensureCollectionMetaForResults(state, results) {
-    if (!this.filterPresetNeedsCollectionMeta(state?.filterPreset)) return;
-
-    const records = this.collectSourceRecordsFromResults(results);
-    if (records.length === 0) return;
-
-    await Promise.all(records.map((record) => this.ensureRecordCollectionGuid(record)));
-  }
-
   // ---------- Grouping + rendering ----------
 
   async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf, candidateRecords }) {
@@ -4200,101 +3891,6 @@ class Plugin extends AppPlugin {
 
   escapeRegExp(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  lineHasMention(line) {
-    for (const seg of line?.segments || []) {
-      if (seg?.type === 'mention') return true;
-    }
-    return false;
-  }
-
-  isJournalRecord(record) {
-    try {
-      return Boolean(record?.getJournalDetails?.());
-    } catch (e) {
-      return false;
-    }
-  }
-
-  recordIsInActiveCollection(state, record) {
-    const activeCollectionGuid = this.getActiveCollectionGuid(state);
-    if (!activeCollectionGuid) return false;
-    return this.getKnownRecordCollectionGuid(record) === activeCollectionGuid;
-  }
-
-  filterPropertyGroups(groups, predicate) {
-    const out = [];
-    for (const group of groups || []) {
-      const propertyName = (group?.propertyName || '').trim();
-      if (!propertyName) continue;
-      const records = (group?.records || []).filter((record) => predicate(record, group));
-      if (records.length === 0) continue;
-      out.push({ propertyName, records });
-    }
-    return out;
-  }
-
-  filterLineGroups(groups, predicate) {
-    const out = [];
-    for (const group of groups || []) {
-      const record = group?.record || null;
-      if (!record?.guid) continue;
-      const lines = (group?.lines || []).filter((line) => predicate(line, record, group));
-      if (lines.length === 0) continue;
-      out.push({ record, lines });
-    }
-    return out;
-  }
-
-  applyPresetFilter(state, { propertyGroups, linkedGroups, unlinkedGroups }) {
-    const filterPreset = this.normalizeFilterPreset(state?.filterPreset) || this._defaultFilterPreset;
-    if (filterPreset === this._defaultFilterPreset) {
-      return {
-        filterPreset,
-        propertyGroups: Array.isArray(propertyGroups) ? propertyGroups : [],
-        linkedGroups: Array.isArray(linkedGroups) ? linkedGroups : [],
-        unlinkedGroups: Array.isArray(unlinkedGroups) ? unlinkedGroups : []
-      };
-    }
-
-    const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
-    const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
-    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
-
-    let propertyOut = propsAll;
-    let linkedOut = linkedAll;
-    let unlinkedOut = unlinkedAll;
-
-    if (filterPreset === 'tasks') {
-      propertyOut = [];
-      linkedOut = this.filterLineGroups(linkedAll, (line) => line?.type === 'task');
-      unlinkedOut = this.filterLineGroups(unlinkedAll, (line) => line?.type === 'task');
-    } else if (filterPreset === 'recent') {
-      const cutoff = Date.now() - this._recentActivityWindowMs;
-      propertyOut = this.filterPropertyGroups(propsAll, (record) => this.getRecordUpdatedTimestamp(record) >= cutoff);
-      linkedOut = this.filterLineGroups(linkedAll, (line) => this.getLineActivityTimestamp(line) >= cutoff);
-      unlinkedOut = this.filterLineGroups(unlinkedAll, (line) => this.getLineActivityTimestamp(line) >= cutoff);
-    } else if (filterPreset === 'same_collection') {
-      propertyOut = this.filterPropertyGroups(propsAll, (record) => this.recordIsInActiveCollection(state, record));
-      linkedOut = this.filterLineGroups(linkedAll, (_line, record) => this.recordIsInActiveCollection(state, record));
-      unlinkedOut = this.filterLineGroups(unlinkedAll, (_line, record) => this.recordIsInActiveCollection(state, record));
-    } else if (filterPreset === 'mentions') {
-      propertyOut = [];
-      linkedOut = this.filterLineGroups(linkedAll, (line) => this.lineHasMention(line));
-      unlinkedOut = this.filterLineGroups(unlinkedAll, (line) => this.lineHasMention(line));
-    } else if (filterPreset === 'journal') {
-      propertyOut = this.filterPropertyGroups(propsAll, (record) => this.isJournalRecord(record));
-      linkedOut = this.filterLineGroups(linkedAll, (_line, record) => this.isJournalRecord(record));
-      unlinkedOut = this.filterLineGroups(unlinkedAll, (_line, record) => this.isJournalRecord(record));
-    }
-
-    return {
-      filterPreset,
-      propertyGroups: propertyOut,
-      linkedGroups: linkedOut,
-      unlinkedGroups: unlinkedOut
-    };
   }
 
   sortPropertyGroupsForRender(groups, sortSpec, sortMetrics) {
@@ -4908,7 +4504,6 @@ class Plugin extends AppPlugin {
 
     if (viewState.useCompactEmpty) {
       state.rootEl?.classList?.add('tlr-empty-compact');
-      this.setFilterMenuOpen(state, false);
       this.setSortMenuOpen(state, false);
       state.countEl.textContent = 'No references yet';
       this.appendCompactEmptyState(body);
@@ -5401,53 +4996,62 @@ class Plugin extends AppPlugin {
     return '';
   }
 
+  getSegmentDisplayText(seg) {
+    if (!seg) return '';
+
+    if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code' || seg.type === 'link') {
+      return typeof seg.text === 'string' ? seg.text : '';
+    }
+
+    if (seg.type === 'linkobj') {
+      const link = seg.text?.link || '';
+      return seg.text?.title || link || '';
+    }
+
+    if (seg.type === 'hashtag') {
+      const text = typeof seg.text === 'string' ? seg.text : '';
+      if (!text) return '';
+      return text.startsWith('#') ? text : `#${text}`;
+    }
+
+    if (seg.type === 'datetime') {
+      return this.formatDateTimeSegment(seg.text);
+    }
+
+    if (seg.type === 'mention') {
+      return this.formatMention(typeof seg.text === 'string' ? seg.text : '');
+    }
+
+    if (seg.type === 'ref') {
+      const guid = seg.text?.guid || null;
+      return seg.text?.title || (guid ? this.resolveRecordName(guid) : '') || '';
+    }
+
+    return typeof seg.text === 'string' ? seg.text : '';
+  }
+
+  getSegmentHref(seg) {
+    if (!seg) return '';
+    if (seg.type === 'link') return typeof seg.text === 'string' ? seg.text : '';
+    if (seg.type === 'linkobj') return seg.text?.link || '';
+    return '';
+  }
+
+  appendSegmentTextElement(container, className, text, query) {
+    if (!container) return;
+    const el = document.createElement('span');
+    el.className = className || '';
+    el.textContent = '';
+    this.appendHighlightedText(el, text, query);
+    container.appendChild(el);
+  }
+
   segmentsToPlainText(segments) {
     if (!Array.isArray(segments) || segments.length === 0) return '';
 
     let out = '';
     for (const seg of segments) {
-      if (!seg) continue;
-
-      if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code' || seg.type === 'link') {
-        if (typeof seg.text === 'string') out += seg.text;
-        continue;
-      }
-
-      if (seg.type === 'linkobj') {
-        const link = seg.text?.link || '';
-        const title = seg.text?.title || link;
-        out += title;
-        continue;
-      }
-
-      if (seg.type === 'hashtag') {
-        const t = typeof seg.text === 'string' ? seg.text : '';
-        if (!t) continue;
-        out += t.startsWith('#') ? t : `#${t}`;
-        continue;
-      }
-
-      if (seg.type === 'datetime') {
-        out += this.formatDateTimeSegment(seg.text);
-        continue;
-      }
-
-      if (seg.type === 'mention') {
-        const guid = typeof seg.text === 'string' ? seg.text : '';
-        out += this.formatMention(guid);
-        continue;
-      }
-
-      if (seg.type === 'ref') {
-        const guid = seg.text?.guid || null;
-        const title = seg.text?.title || (guid ? this.resolveRecordName(guid) : '') || '';
-        out += title;
-        continue;
-      }
-
-      if (typeof seg.text === 'string') {
-        out += seg.text;
-      }
+      out += this.getSegmentDisplayText(seg);
     }
 
     return out;
@@ -5502,23 +5106,25 @@ class Plugin extends AppPlugin {
 
     for (const seg of segments) {
       if (!seg) continue;
+      const text = this.getSegmentDisplayText(seg);
 
       if (seg.type === 'text') {
-        this.appendHighlightedText(container, typeof seg.text === 'string' ? seg.text : '', query);
+        this.appendHighlightedText(container, text, query);
         continue;
       }
 
       if (seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code') {
-        const el = document.createElement('span');
-        el.className = seg.type === 'bold' ? 'tlr-seg-bold' : seg.type === 'italic' ? 'tlr-seg-italic' : 'tlr-seg-code';
-        el.textContent = '';
-        this.appendHighlightedText(el, typeof seg.text === 'string' ? seg.text : '', query);
-        container.appendChild(el);
+        this.appendSegmentTextElement(
+          container,
+          seg.type === 'bold' ? 'tlr-seg-bold' : seg.type === 'italic' ? 'tlr-seg-italic' : 'tlr-seg-code',
+          text,
+          query
+        );
         continue;
       }
 
       if (seg.type === 'link') {
-        const url = typeof seg.text === 'string' ? seg.text : '';
+        const url = this.getSegmentHref(seg);
         if (!url) continue;
         const a = document.createElement('a');
         a.href = url;
@@ -5526,14 +5132,13 @@ class Plugin extends AppPlugin {
         a.rel = 'noopener noreferrer';
         a.className = 'tlr-seg-link';
         a.textContent = '';
-        this.appendHighlightedText(a, url, query);
+        this.appendHighlightedText(a, text, query);
         container.appendChild(a);
         continue;
       }
 
       if (seg.type === 'linkobj') {
-        const link = seg.text?.link || '';
-        const title = seg.text?.title || link;
+        const link = this.getSegmentHref(seg);
         if (!link) continue;
         const a = document.createElement('a');
         a.href = link;
@@ -5541,41 +5146,23 @@ class Plugin extends AppPlugin {
         a.rel = 'noopener noreferrer';
         a.className = 'tlr-seg-link';
         a.textContent = '';
-        this.appendHighlightedText(a, title, query);
+        this.appendHighlightedText(a, text, query);
         container.appendChild(a);
         continue;
       }
 
       if (seg.type === 'hashtag') {
-        const t = typeof seg.text === 'string' ? seg.text : '';
-        if (!t) continue;
-        const el = document.createElement('span');
-        el.className = 'tlr-seg-hashtag';
-        const tag = t.startsWith('#') ? t : `#${t}`;
-        el.textContent = '';
-        this.appendHighlightedText(el, tag, query);
-        container.appendChild(el);
+        this.appendSegmentTextElement(container, 'tlr-seg-hashtag', text, query);
         continue;
       }
 
       if (seg.type === 'datetime') {
-        const el = document.createElement('span');
-        el.className = 'tlr-seg-datetime';
-        const text = this.formatDateTimeSegment(seg.text);
-        el.textContent = '';
-        this.appendHighlightedText(el, text, query);
-        container.appendChild(el);
+        this.appendSegmentTextElement(container, 'tlr-seg-datetime', text, query);
         continue;
       }
 
       if (seg.type === 'mention') {
-        const el = document.createElement('span');
-        el.className = 'tlr-seg-mention';
-        const guid = typeof seg.text === 'string' ? seg.text : '';
-        const text = this.formatMention(guid);
-        el.textContent = '';
-        this.appendHighlightedText(el, text, query);
-        container.appendChild(el);
+        this.appendSegmentTextElement(container, 'tlr-seg-mention', text, query);
         continue;
       }
 
@@ -5586,18 +5173,13 @@ class Plugin extends AppPlugin {
         el.className = 'tlr-seg-ref';
         el.dataset.action = 'open-ref';
         el.dataset.refGuid = guid;
-
-        const title = seg.text?.title || this.resolveRecordName(guid) || '[link]';
         el.textContent = '';
-        this.appendHighlightedText(el, title, query);
+        this.appendHighlightedText(el, text || '[link]', query);
         container.appendChild(el);
         continue;
       }
 
-      // Fallback: render as plain text when possible.
-      if (typeof seg.text === 'string' && seg.text) {
-        this.appendHighlightedText(container, seg.text, query);
-      }
+      if (text) this.appendHighlightedText(container, text, query);
     }
   }
 
