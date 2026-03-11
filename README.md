@@ -22,6 +22,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 - **Property References**: references to the active note through record-link properties, grouped by property name.
 - **Linked References**: line-level mentions grouped by source note.
 - **Unlinked References**: text-only mentions of the active note title, grouped by source note, kept visually consistent with linked references, and loaded only after you expand that section.
+- **Direct line navigation**: clicking a linked, unlinked, or expanded-context row asks Thymer to scroll to and highlight the exact source line.
 - **Live Activity**: new references added after a page opens are marked in place, and remote edits are called out inline.
 
 ## Options
@@ -119,3 +120,4 @@ Edit `custom` in `plugin.json`:
 24. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
 25. Confirm the status bar count matches the footer.
 26. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
+27. Click a linked, unlinked, or context line row and verify Thymer scrolls to and highlights the exact source line.

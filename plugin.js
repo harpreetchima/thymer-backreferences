@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.32';
+    this._version = '0.4.33';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -908,7 +908,45 @@ class Plugin extends AppPlugin {
     }
   }
 
-  openRecord(panel, recordGuid, subId, e) {
+  navigatePanelToRecord(panel, recordGuid, lineGuid, workspaceGuid) {
+    const fallback = () => {
+      panel.navigateTo({
+        type: 'edit_panel',
+        rootId: recordGuid,
+        subId: lineGuid || null,
+        workspaceGuid
+      });
+      return false;
+    };
+
+    if (!lineGuid) {
+      fallback();
+      return Promise.resolve(true);
+    }
+
+    try {
+      const result = panel.navigateTo({
+        itemGuid: lineGuid,
+        highlight: true
+      });
+
+      if (result && typeof result.then === 'function') {
+        return result
+          .then((found) => {
+            if (found === false) return fallback();
+            return true;
+          })
+          .catch(() => fallback());
+      }
+
+      if (result === false) return Promise.resolve(fallback());
+      return Promise.resolve(true);
+    } catch (_err) {
+      return Promise.resolve(fallback());
+    }
+  }
+
+  openRecord(panel, recordGuid, lineGuid, e) {
     const workspaceGuid = this.getWorkspaceGuid?.() || null;
     if (!workspaceGuid) return;
 
@@ -919,12 +957,7 @@ class Plugin extends AppPlugin {
         .createPanel({ afterPanel: panel })
         .then((newPanel) => {
           if (!newPanel) return;
-          newPanel.navigateTo({
-            type: 'edit_panel',
-            rootId: recordGuid,
-            subId: subId || null,
-            workspaceGuid
-          });
+          this.navigatePanelToRecord(newPanel, recordGuid, lineGuid || null, workspaceGuid);
           this.ui.setActivePanel(newPanel);
         })
         .catch(() => {
@@ -933,12 +966,7 @@ class Plugin extends AppPlugin {
       return;
     }
 
-    panel.navigateTo({
-      type: 'edit_panel',
-      rootId: recordGuid,
-      subId: subId || null,
-      workspaceGuid
-    });
+    this.navigatePanelToRecord(panel, recordGuid, lineGuid || null, workspaceGuid);
     this.ui.setActivePanel(panel);
   }
 
