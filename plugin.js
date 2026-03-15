@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.39';
+    this._version = '0.4.40';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -56,17 +56,6 @@ class Plugin extends AppPlugin {
         if (panel) this.scheduleRefreshForPanel(panel, { force: true, reason: 'cmdpal' });
       }
     });
-
-    this._statusItem = this.ui.addStatusBarItem({
-      icon: 'ti-link',
-      label: '0',
-      tooltip: 'Backreferences',
-      onClick: () => {
-        const panel = this.ui.getActivePanel();
-        if (panel) this.scheduleRefreshForPanel(panel, { force: true, reason: 'status-item' });
-      }
-    });
-    this._statusItem?.hide?.();
 
     this._eventHandlerIds.push(
       this.events.on('panel.navigated', (ev) => this.handlePanelChanged(ev.panel, 'panel.navigated'))
@@ -166,7 +155,6 @@ class Plugin extends AppPlugin {
       const viewPrefs = this.getPageViewPreference(recordGuid);
       state.footerCollapsed = viewPrefs.footerCollapsed;
       state.sectionCollapsed = this.cloneSectionCollapsedState(viewPrefs.sections);
-      state.emptyStateExpanded = viewPrefs.emptyExpanded === true;
     }
 
     if (recordChanged || !this.isValidSortBy(state.sortBy) || !this.isValidSortDir(state.sortDir)) {
@@ -268,7 +256,6 @@ class Plugin extends AppPlugin {
       searchOpen: false,
       footerCollapsed: null,
       sectionCollapsed: this.createDefaultSectionCollapsedState(),
-      emptyStateExpanded: false,
       linkedContextByLine: new Map(),
       liveBaselineSnapshot: null,
       liveCurrentSnapshot: null,
@@ -793,12 +780,6 @@ class Plugin extends AppPlugin {
       return;
     }
 
-    if (action === 'expand-empty') {
-      if (!state) return;
-      this.applyEmptyStateExpandedPreferenceForRecord(state.recordGuid, true);
-      return;
-    }
-
     if (
       action === 'toggle-context-more' ||
       action === 'toggle-context-above' ||
@@ -1126,8 +1107,18 @@ class Plugin extends AppPlugin {
   getDefaultSectionCollapsed(sectionId, metrics) {
     const id = this.normalizeSectionId(sectionId);
     if (!id) return false;
-    if (id === 'unlinked') return true;
     if (!metrics?.ready) return false;
+    const isTrulyEmpty = !metrics.propertyError
+      && !metrics.linkedError
+      && !metrics.unlinkedError
+      && metrics.propertyCount === 0
+      && metrics.linkedCount === 0
+      && metrics.unlinkedCount === 0;
+    if (isTrulyEmpty) {
+      if (id === 'unlinked') return metrics.unlinkedDeferred === true;
+      return false;
+    }
+    if (id === 'unlinked') return true;
     if (id === 'property') return metrics.propertyError ? false : metrics.propertyCount === 0;
     if (id === 'linked') return metrics.linkedError ? false : metrics.linkedCount === 0;
     return false;
@@ -2492,8 +2483,7 @@ class Plugin extends AppPlugin {
   normalizePageViewPreference(pref) {
     const sections = this.cloneSectionCollapsedState(pref?.sections);
     const footerCollapsed = typeof pref?.footerCollapsed === 'boolean' ? pref.footerCollapsed : null;
-    const emptyExpanded = pref?.emptyExpanded === true;
-    return { footerCollapsed, sections, emptyExpanded };
+    return { footerCollapsed, sections };
   }
 
   loadPageViewByRecordSetting() {
@@ -2541,13 +2531,6 @@ class Plugin extends AppPlugin {
     this.savePageViewByRecordSetting();
   }
 
-  setEmptyStateExpandedPreferenceForRecord(recordGuid, expanded) {
-    const pref = this.ensurePageViewPreference(recordGuid);
-    if (!pref) return;
-    pref.emptyExpanded = expanded === true;
-    this.savePageViewByRecordSetting();
-  }
-
   applyFooterCollapsedPreferenceForRecord(recordGuid, collapsed) {
     const guid = (recordGuid || '').trim();
     if (!guid) return;
@@ -2577,18 +2560,6 @@ class Plugin extends AppPlugin {
           // ignore
         });
       }
-    }
-  }
-
-  applyEmptyStateExpandedPreferenceForRecord(recordGuid, expanded) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return;
-    this.setEmptyStateExpandedPreferenceForRecord(guid, expanded);
-
-    for (const state of this._panelStates.values()) {
-      if (!state || state.recordGuid !== guid) continue;
-      state.emptyStateExpanded = expanded === true;
-      this.renderFromCache(state);
     }
   }
 
@@ -4439,16 +4410,6 @@ class Plugin extends AppPlugin {
       unlinkedError: Boolean(unlinkedError),
       unlinkedDeferred: unlinkedDeferred === true
     };
-    const hasAnyErrors = Boolean(propertyError || linkedError || unlinkedError);
-    const isEmptyWithoutFilter = !hasAnyErrors
-      && totalPropRefCount === 0
-      && totalLinkedRefCount === 0
-      && totalUnlinkedRefCount === 0;
-    const useCompactEmpty = isEmptyWithoutFilter
-      && searchMode === 'none'
-      && state.emptyStateExpanded !== true
-      && unlinkedDeferred !== true;
-
     const totalUniquePages = this.collectUniquePageGuids(propsAll, linkedAll, []);
     const filteredGroups = this.filterReferenceGroupsForRender({
       propsAll,
@@ -4508,7 +4469,6 @@ class Plugin extends AppPlugin {
       totalUniquePagesSize: totalUniquePages.size,
       filteredUniquePagesSize: filteredUniquePages.size,
       collapseMetrics,
-      useCompactEmpty,
       hasScopedView,
       showUnlinkedCounts,
       showScopedCounts,
@@ -4676,15 +4636,6 @@ class Plugin extends AppPlugin {
 
     this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, viewState.collapseMetrics));
 
-    if (viewState.useCompactEmpty) {
-      state.rootEl?.classList?.add('tlr-empty-compact');
-      this.setSortMenuOpen(state, false);
-      state.countEl.textContent = 'No references yet';
-      this.appendCompactEmptyState(body);
-      return;
-    }
-
-    state.rootEl?.classList?.remove('tlr-empty-compact');
     state.countEl.textContent = viewState.summaryText;
     this.appendReferenceStatus(body, viewState);
     this.renderPropertyReferenceSection(body, state, viewState);
@@ -4775,31 +4726,6 @@ class Plugin extends AppPlugin {
     el.className = 'tlr-note';
     el.textContent = message || '';
     container.appendChild(el);
-  }
-
-  appendCompactEmptyState(container) {
-    if (!container) return;
-
-    const field = document.createElement('div');
-    field.className = 'tlr-empty-compact-card form-field';
-
-    const row = document.createElement('div');
-    row.className = 'tlr-empty-compact-row form-field-row';
-
-    const summary = document.createElement('div');
-    summary.className = 'tlr-empty-compact-copy text-details';
-    summary.textContent = 'No references yet.';
-
-    const expandBtn = document.createElement('button');
-    expandBtn.type = 'button';
-    expandBtn.className = 'tlr-empty-compact-btn button-none button-small button-minimal-hover';
-    expandBtn.dataset.action = 'expand-empty';
-    expandBtn.textContent = 'Show sections';
-
-    row.appendChild(summary);
-    row.appendChild(expandBtn);
-    field.appendChild(row);
-    container.appendChild(field);
   }
 
   appendPropertyReferenceGroups(container, groups, opts) {
@@ -5724,13 +5650,6 @@ class Plugin extends AppPlugin {
         display: none;
       }
 
-      .tlr-empty-compact .tlr-search-toggle,
-      .tlr-empty-compact .tlr-search-row,
-      .tlr-empty-compact .tlr-filter-wrap,
-      .tlr-empty-compact .tlr-sort-wrap {
-        display: none !important;
-      }
-
       .tlr-search-input {
         width: 100%;
         max-width: none;
@@ -5821,25 +5740,6 @@ class Plugin extends AppPlugin {
         color: var(--tlr-text-muted);
         padding: 6px 0;
         font-size: 12px;
-      }
-
-      .tlr-empty-compact-card {
-        padding: 4px 0 0;
-      }
-
-      .tlr-empty-compact-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-      }
-
-      .tlr-empty-compact-copy {
-        min-width: 0;
-      }
-
-      .tlr-empty-compact-btn {
-        flex: 0 0 auto;
       }
 
       .tlr-section-header {

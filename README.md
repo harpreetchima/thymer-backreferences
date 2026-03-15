@@ -63,11 +63,10 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - The section reuses the existing search, sort, grouping, and context controls instead of adding a separate interaction model.
   - Source-note groups in both `Linked References` and `Unlinked References` can be collapsed per page.
 
-- **Compact empty state**
-  - When a page has no references yet, the footer stays minimal until you click `Show sections`.
+- **Empty pages**
+  - When a page has no linked/property references, expanding the footer shows the normal section empty states directly.
 
 - **Live activity mode**
-  - The status bar shows the active page's current backreference count.
   - `New` marks references that appeared since the page was opened.
   - `Changed` marks references updated remotely after the footer had already loaded.
 
@@ -103,27 +102,28 @@ Edit `custom` in `plugin.json`:
 2. Confirm Backreferences appears at the bottom.
 3. Confirm the top summary stays compact while each section header shows its own ref count.
 4. Open a note with no linked/property refs and confirm the full footer starts collapsed by default.
-5. Open notes with zero property refs or zero linked refs and confirm those empty sections start collapsed by default.
-6. Change the footer or section collapse state for one note, navigate away, return, and confirm that page-specific choice persists.
-7. Confirm Property References are grouped by property with an outside-chevron collapse toggle when applicable.
-8. Confirm property records and linked rows sit visibly nested under their parent property/source headers.
-9. Confirm Linked References are grouped by source note.
-10. Confirm Unlinked References appear separately when the note title is mentioned without a record link.
-11. Confirm linked rows hover/focus as a single row while the context controls remain independently clickable.
-12. Confirm only the Filter and Sort buttons appear in the header's top-right before the filter bar is opened.
-13. Click `Filter` and verify the query bar appears on its own row below the header.
-14. Confirm the query bar copy makes it clear that plain text and Thymer query syntax are both supported.
-15. Focus the query bar and verify the accent outline appears only while focused.
-16. Type `@Sources`, accept the collection autocomplete, and verify the query remains `@Sources` rather than `@@Sources`.
-17. Type `@Sources.` and verify all properties are available in a scrollable autocomplete list.
-18. Type plain text and verify the footer filters/highlights matching titles and lines.
-19. Type query syntax such as `@task`, `@Journey`, and `foo AND bar` and verify only matching backreferences remain.
-20. Expand `Unlinked References`, repeat a query, and verify that section joins the scoped results.
-21. Change sort field and direction and verify order updates.
-22. Collapse and re-expand a linked group and an unlinked group and verify the per-page toggle only hides that group's rows.
-23. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
-24. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
-25. Confirm the status bar count matches the footer.
-26. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
-27. Click a linked, unlinked, or context line row and verify Thymer scrolls to and highlights the exact source line.
-28. Ctrl/Cmd-click a linked, unlinked, or context line row and verify the new panel opens with the exact source line highlighted.
+5. Expand that empty footer and confirm Property References and Linked References render their empty messages directly.
+6. Expand `Unlinked References` on an empty page and confirm it loads normally before showing its empty message when applicable.
+7. Open notes with zero property refs or zero linked refs and confirm those empty sections start collapsed by default when the rest of the footer has content.
+8. Change the footer or section collapse state for one note, navigate away, return, and confirm that page-specific choice persists.
+9. Confirm Property References are grouped by property with an outside-chevron collapse toggle when applicable.
+10. Confirm property records and linked rows sit visibly nested under their parent property/source headers.
+11. Confirm Linked References are grouped by source note.
+12. Confirm Unlinked References appear separately when the note title is mentioned without a record link.
+13. Confirm linked rows hover/focus as a single row while the context controls remain independently clickable.
+14. Confirm only the Filter and Sort buttons appear in the header's top-right before the filter bar is opened.
+15. Click `Filter` and verify the query bar appears on its own row below the header.
+16. Confirm the query bar copy makes it clear that plain text and Thymer query syntax are both supported.
+17. Focus the query bar and verify the accent outline appears only while focused.
+18. Type `@Sources`, accept the collection autocomplete, and verify the query remains `@Sources` rather than `@@Sources`.
+19. Type `@Sources.` and verify all properties are available in a scrollable autocomplete list.
+20. Type plain text and verify the footer filters/highlights matching titles and lines.
+21. Type query syntax such as `@task`, `@Journey`, and `foo AND bar` and verify only matching backreferences remain.
+22. Expand `Unlinked References`, repeat a query, and verify that section joins the scoped results.
+23. Change sort field and direction and verify order updates.
+24. Collapse and re-expand a linked group and an unlinked group and verify the per-page toggle only hides that group's rows.
+25. Expand a linked or unlinked reference and verify descendants load first, then above/below context can be added with the arrow controls.
+26. Make or receive a new reference while the page stays open and verify `New` / `Changed` badges update.
+27. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
+28. Click a linked, unlinked, or context line row and verify Thymer scrolls to and highlights the exact source line.
+29. Ctrl/Cmd-click a linked, unlinked, or context line row and verify the new panel opens with the exact source line highlighted.

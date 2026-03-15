@@ -354,6 +354,29 @@ test('summary counts ignore unlinked refs and footer defaults ignore unlinked-on
   assert.equal(plugin.buildUnknownReferenceSectionMeta(), '- refs');
 });
 
+test('fully empty pages open direct empty states for loaded sections', () => {
+  const plugin = makePlugin();
+  const deferredEmpty = {
+    ready: true,
+    propertyCount: 0,
+    linkedCount: 0,
+    unlinkedCount: 0,
+    propertyError: false,
+    linkedError: false,
+    unlinkedError: false,
+    unlinkedDeferred: true
+  };
+  const loadedEmpty = {
+    ...deferredEmpty,
+    unlinkedDeferred: false
+  };
+
+  assert.equal(plugin.getDefaultSectionCollapsed('property', deferredEmpty), false);
+  assert.equal(plugin.getDefaultSectionCollapsed('linked', deferredEmpty), false);
+  assert.equal(plugin.getDefaultSectionCollapsed('unlinked', deferredEmpty), true);
+  assert.equal(plugin.getDefaultSectionCollapsed('unlinked', loadedEmpty), false);
+});
+
 test('page view preferences round-trip footer and section state through storage helpers', () => {
   const plugin = makePlugin();
   const previousLocalStorage = global.localStorage;
