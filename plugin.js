@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.39';
+    this._version = '0.4.40';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -286,6 +286,10 @@ class Plugin extends AppPlugin {
       queryFilterState: null,
       lastResults: null,
       observer: null,
+      layoutObserver: null,
+      layoutRaf: 0,
+      scrollViewportEl: null,
+      bottomBiasPx: 0,
       refreshTimer: null,
       refreshSeq: 0,
       isLoading: false
@@ -312,6 +316,21 @@ class Plugin extends AppPlugin {
       // ignore
     }
     state.observer = null;
+
+    try {
+      state.layoutObserver?.disconnect?.();
+    } catch (e) {
+      // ignore
+    }
+    state.layoutObserver = null;
+
+    if (state.layoutRaf) {
+      cancelAnimationFrame(state.layoutRaf);
+      state.layoutRaf = 0;
+    }
+
+    state.scrollViewportEl = null;
+    state.bottomBiasPx = 0;
 
     this.setSortMenuOpen(state, false);
     this.setSearchAutocompleteOpen(state, false);
@@ -360,6 +379,8 @@ class Plugin extends AppPlugin {
 
     this.renderSortMenu(state);
     this.syncSortControlState(state);
+    this.bindFooterLayoutObserver(state);
+    this.scheduleFooterBottomBiasUpdate(state);
 
     // If the container/panel DOM churns, remount when our root disappears.
     if (!state.observer) {
@@ -367,7 +388,10 @@ class Plugin extends AppPlugin {
         if (state.rootEl && !state.rootEl.isConnected) {
           // Remount on next tick so we don't fight Thymer's own DOM updates.
           setTimeout(() => this.mountFooter(panel, state), 0);
+          return;
         }
+
+        this.scheduleFooterBottomBiasUpdate(state);
       });
       state.observer.observe(panelEl, { childList: true, subtree: true });
     }
@@ -388,6 +412,106 @@ class Plugin extends AppPlugin {
     }
 
     return { element: null, selector: null };
+  }
+
+  findFooterScrollViewport(root) {
+    let el = root?.parentElement || null;
+    while (el) {
+      if (el.classList?.contains?.('panel-scroller-y')) return el;
+
+      const overflowY = getComputedStyle(el).overflowY || '';
+      if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') {
+        return el;
+      }
+
+      el = el.parentElement || null;
+    }
+
+    return null;
+  }
+
+  bindFooterLayoutObserver(state) {
+    if (!state?.rootEl || typeof ResizeObserver !== 'function') return;
+
+    const viewport = this.findFooterScrollViewport(state.rootEl);
+    state.scrollViewportEl = viewport || null;
+
+    if (!viewport) {
+      try {
+        state.layoutObserver?.disconnect?.();
+      } catch (e) {
+        // ignore
+      }
+      state.layoutObserver = null;
+      return;
+    }
+
+    if (!state.layoutObserver) {
+      state.layoutObserver = new ResizeObserver(() => {
+        this.scheduleFooterBottomBiasUpdate(state);
+      });
+    }
+
+    try {
+      state.layoutObserver.disconnect();
+      state.layoutObserver.observe(state.rootEl);
+      state.layoutObserver.observe(viewport);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  shouldBottomBiasFooter(state) {
+    const root = state?.rootEl || null;
+    if (!root?.isConnected) return false;
+    return root.classList.contains('tlr-collapsed') || root.classList.contains('tlr-empty-compact');
+  }
+
+  scheduleFooterBottomBiasUpdate(state) {
+    if (!state?.rootEl) return;
+
+    if (state.layoutRaf) {
+      cancelAnimationFrame(state.layoutRaf);
+      state.layoutRaf = 0;
+    }
+
+    state.layoutRaf = requestAnimationFrame(() => {
+      state.layoutRaf = 0;
+      this.syncFooterBottomBias(state);
+    });
+  }
+
+  syncFooterBottomBias(state) {
+    const root = state?.rootEl || null;
+    if (!root) return;
+
+    const baseMargin = 14;
+    if (!this.shouldBottomBiasFooter(state)) {
+      state.bottomBiasPx = 0;
+      root.classList.remove('tlr-bottom-biased');
+      root.style.marginTop = '';
+      return;
+    }
+
+    const viewport = state.scrollViewportEl?.isConnected ? state.scrollViewportEl : this.findFooterScrollViewport(root);
+    state.scrollViewportEl = viewport || null;
+    if (!viewport) {
+      state.bottomBiasPx = 0;
+      root.classList.remove('tlr-bottom-biased');
+      root.style.marginTop = '';
+      return;
+    }
+
+    const previousBias = Number(state.bottomBiasPx) || 0;
+    const viewportRect = viewport.getBoundingClientRect();
+    const rootRect = root.getBoundingClientRect();
+    const naturalBottom = rootRect.bottom - previousBias;
+    const preferredBottomGap = 56;
+    const nextBias = Math.max(0, Math.round(viewportRect.bottom - preferredBottomGap - naturalBottom));
+
+    state.bottomBiasPx = nextBias;
+    root.classList.toggle('tlr-bottom-biased', nextBias > 0);
+    root.style.marginTop = `${baseMargin + nextBias}px`;
   }
 
   buildFooterRoot(state) {
@@ -1108,6 +1232,8 @@ class Plugin extends AppPlugin {
     if (state.searchRowEl) {
       state.searchRowEl.style.display = state.searchOpen === true && nextCollapsed !== true ? 'block' : 'none';
     }
+
+    this.scheduleFooterBottomBiasUpdate(state);
 
     const btn = state.footerToggleEl || state.rootEl.querySelector?.('[data-action="toggle"]') || null;
     if (!btn) return;
@@ -4681,6 +4807,7 @@ class Plugin extends AppPlugin {
       this.setSortMenuOpen(state, false);
       state.countEl.textContent = 'No references yet';
       this.appendCompactEmptyState(body);
+      this.scheduleFooterBottomBiasUpdate(state);
       return;
     }
 
@@ -4692,6 +4819,7 @@ class Plugin extends AppPlugin {
     this.renderLinkedReferenceSection(body, state, viewState);
     this.appendReferenceDivider(body);
     this.renderUnlinkedReferenceSection(body, state, viewState);
+    this.scheduleFooterBottomBiasUpdate(state);
   }
 
   buildChevronIcon(collapsed, extraClass) {

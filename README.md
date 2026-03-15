@@ -65,6 +65,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 
 - **Compact empty state**
   - When a page has no references yet, the footer stays minimal until you click `Show sections`.
+  - Compact or fully collapsed footers now bias toward the bottom of short pages, then naturally move upward again as the page fills with content.
 
 - **Live activity mode**
   - The status bar shows the active page's current backreference count.
