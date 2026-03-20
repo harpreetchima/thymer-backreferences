@@ -262,6 +262,59 @@ test('segment helpers keep plain text, mentions, refs, and datetimes readable', 
   assert.equal(text, 'Hello @Harpreet meet Linked Record on 2026-03-11');
 });
 
+test('buildReplacedSegments uses phrase boundaries and replaces all matching mentions', () => {
+  const plugin = makePlugin();
+  const segments = [
+    { type: 'text', text: 'Acme replacement some-acme Acme' }
+  ];
+
+  const next = plugin.buildReplacedSegments(segments, 'Acme', 'target-guid');
+
+  assert.notEqual(next, segments);
+  assert.equal(next.filter((seg) => seg.type === 'ref').length, 3);
+  assert.equal(plugin.segmentsToPlainText(next), 'Acme replacement some-acme Acme');
+  assert.equal(next.some((seg) => seg.type === 'text' && seg.text.includes('replacement')), true);
+});
+
+test('linkUnlinkedReference updates one unlinked line and refreshes panels', async () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Acme' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source Note' });
+  const line = makeLine({
+    guid: 'line-unlinked',
+    record: source,
+    segments: [{ type: 'text', text: 'Acme replacement some-acme' }]
+  });
+
+  let savedSegments = null;
+  let refreshArgs = null;
+  line.setSegments = async (nextSegments) => {
+    savedSegments = nextSegments;
+    line.segments = nextSegments;
+  };
+  plugin.refreshAllPanels = (args) => {
+    refreshArgs = args;
+  };
+
+  const state = {
+    panel: {
+      getActiveRecord() {
+        return target;
+      }
+    },
+    lastResults: {
+      unlinkedGroups: [{ record: source, lines: [line] }]
+    }
+  };
+
+  await plugin.linkUnlinkedReference(state, 'line-unlinked');
+
+  assert.ok(Array.isArray(savedSegments));
+  assert.equal(savedSegments.filter((seg) => seg.type === 'ref').length, 2);
+  assert.equal(plugin.segmentsToPlainText(savedSegments), 'Acme replacement some-acme');
+  assert.deepEqual(refreshArgs, { force: true, reason: 'link-unlinked' });
+});
+
 test('query-mode helpers distinguish plain text from Thymer query drafts', () => {
   const plugin = makePlugin();
   assert.equal(plugin.getSearchMode('plain text'), 'text');
@@ -405,11 +458,16 @@ test('page view preferences round-trip footer and section state through storage 
   }
 });
 
-let passed = 0;
-for (const { name, fn } of tests) {
-  fn();
-  passed += 1;
-  console.log(`ok - ${name}`);
-}
+(async () => {
+  let passed = 0;
+  for (const { name, fn } of tests) {
+    await fn();
+    passed += 1;
+    console.log(`ok - ${name}`);
+  }
 
-console.log(`\nrefactor smoke passed (${passed} checks)`);
+  console.log(`\nrefactor smoke passed (${passed} checks)`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
