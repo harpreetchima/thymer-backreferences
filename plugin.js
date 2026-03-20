@@ -191,13 +191,17 @@ class Plugin extends AppPlugin {
   }
 
   shouldSuppressInPanel(panel, panelEl) {
+    const panelType = typeof panel?.getType === 'function' ? (panel.getType() || '').trim() : '';
     const nav = panel?.getNavigation?.() || null;
     const navType = nav && typeof nav.type === 'string' ? nav.type.trim() : '';
 
+    if (panelType && panelType !== 'edit_panel') return true;
+
     // Keep suppression conservative: nav.type labels can vary across builds.
-    // We only hard-suppress known custom panel nav types. Other panel kinds are
-    // filtered by mount-container detection and active-record checks.
+    // We hard-suppress known custom panel nav types and any Search surface,
+    // which can share editor-panel containers but should never host footer UI.
     if (navType === 'custom' || navType === 'custom_panel') return true;
+    if (panelEl?.matches?.('.search-panel') || panelEl?.closest?.('.search-panel')) return true;
 
     return false;
   }
@@ -5029,7 +5033,12 @@ class Plugin extends AppPlugin {
 
     const content = document.createElement('span');
     content.className = 'tlr-line-content';
-    this.appendSegments(content, line?.segments || [], query);
+    const segments = Array.isArray(line?.segments) ? line.segments : [];
+    if (segments.length > 0) {
+      this.appendSegments(content, segments, query);
+    } else {
+      this.appendHighlightedText(content, this.getLineContentText(line), query);
+    }
     container.appendChild(content);
   }
 
@@ -5065,6 +5074,7 @@ class Plugin extends AppPlugin {
       const line = item.line || null;
       const guid = line?.guid || null;
       if (!guid) continue;
+      if (!this.hasRenderableLineContent(line)) continue;
 
       const row = document.createElement('button');
       row.type = 'button';
@@ -5155,6 +5165,16 @@ class Plugin extends AppPlugin {
     }
 
     return out;
+  }
+
+  getLineContentText(line) {
+    const segmentText = this.segmentsToPlainText(line?.segments || []);
+    if (segmentText) return segmentText;
+    return typeof line?.text === 'string' ? line.text : '';
+  }
+
+  hasRenderableLineContent(line) {
+    return this.getLineContentText(line).trim().length > 0;
   }
 
   appendHighlightedText(container, text, query) {
