@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.40';
+    this._version = '0.4.41';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
