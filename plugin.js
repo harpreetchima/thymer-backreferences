@@ -5170,8 +5170,9 @@ class Plugin extends AppPlugin {
     }
 
     if (seg.type === 'ref') {
-      const guid = seg.text?.guid || null;
-      return seg.text?.title || (guid ? this.resolveRecordName(guid) : '') || '';
+      const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
+      const guid = textObj.guid || null;
+      return textObj.title || (guid ? this.resolveRecordName(guid) : '') || '';
     }
 
     return typeof seg.text === 'string' ? seg.text : '';
@@ -5324,7 +5325,8 @@ class Plugin extends AppPlugin {
       }
 
       if (seg.type === 'ref') {
-        const guid = seg.text?.guid || null;
+        const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
+        const guid = textObj.guid || null;
         if (!guid) continue;
         const el = document.createElement('span');
         el.className = 'tlr-seg-ref';
