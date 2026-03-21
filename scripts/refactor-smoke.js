@@ -262,6 +262,28 @@ test('segment helpers keep plain text, mentions, refs, and datetimes readable', 
   assert.equal(text, 'Hello @Harpreet meet Linked Record on 2026-03-11');
 });
 
+test('segment helpers handle ref segments with string seg.text (plain guid format from API)', () => {
+  const plugin = makePlugin();
+  const linkedRecord = makeRecord({ guid: 'linked-guid', name: '@John Doe' });
+  plugin.__recordsByGuid.set(linkedRecord.guid, linkedRecord);
+
+  // seg.text as plain guid string — the format the Thymer API can return
+  const text = plugin.segmentsToPlainText([
+    { type: 'text', text: 'attendees:: ' },
+    { type: 'ref', text: linkedRecord.guid },
+  ]);
+
+  assert.equal(text, 'attendees:: @John Doe');
+
+  // Also verify lineHasRefToRecord is consistent
+  const line = {
+    guid: 'line-1',
+    record: { guid: 'source-guid' },
+    segments: [{ type: 'ref', text: linkedRecord.guid }]
+  };
+  assert.equal(plugin.lineHasRefToRecord(line, linkedRecord.guid), true);
+});
+
 test('buildReplacedSegments uses phrase boundaries and replaces all matching mentions', () => {
   const plugin = makePlugin();
   const segments = [
