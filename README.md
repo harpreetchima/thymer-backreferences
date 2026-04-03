@@ -1,5 +1,13 @@
 # Backreferences for Thymer
 
+---
+CHANGES FROM ORIGINAL:
+- Added preview drop down to backreferenced files
+- Some styling changes added
+- Removed backreferences from today's journal page (using 'Today's Notes' plugin on daily journal instead)
+- Incorporated one-click unlinked references linking
+--- 
+
 When you are writing a note, one of the first questions is: where else is this referenced?
 Backreferences solves that problem by adding an always-available references panel to the active note, so you can quickly see incoming mentions and navigate to context.
 
