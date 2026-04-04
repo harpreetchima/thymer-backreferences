@@ -1,22 +1,33 @@
+
+
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.41';
+    this._version = '0.6.0';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
     this._eventHandlerIds = [];
 
-    this._storageKeyPageViewByRecord = 'thymer_backreferences_page_view_by_record_v1';
-    this._pageViewByRecord = this.loadPageViewByRecordSetting();
+    this._storageKeyCollapsed = 'thymer_backreferences_collapsed_v2';
+    this._legacyStorageKeyCollapsed = null;
+    this._collapsed = this.loadCollapsedSetting();
 
     this._storageKeyPropGroupCollapsed = 'thymer_backreferences_prop_group_collapsed_v2';
     this._legacyStorageKeyPropGroupCollapsed = null;
     this._propGroupCollapsed = this.loadPropGroupCollapsedSetting();
 
     this._storageKeyRecordGroupCollapsed = 'thymer_backreferences_record_group_collapsed_v1';
-    this._legacyStorageKeyRecordGroupCollapsed = null;
     this._recordGroupCollapsed = this.loadRecordGroupCollapsedSetting();
+
+    this._storageKeyPropertyRefsCollapsed = 'thymer_backreferences_property_refs_collapsed_v1';
+    this._propertyRefsCollapsed = this.loadBoolSetting(this._storageKeyPropertyRefsCollapsed, false);
+
+    this._storageKeyLinkedRefsCollapsed = 'thymer_backreferences_linked_refs_collapsed_v1';
+    this._linkedRefsCollapsed = this.loadBoolSetting(this._storageKeyLinkedRefsCollapsed, false);
+
+    this._storageKeyUnlinkedCollapsed = 'thymer_backreferences_unlinked_collapsed_v1';
+    this._unlinkedCollapsed = this.loadBoolSetting(this._storageKeyUnlinkedCollapsed, false);
 
     this._defaultSortBy = 'page_last_edited';
     this._defaultSortDir = 'desc';
@@ -26,22 +37,6 @@ class Plugin extends AppPlugin {
 
     this._defaultMaxResults = 200;
     this._refreshDebounceMs = 350;
-    this._queryFilterDebounceMs = 180;
-    this._queryFilterMaxResults = 1000;
-    this._queryAutocompleteCatalog = null;
-    this._queryAutocompleteCatalogPromise = null;
-    this._queryStandaloneFilters = [
-      'task', 'todo', 'done', 'due', 'overdue', 'assigned', 'unassigned', 'scheduled',
-      'inprogress', 'wip', 'waiting', 'billing', 'important', 'discuss', 'alert', 'starred',
-      'document', 'page', 'record', 'heading', 'text', 'quote', 'list', 'image', 'file',
-      'me', 'mention', 'today', 'tomorrow', 'yesterday', 'thisweek', 'nextweek', 'lastweek',
-      'thismonth', 'thisyear'
-    ];
-    this._queryBuiltInKeys = [
-      'created_at', 'modified_at', 'created_by', 'modified_by', 'text', 'type', 'date',
-      'due', 'time', 'mention', 'scheduled', 'hashtag', 'link', 'collection', 'guid',
-      'pguid', 'rguid', 'backref', 'linkto'
-    ];
     this._legacyIgnoreMetaKey = 'plugin.refs.v1.ignore';
     this._storageKeyIgnoreCleanupDone = 'thymer_backreferences_ignore_cleanup_v1';
     this._ignoreCleanupPromise = null;
@@ -56,6 +51,17 @@ class Plugin extends AppPlugin {
         if (panel) this.scheduleRefreshForPanel(panel, { force: true, reason: 'cmdpal' });
       }
     });
+
+    this._statusItem = this.ui.addStatusBarItem({
+      icon: 'ti-link',
+      label: '0',
+      tooltip: 'Backreferences',
+      onClick: () => {
+        const panel = this.ui.getActivePanel();
+        if (panel) this.scheduleRefreshForPanel(panel, { force: true, reason: 'status-item' });
+      }
+    });
+    this._statusItem?.hide?.();
 
     this._eventHandlerIds.push(
       this.events.on('panel.navigated', (ev) => this.handlePanelChanged(ev.panel, 'panel.navigated'))
@@ -143,41 +149,22 @@ class Plugin extends AppPlugin {
     }
 
     const state = this.getOrCreatePanelState(panel);
-    if (!state.sectionCollapsed || typeof state.sectionCollapsed !== 'object') {
-      state.sectionCollapsed = this.createDefaultSectionCollapsedState();
-    }
-    if (state.footerCollapsed !== true && state.footerCollapsed !== false) {
-      state.footerCollapsed = null;
-    }
     const recordChanged = state.recordGuid !== recordGuid;
     state.recordGuid = recordGuid;
-    if (recordChanged) {
-      const viewPrefs = this.getPageViewPreference(recordGuid);
-      state.footerCollapsed = viewPrefs.footerCollapsed;
-      state.sectionCollapsed = this.cloneSectionCollapsedState(viewPrefs.sections);
-    }
 
     if (recordChanged || !this.isValidSortBy(state.sortBy) || !this.isValidSortDir(state.sortDir)) {
+      state.emptyStateExpanded = false;
       state.linkedContextByLine = new Map();
-      state.searchAutocompleteItems = [];
-      state.searchAutocompleteSelectedIndex = 0;
-      state.searchAutocompleteOpen = false;
       state.liveBaselineSnapshot = null;
       state.liveCurrentSnapshot = null;
       state.liveNewKeys = new Set();
       state.liveRemoteBadgesByKey = new Map();
       state.pendingRemoteSync = false;
       state.pendingRemoteUsers = new Set();
-      if (state.queryFilterTimer) {
-        clearTimeout(state.queryFilterTimer);
-        state.queryFilterTimer = null;
-      }
-      state.queryFilterState = null;
       const pref = this.getSortPreferenceForRecord(recordGuid);
       state.sortBy = pref.sortBy;
       state.sortDir = pref.sortDir;
       state.sortMenuOpen = false;
-      state.searchOpen = Boolean((state.searchQuery || '').trim());
     }
 
     this.mountFooter(panel, state);
@@ -191,17 +178,18 @@ class Plugin extends AppPlugin {
   }
 
   shouldSuppressInPanel(panel, panelEl) {
-    const panelType = typeof panel?.getType === 'function' ? (panel.getType() || '').trim() : '';
     const nav = panel?.getNavigation?.() || null;
     const navType = nav && typeof nav.type === 'string' ? nav.type.trim() : '';
 
-    if (panelType && panelType !== 'edit_panel') return true;
-
     // Keep suppression conservative: nav.type labels can vary across builds.
-    // We hard-suppress known custom panel nav types and any Search surface,
-    // which can share editor-panel containers but should never host footer UI.
+    // We only hard-suppress known custom panel nav types. Other panel kinds are
+    // filtered by mount-container detection and active-record checks.
     if (navType === 'custom' || navType === 'custom_panel') return true;
-    if (panelEl?.matches?.('.search-panel') || panelEl?.closest?.('.search-panel')) return true;
+
+    // Suppress on journal pages — their GUIDs end with a YYYYMMDD date stamp.
+    const record = panel?.getActiveRecord?.() || null;
+    const guid = record?.guid || '';
+    if (/\d{8}$/.test(guid)) return true;
 
     return false;
   }
@@ -216,7 +204,41 @@ class Plugin extends AppPlugin {
   getOrCreatePanelState(panel) {
     const panelId = panel?.getId?.() || null;
     if (!panelId) {
-      return this.createPanelState('unknown', null);
+      return {
+        panelId: 'unknown',
+        recordGuid: null,
+        mountedIn: null,
+        rootEl: null,
+        bodyEl: null,
+        countEl: null,
+        sortToggleEl: null,
+        sortMenuEl: null,
+        searchToggleEl: null,
+        searchWrapEl: null,
+        searchInputEl: null,
+        chipsRowEl: null,
+        searchPhrases: [],
+        searchTyped: '',
+        searchOpen: false,
+        emptyStateExpanded: false,
+        linkedContextByLine: new Map(),
+        recordExpandedState: new Map(),
+        liveBaselineSnapshot: null,
+        liveCurrentSnapshot: null,
+        liveNewKeys: new Set(),
+        liveRemoteBadgesByKey: new Map(),
+        pendingRemoteSync: false,
+        pendingRemoteUsers: new Set(),
+        sortBy: this._defaultSortBy,
+        sortDir: this._defaultSortDir,
+        sortMenuOpen: false,
+        sortMenuDismissHandler: null,
+        lastResults: null,
+        observer: null,
+        refreshTimer: null,
+        refreshSeq: 0,
+        isLoading: false
+      };
     }
 
     let state = this._panelStates.get(panelId) || null;
@@ -225,42 +247,26 @@ class Plugin extends AppPlugin {
       return state;
     }
 
-    state = this.createPanelState(panelId, panel);
-
-    this._panelStates.set(panelId, state);
-    return state;
-  }
-
-  createPanelState(panelId, panel) {
-    return {
-      panelId: panelId || 'unknown',
-      panel: panel || null,
+    state = {
+      panelId,
+      panel,
       recordGuid: null,
       mountedIn: null,
       rootEl: null,
       bodyEl: null,
       countEl: null,
-      footerToggleEl: null,
       sortToggleEl: null,
       sortMenuEl: null,
       searchToggleEl: null,
-      searchRowEl: null,
       searchWrapEl: null,
       searchInputEl: null,
-      searchHighlightTextEl: null,
-      searchClearEl: null,
-      searchRefreshEl: null,
-      searchAutocompleteEl: null,
-      searchAutocompleteItems: [],
-      searchAutocompleteSelectedIndex: 0,
-      searchAutocompleteOpen: false,
-      searchAutocompleteDismissHandler: null,
-      searchAutocompleteRequestSeq: 0,
-      searchQuery: '',
+      chipsRowEl: null,
+      searchPhrases: [],
+      searchTyped: '',
       searchOpen: false,
-      footerCollapsed: null,
-      sectionCollapsed: this.createDefaultSectionCollapsedState(),
+      emptyStateExpanded: false,
       linkedContextByLine: new Map(),
+      recordExpandedState: new Map(),
       liveBaselineSnapshot: null,
       liveCurrentSnapshot: null,
       liveNewKeys: new Set(),
@@ -271,16 +277,15 @@ class Plugin extends AppPlugin {
       sortDir: this._defaultSortDir,
       sortMenuOpen: false,
       sortMenuDismissHandler: null,
-      sortMenuKeyHandler: null,
-      queryFilterTimer: null,
-      queryFilterSeq: 0,
-      queryFilterState: null,
       lastResults: null,
       observer: null,
       refreshTimer: null,
       refreshSeq: 0,
       isLoading: false
     };
+
+    this._panelStates.set(panelId, state);
+    return state;
   }
 
   disposePanelState(panelId) {
@@ -292,11 +297,6 @@ class Plugin extends AppPlugin {
       state.refreshTimer = null;
     }
 
-    if (state.queryFilterTimer) {
-      clearTimeout(state.queryFilterTimer);
-      state.queryFilterTimer = null;
-    }
-
     try {
       state.observer?.disconnect?.();
     } catch (e) {
@@ -305,7 +305,6 @@ class Plugin extends AppPlugin {
     state.observer = null;
 
     this.setSortMenuOpen(state, false);
-    this.setSearchAutocompleteOpen(state, false);
 
     try {
       state.rootEl?.remove?.();
@@ -331,10 +330,8 @@ class Plugin extends AppPlugin {
       state.rootEl = this.buildFooterRoot(state);
       state.bodyEl = state.rootEl.querySelector('[data-role="body"]');
       state.countEl = state.rootEl.querySelector('[data-role="count"]');
-      this.setSearchOpen(state, state.searchOpen === true || Boolean((state.searchQuery || '').trim()));
-      this.syncSearchAutocompleteControlState(state);
-      this.renderSearchAutocomplete(state);
-      this.setSearchAutocompleteOpen(state, state.searchOpen === true && state.searchAutocompleteOpen === true);
+      state.chipsRowEl = state.rootEl.querySelector('.tlr-chips-row') || null;
+      this.setSearchOpen(state, state.searchOpen === true);
       this.renderSortMenu(state);
       this.syncSortControlState(state);
       this.setSortMenuOpen(state, state.sortMenuOpen === true);
@@ -386,29 +383,18 @@ class Plugin extends AppPlugin {
     root.className = 'tlr-footer form-field-group';
     root.dataset.panelId = state.panelId;
 
-    const headerField = document.createElement('div');
-    headerField.className = 'tlr-header-field form-field';
-
     const header = document.createElement('div');
-    header.className = 'tlr-header form-field-row';
-
-    const headerMain = document.createElement('div');
-    headerMain.className = 'tlr-header-main';
-
-    const headerControls = document.createElement('div');
-    headerControls.className = 'tlr-header-controls';
+    header.className = 'tlr-header';
 
     const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'tlr-btn tlr-toggle tlr-section-toggle button-none button-small button-minimal-hover';
+    toggleBtn.className = 'tlr-btn tlr-toggle button-none button-small button-minimal-hover';
     toggleBtn.type = 'button';
     toggleBtn.dataset.action = 'toggle';
     toggleBtn.title = 'Collapse/expand';
-    toggleBtn.setAttribute('aria-label', 'Collapse');
-    toggleBtn.setAttribute('aria-expanded', 'true');
-    toggleBtn.appendChild(this.buildChevronIcon(false, 'tlr-toggle-caret'));
+    toggleBtn.textContent = this._collapsed ? '+' : '-';
 
     const title = document.createElement('div');
-    title.className = 'tlr-title tlr-section-title text-details';
+    title.className = 'tlr-title';
     title.textContent = 'Backreferences';
 
     const count = document.createElement('div');
@@ -416,177 +402,95 @@ class Plugin extends AppPlugin {
     count.dataset.role = 'count';
     count.textContent = '';
 
-    const filterWrap = document.createElement('div');
-    filterWrap.className = 'tlr-filter-wrap';
+    const spacer = document.createElement('div');
+    spacer.className = 'tlr-spacer';
 
-    const filterToggle = document.createElement('button');
-    filterToggle.className = 'tlr-btn tlr-filter-toggle tlr-search-toggle button-none button-small button-minimal-hover tooltip id--filter-button';
-    filterToggle.type = 'button';
-    filterToggle.dataset.action = 'toggle-search';
-    filterToggle.setAttribute('aria-expanded', state.searchOpen === true ? 'true' : 'false');
-    filterToggle.setAttribute('aria-label', 'Filter');
-    filterToggle.setAttribute('data-tooltip', 'Filter');
-    filterToggle.setAttribute('data-tooltip-dir', 'top');
+    const searchToggle = document.createElement('button');
+    searchToggle.className = 'tlr-btn tlr-search-toggle button-none button-small button-minimal-hover';
+    searchToggle.type = 'button';
+    searchToggle.dataset.action = 'toggle-search';
+    searchToggle.title = 'Filter references';
+    searchToggle.setAttribute('aria-expanded', state.searchOpen === true ? 'true' : 'false');
     try {
-      const filterIcon = this.ui.createIcon('ti-filter');
-      filterIcon.classList.add('id--filter-icon');
-      filterToggle.appendChild(filterIcon);
+      searchToggle.appendChild(this.ui.createIcon('ti-search'));
     } catch (e) {
-      filterToggle.textContent = 'Filter';
+      searchToggle.textContent = 'Search';
     }
-    filterWrap.appendChild(filterToggle);
-
-    const searchRow = document.createElement('div');
-    searchRow.className = 'tlr-search-row form-field';
-
-    const searchRowInner = document.createElement('div');
-    searchRowInner.className = 'tlr-search-row-inner form-field-row';
 
     const searchWrap = document.createElement('div');
-    searchWrap.className = 'tlr-search-wrap tlr-query-input query-input';
+    searchWrap.className = 'tlr-search-wrap query-input';
 
-    const queryWrap = document.createElement('div');
-    queryWrap.className = 'query-input--wrapper';
-
-    const highlight = document.createElement('div');
-    highlight.className = 'query-input--highlight';
-
-    const highlightText = document.createElement('span');
-    highlight.appendChild(highlightText);
+    const searchIcon = document.createElement('div');
+    searchIcon.className = 'tlr-search-icon';
+    try {
+      searchIcon.appendChild(this.ui.createIcon('ti-search'));
+    } catch (e) {
+      searchIcon.textContent = 'Search';
+    }
 
     const input = document.createElement('input');
-    input.className = 'tlr-search-input query-input--field w-full form-input is-collection-filter';
+    input.className = 'tlr-search-input query-input--field form-input';
     input.type = 'text';
     input.name = 'backreferences-filter';
-    input.placeholder = 'Search text, or use @Collection.property = "value"';
-    input.title = 'Search current backreferences with plain text, or use Thymer query syntax like @Collection.property = "value" and AND/OR/NOT';
+    input.placeholder = 'Filter references...';
     input.autocomplete = 'off';
     input.spellcheck = false;
-    input.value = state.searchQuery || '';
+    input.value = state.searchTyped || '';
 
     const stopKeys = (e) => {
       e.stopPropagation();
       if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
     };
 
+    const commitChip = () => {
+      const val = input.value.trim();
+      if (!val) return;
+      if (!state.searchPhrases.includes(val)) {
+        state.searchPhrases = [...state.searchPhrases, val];
+      }
+      state.searchTyped = '';
+      input.value = '';
+      this.rebuildChips(state);
+      this.renderFromCache(state);
+    };
+
     input.addEventListener('keydown', (e) => {
       stopKeys(e);
-      if (state.searchAutocompleteOpen === true) {
-        if (e.key === 'ArrowDown') {
-          e.preventDefault();
-          this.moveSearchAutocompleteSelection(state, 1);
-          return;
-        }
-        if (e.key === 'ArrowUp') {
-          e.preventDefault();
-          this.moveSearchAutocompleteSelection(state, -1);
-          return;
-        }
-        if (e.key === 'Tab') {
-          e.preventDefault();
-          this.applySelectedSearchAutocompleteItem(state);
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          this.applySelectedSearchAutocompleteItem(state);
-          return;
-        }
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          this.setSearchAutocompleteOpen(state, false);
-          return;
-        }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commitChip();
+        return;
       }
-
       if (e.key === 'Escape') {
         e.preventDefault();
-        const q = (state.searchQuery || '').trim();
-        if (q) {
-          state.searchQuery = '';
+        const hasAny = state.searchTyped || state.searchPhrases.length > 0;
+        if (hasAny) {
+          state.searchTyped = '';
+          state.searchPhrases = [];
           input.value = '';
-          this.handleSearchQueryChanged(state, { immediate: true });
+          this.rebuildChips(state);
+          this.renderFromCache(state);
         } else {
-          input.blur();
-        }
-        return;
-      }
-
-      if (e.key === 'Enter') {
-        const mode = this.getSearchMode(state.searchQuery || '');
-        if (mode === 'query') {
-          if (this.isIncompleteQueryDraft(state.searchQuery || '')) return;
-          e.preventDefault();
-          this.scheduleQueryFilterRefresh(state, { immediate: true, reason: 'enter' });
+          this.setSearchOpen(state, false);
         }
       }
-    });
-
-    input.addEventListener('focus', () => {
-      this.updateSearchFieldState(state);
-      this.updateSearchAutocomplete(state);
-    });
-
-    input.addEventListener('click', () => {
-      this.updateSearchFieldState(state);
-      this.updateSearchAutocomplete(state);
-    });
-
-    input.addEventListener('blur', () => {
-      this.updateSearchFieldState(state);
-    });
-
-    input.addEventListener('keyup', (e) => {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape') {
-        return;
-      }
-      this.updateSearchFieldState(state);
-      this.updateSearchAutocomplete(state);
     });
 
     input.addEventListener('input', () => {
-      state.searchQuery = input.value;
-      this.updateSearchFieldState(state);
-      this.handleSearchQueryChanged(state, { immediate: false });
-      this.updateSearchAutocomplete(state);
+      state.searchTyped = input.value;
+      this.renderFromCache(state);
     });
 
     const clearBtn = document.createElement('button');
-    clearBtn.className = 'tlr-search-clear query-input--clear-btn button-none button-small button-minimal-hover tooltip';
+    clearBtn.className = 'tlr-search-clear button-none button-small button-minimal-hover';
     clearBtn.type = 'button';
     clearBtn.dataset.action = 'clear-search';
-    clearBtn.setAttribute('aria-label', 'Clear search');
-    clearBtn.setAttribute('data-tooltip', 'Clear search');
-    clearBtn.setAttribute('data-tooltip-dir', 'top');
-    try {
-      clearBtn.appendChild(this.ui.createIcon('ti-x'));
-    } catch (e) {
-      clearBtn.textContent = 'x';
-    }
+    clearBtn.title = 'Clear';
+    clearBtn.textContent = 'x';
 
-    const refreshBtn = document.createElement('button');
-    refreshBtn.className = 'tlr-search-refresh query-input--refresh-btn button-none button-small button-minimal-hover tooltip';
-    refreshBtn.type = 'button';
-    refreshBtn.dataset.action = 'refresh-search';
-    refreshBtn.setAttribute('aria-label', 'Refresh now');
-    refreshBtn.setAttribute('data-tooltip', 'Refresh now');
-    refreshBtn.setAttribute('data-tooltip-dir', 'top');
-    try {
-      refreshBtn.appendChild(this.ui.createIcon('ti-refresh'));
-    } catch (e) {
-      refreshBtn.textContent = 'Refresh';
-    }
-
-    const autocomplete = document.createElement('div');
-    autocomplete.className = 'tlr-search-autocomplete cmdpal--inline dropdown active focused-component';
-    autocomplete.setAttribute('role', 'listbox');
-
-    queryWrap.appendChild(highlight);
-    queryWrap.appendChild(input);
-    queryWrap.appendChild(clearBtn);
-    queryWrap.appendChild(refreshBtn);
-    searchWrap.appendChild(queryWrap);
-    searchWrap.appendChild(autocomplete);
+    searchWrap.appendChild(searchIcon);
+    searchWrap.appendChild(input);
+    searchWrap.appendChild(clearBtn);
 
     const sortWrap = document.createElement('div');
     sortWrap.className = 'tlr-sort-wrap';
@@ -595,7 +499,6 @@ class Plugin extends AppPlugin {
     sortToggle.className = 'tlr-btn tlr-sort-toggle button-none button-small button-minimal-hover';
     sortToggle.type = 'button';
     sortToggle.dataset.action = 'toggle-sort-menu';
-    sortToggle.setAttribute('aria-label', 'Sort options');
     sortToggle.setAttribute('aria-haspopup', 'menu');
     sortToggle.setAttribute('aria-expanded', state.sortMenuOpen === true ? 'true' : 'false');
     sortToggle.title = 'Sort options';
@@ -613,49 +516,42 @@ class Plugin extends AppPlugin {
     const sortMenu = document.createElement('div');
     sortMenu.className = 'tlr-sort-menu cmdpal--inline dropdown active focused-component';
     sortMenu.setAttribute('role', 'menu');
-    sortMenu.setAttribute('aria-label', 'Backreferences sort options');
 
     sortWrap.appendChild(sortToggle);
     sortWrap.appendChild(sortMenu);
 
-    headerMain.appendChild(toggleBtn);
-    headerMain.appendChild(title);
-    headerMain.appendChild(count);
-
-    headerControls.appendChild(filterWrap);
-    headerControls.appendChild(sortWrap);
-
-    header.appendChild(headerMain);
-    header.appendChild(headerControls);
-    headerField.appendChild(header);
+    header.appendChild(toggleBtn);
+    header.appendChild(title);
+    header.appendChild(count);
+    header.appendChild(spacer);
+    header.appendChild(searchToggle);
+    header.appendChild(searchWrap);
+    header.appendChild(sortWrap);
 
     const body = document.createElement('div');
     body.className = 'tlr-body';
     body.dataset.role = 'body';
 
-    searchRowInner.appendChild(searchWrap);
-    searchRow.appendChild(searchRowInner);
-    root.appendChild(headerField);
-    root.appendChild(searchRow);
+    const chipsRow = document.createElement('div');
+    chipsRow.className = 'tlr-chips-row';
+
+    root.appendChild(header);
+    root.appendChild(chipsRow);
     root.appendChild(body);
 
     root.addEventListener('click', (e) => this.handleFooterClick(e));
 
-    state.rootEl = root;
-    state.footerToggleEl = toggleBtn;
-    this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, this.getCollapseMetrics(state.lastResults)));
+    this.applyCollapsedState(root, this._collapsed);
+    root.classList.toggle('tlr-search-open', state.searchOpen === true);
     root.classList.toggle('tlr-sort-open', state.sortMenuOpen === true);
 
     state.sortToggleEl = sortToggle;
     state.sortMenuEl = sortMenu;
-    state.searchToggleEl = filterToggle;
-    state.searchRowEl = searchRow;
+    state.searchToggleEl = searchToggle;
     state.searchWrapEl = searchWrap;
     state.searchInputEl = input;
-    state.searchHighlightTextEl = highlightText;
-    state.searchClearEl = clearBtn;
-    state.searchRefreshEl = refreshBtn;
-    state.searchAutocompleteEl = autocomplete;
+    state.chipsRowEl = chipsRow;
+    this.rebuildChips(state);
     return root;
   }
 
@@ -675,9 +571,14 @@ class Plugin extends AppPlugin {
     const state = this._panelStates.get(panelId) || null;
 
     if (action === 'toggle') {
-      if (!state) return;
-      const nextCollapsed = !this.isFooterCollapsed(state, this.getCollapseMetrics(state.lastResults));
-      this.applyFooterCollapsedPreferenceForRecord(state.recordGuid, nextCollapsed);
+      this._collapsed = !this._collapsed;
+      this.saveCollapsedSetting(this._collapsed);
+      for (const s of this._panelStates.values()) {
+        if (!s?.rootEl) continue;
+        this.applyCollapsedState(s.rootEl, this._collapsed);
+        const btn = s.rootEl.querySelector?.('[data-action="toggle"]') || null;
+        if (btn) btn.textContent = this._collapsed ? '+' : '-';
+      }
       return;
     }
 
@@ -691,65 +592,19 @@ class Plugin extends AppPlugin {
 
       this.setPropGroupCollapsed(propName, nextCollapsed);
       if (groupEl) groupEl.classList.toggle('tlr-prop-collapsed', nextCollapsed);
-      const propControls = groupEl?.querySelectorAll?.('[data-action="toggle-prop-group"]') || [];
-      propControls.forEach((el) => {
-        el.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
-        if (el.classList?.contains?.('tlr-prop-toggle')) {
-          el.title = nextCollapsed ? 'Expand' : 'Collapse';
-          el.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
-        }
-      });
-      this.syncChevronIcon(groupEl?.querySelector?.('.tlr-prop-caret') || null, nextCollapsed);
-      return;
-    }
-
-    if (action === 'toggle-record-group') {
-      const sectionId = this.normalizeRecordGroupSectionId(actionEl.dataset.groupSectionId);
-      const recordGuid = (actionEl.dataset.recordGuid || '').trim();
-      if (!sectionId || !recordGuid) return;
-
-      const groupEl = actionEl.closest?.('.tlr-group') || null;
-      const isCollapsed = groupEl ? groupEl.classList.contains('tlr-group-collapsed') : this.isRecordGroupCollapsed(sectionId, recordGuid);
-      const nextCollapsed = !isCollapsed;
-
-      this.setRecordGroupCollapsed(sectionId, recordGuid, nextCollapsed);
-      if (groupEl) groupEl.classList.toggle('tlr-group-collapsed', nextCollapsed);
       actionEl.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
-      actionEl.title = nextCollapsed ? 'Expand' : 'Collapse';
-      actionEl.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
-      this.syncChevronIcon(actionEl.querySelector?.('.tlr-group-caret') || null, nextCollapsed);
-      return;
-    }
-
-    if (action === 'toggle-section') {
-      if (!state) return;
-      const sectionId = this.normalizeSectionId(actionEl.dataset.sectionId);
-      if (!sectionId) return;
-
-      const nextCollapsed = !this.isSectionCollapsed(state, sectionId, this.getCollapseMetrics(state.lastResults));
-      this.applySectionCollapsedPreferenceForRecord(state.recordGuid, sectionId, nextCollapsed);
       return;
     }
 
     if (action === 'toggle-search') {
       if (!state) return;
-      this.setSearchOpen(state, state.searchOpen !== true);
+      this.setSearchOpen(state, !(state.searchOpen === true));
       return;
     }
 
     if (action === 'toggle-sort-menu') {
       if (!state) return;
-      if (state.sortMenuOpen === true) {
-        this.setSortMenuOpen(state, false);
-      } else {
-        this.setSortMenuOpen(state, true);
-      }
-      return;
-    }
-
-    if (action === 'refresh-search') {
-      if (!state) return;
-      this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'search-refresh' });
+      this.setSortMenuOpen(state, !(state.sortMenuOpen === true));
       return;
     }
 
@@ -773,14 +628,111 @@ class Plugin extends AppPlugin {
 
     if (action === 'clear-search') {
       if (!state) return;
-      const q = (state.searchQuery || '').trim();
-      if (q) {
-        state.searchQuery = '';
+      const hasAny = state.searchTyped || (state.searchPhrases || []).length > 0;
+      if (hasAny) {
+        state.searchTyped = '';
+        state.searchPhrases = [];
         if (state.searchInputEl) state.searchInputEl.value = '';
-        this.handleSearchQueryChanged(state, { immediate: true, keepFocus: true });
+        this.rebuildChips(state);
+        this.renderFromCache(state);
+        this.setSearchOpen(state, true);
       } else {
-        state.searchInputEl?.blur?.();
+        this.setSearchOpen(state, false);
       }
+      return;
+    }
+
+    if (action === 'remove-chip') {
+      if (!state) return;
+      const phrase = actionEl.dataset.phrase || '';
+      state.searchPhrases = (state.searchPhrases || []).filter((p) => p !== phrase);
+      this.rebuildChips(state);
+      this.renderFromCache(state);
+      return;
+    }
+
+    if (action === 'toggle-property-refs') {
+      this._propertyRefsCollapsed = !this._propertyRefsCollapsed;
+      this.saveBoolSetting(this._storageKeyPropertyRefsCollapsed, this._propertyRefsCollapsed);
+      for (const s of this._panelStates.values()) {
+        const el = s.rootEl?.querySelector?.('[data-section="property"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._propertyRefsCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'toggle-linked-refs') {
+      this._linkedRefsCollapsed = !this._linkedRefsCollapsed;
+      this.saveBoolSetting(this._storageKeyLinkedRefsCollapsed, this._linkedRefsCollapsed);
+      for (const s of this._panelStates.values()) {
+        const el = s.rootEl?.querySelector?.('[data-section="linked"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._linkedRefsCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'toggle-unlinked-refs') {
+      this._unlinkedCollapsed = !this._unlinkedCollapsed;
+      this.saveBoolSetting(this._storageKeyUnlinkedCollapsed, this._unlinkedCollapsed);
+      for (const s of this._panelStates.values()) {
+        const el = s.rootEl?.querySelector?.('[data-section="unlinked"]') || null;
+        if (el) el.classList.toggle('tlr-section-collapsed', this._unlinkedCollapsed);
+      }
+      return;
+    }
+
+    if (action === 'toggle-record-group') {
+      const guid = actionEl.dataset.recordGuid || '';
+      if (!guid) return;
+      const nextCollapsed = !this.isRecordGroupCollapsed(guid);
+      this.setRecordGroupCollapsed(guid, nextCollapsed);
+      const groupEl = actionEl.closest?.('.tlr-group') || null;
+      if (groupEl) groupEl.classList.toggle('tlr-group-collapsed', nextCollapsed);
+      return;
+    }
+
+    if (action === 'expand-record') {
+      if (!state) return;
+      const guid = actionEl.dataset.recordGuid || '';
+      if (!guid) return;
+      e.stopPropagation();
+      const groupEl = actionEl.closest?.('.tlr-group') || null;
+      if (groupEl) this.toggleRecordExpansion(state, guid, groupEl).catch(() => {});
+      return;
+    }
+
+    if (action === 'toggle-preview-node') {
+      if (!state) return;
+      const nodeGuid = actionEl.dataset.nodeGuid || '';
+      const recordGuid = actionEl.dataset.recordGuid || '';
+      if (!nodeGuid || !recordGuid) return;
+      const cached = state.recordExpandedState.get(recordGuid);
+      if (!cached?.allItems) return;
+      if (cached.collapsedNodes.has(nodeGuid)) cached.collapsedNodes.delete(nodeGuid);
+      else cached.collapsedNodes.add(nodeGuid);
+      const groupEl = actionEl.closest?.('.tlr-group') || null;
+      const previewEl = groupEl?.querySelector('.tlr-record-preview') || null;
+      if (previewEl) this.renderRecordPreview(previewEl, cached.allItems, recordGuid, cached.collapsedNodes);
+      return;
+    }
+
+    if (action === 'link-unlinked') {
+      if (!state) return;
+      const lineGuid = actionEl.dataset.lineGuid || null;
+      if (lineGuid) this.linkUnlinkedReference(state, lineGuid).catch(() => {});
+      return;
+    }
+
+    if (action === 'link-all-unlinked') {
+      if (!state) return;
+      this.linkAllUnlinkedReferences(state).catch(() => {});
+      return;
+    }
+
+    if (action === 'expand-empty') {
+      if (!state) return;
+      state.emptyStateExpanded = true;
+      this.renderFromCache(state);
       return;
     }
 
@@ -795,17 +747,6 @@ class Plugin extends AppPlugin {
         action,
         actionEl.dataset.lineGuid || null
       ).catch(() => {
-        // ignore
-      });
-      return;
-    }
-
-    if (action === 'link-unlinked') {
-      if (!state) return;
-      const lineGuid = actionEl.dataset.lineGuid || null;
-      if (!lineGuid) return;
-      this.setSortMenuOpen(state, false);
-      this.linkUnlinkedReference(state, lineGuid).catch(() => {
         // ignore
       });
       return;
@@ -840,98 +781,37 @@ class Plugin extends AppPlugin {
     }
   }
 
-  navigatePanelToRecord(panel, recordGuid, lineGuid, workspaceGuid) {
-    if (!lineGuid) {
-      panel.navigateTo({
-        type: 'edit_panel',
-        rootId: recordGuid,
-        subId: null,
-        workspaceGuid
-      });
-      return Promise.resolve(true);
-    }
-
-    try {
-      const result = panel.navigateTo({
-        itemGuid: lineGuid,
-        highlight: true
-      });
-
-      if (result && typeof result.then === 'function') {
-        return result.then((found) => found !== false);
-      }
-
-      return Promise.resolve(result !== false);
-    } catch (_err) {
-      return Promise.resolve(false);
-    }
-  }
-
-  waitForPanelNavigationFrame() {
-    return new Promise((resolve) => {
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => resolve());
-        return;
-      }
-      setTimeout(resolve, 0);
-    });
-  }
-
-  waitForPanelRecord(panel, recordGuid, timeoutMs = 1800) {
-    return new Promise((resolve) => {
-      const startedAt = Date.now();
-
-      const check = () => {
-        const activeRecordGuid = panel?.getActiveRecord?.()?.guid || null;
-        if (activeRecordGuid && (!recordGuid || activeRecordGuid === recordGuid)) {
-          resolve(true);
-          return;
-        }
-
-        if ((Date.now() - startedAt) >= timeoutMs) {
-          resolve(false);
-          return;
-        }
-
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(check);
-          return;
-        }
-
-        setTimeout(check, 16);
-      };
-
-      check();
-    });
-  }
-
-  async openRecord(panel, recordGuid, lineGuid, e) {
+  openRecord(panel, recordGuid, subId, e) {
     const workspaceGuid = this.getWorkspaceGuid?.() || null;
     if (!workspaceGuid) return;
 
     const openInNew = e?.metaKey || e?.ctrlKey;
 
     if (openInNew) {
-      try {
-        const newPanel = await this.ui.createPanel({ afterPanel: panel });
-        if (!newPanel) return;
-        this.ui.setActivePanel(newPanel);
-        await this.waitForPanelNavigationFrame();
-        await this.navigatePanelToRecord(newPanel, recordGuid, null, workspaceGuid);
-        await this.waitForPanelRecord(newPanel, recordGuid);
-
-        if (lineGuid) {
-          await this.navigatePanelToRecord(newPanel, recordGuid, lineGuid, workspaceGuid);
-          await this.waitForPanelNavigationFrame();
-          await this.waitForPanelNavigationFrame();
-        }
-      } catch (_err) {
-        // ignore
-      }
+      this.ui
+        .createPanel({ afterPanel: panel })
+        .then((newPanel) => {
+          if (!newPanel) return;
+          newPanel.navigateTo({
+            type: 'edit_panel',
+            rootId: recordGuid,
+            subId: subId || null,
+            workspaceGuid
+          });
+          this.ui.setActivePanel(newPanel);
+        })
+        .catch(() => {
+          // ignore
+        });
       return;
     }
 
-    this.navigatePanelToRecord(panel, recordGuid, lineGuid || null, workspaceGuid);
+    panel.navigateTo({
+      type: 'edit_panel',
+      rootId: recordGuid,
+      subId: subId || null,
+      workspaceGuid
+    });
     this.ui.setActivePanel(panel);
   }
 
@@ -940,1097 +820,49 @@ class Plugin extends AppPlugin {
     root.classList.toggle('tlr-collapsed', collapsed === true);
   }
 
-  createDefaultSectionCollapsedState() {
-    return {};
-  }
-
-  cloneSectionCollapsedState(sectionCollapsed) {
-    const out = {};
-    for (const id of ['property', 'linked', 'unlinked']) {
-      if (typeof sectionCollapsed?.[id] === 'boolean') out[id] = sectionCollapsed[id];
-    }
-    return out;
-  }
-
-  getCollapseMetrics(results) {
-    if (!results || typeof results !== 'object') {
-      return {
-        ready: false,
-        propertyCount: 0,
-        linkedCount: 0,
-        unlinkedCount: 0,
-        propertyError: false,
-        linkedError: false,
-        unlinkedError: false,
-        unlinkedDeferred: false
-      };
-    }
-
-    const propertyGroups = Array.isArray(results.propertyGroups) ? results.propertyGroups : [];
-    const linkedGroups = Array.isArray(results.linkedGroups) ? results.linkedGroups : [];
-    const unlinkedGroups = Array.isArray(results.unlinkedGroups) ? results.unlinkedGroups : [];
-
-    return {
-      ready: true,
-      propertyCount: propertyGroups.reduce((n, group) => n + (group?.records?.length || 0), 0),
-      linkedCount: this.countLinkedReferences(linkedGroups),
-      unlinkedCount: this.countLinkedReferences(unlinkedGroups),
-      propertyError: Boolean(results.propertyError),
-      linkedError: Boolean(results.linkedError),
-      unlinkedError: Boolean(results.unlinkedError),
-      unlinkedDeferred: results.unlinkedDeferred === true
-    };
-  }
-
-  getDefaultFooterCollapsed(metrics) {
-    if (!metrics?.ready) return false;
-    if (metrics.propertyError || metrics.linkedError) return false;
-    return (metrics.propertyCount + metrics.linkedCount) === 0;
-  }
-
-  isFooterCollapsed(state, metrics) {
-    if (state?.footerCollapsed === true || state?.footerCollapsed === false) {
-      return state.footerCollapsed;
-    }
-    return this.getDefaultFooterCollapsed(metrics);
-  }
-
-  syncFooterCollapsedState(state, collapsed) {
-    if (!state?.rootEl) return;
-    const nextCollapsed = collapsed === true;
-    this.applyCollapsedState(state.rootEl, nextCollapsed);
-    if (state.searchRowEl) {
-      state.searchRowEl.style.display = state.searchOpen === true && nextCollapsed !== true ? 'block' : 'none';
-    }
-
-    const btn = state.footerToggleEl || state.rootEl.querySelector?.('[data-action="toggle"]') || null;
-    if (!btn) return;
-    btn.title = nextCollapsed ? 'Expand' : 'Collapse';
-    btn.setAttribute('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
-    btn.setAttribute('aria-expanded', nextCollapsed ? 'false' : 'true');
-    this.syncChevronIcon(btn.querySelector?.('.tlr-toggle-caret') || null, nextCollapsed);
-  }
-
-  normalizeSectionId(sectionId) {
-    return sectionId === 'property' || sectionId === 'linked' || sectionId === 'unlinked'
-      ? sectionId
-      : null;
-  }
-
-  getDefaultSectionCollapsed(sectionId, metrics) {
-    const id = this.normalizeSectionId(sectionId);
-    if (!id) return false;
-    if (!metrics?.ready) return false;
-    const isTrulyEmpty = !metrics.propertyError
-      && !metrics.linkedError
-      && !metrics.unlinkedError
-      && metrics.propertyCount === 0
-      && metrics.linkedCount === 0
-      && metrics.unlinkedCount === 0;
-    if (isTrulyEmpty) {
-      if (id === 'unlinked') return metrics.unlinkedDeferred === true;
-      return false;
-    }
-    if (id === 'unlinked') return true;
-    if (id === 'property') return metrics.propertyError ? false : metrics.propertyCount === 0;
-    if (id === 'linked') return metrics.linkedError ? false : metrics.linkedCount === 0;
-    return false;
-  }
-
-  isSectionCollapsed(state, sectionId, metrics) {
-    const id = this.normalizeSectionId(sectionId);
-    if (!id) return false;
-    const current = state?.sectionCollapsed?.[id];
-    if (typeof current === 'boolean') return current;
-    return this.getDefaultSectionCollapsed(id, metrics);
-  }
-
-  setSectionCollapsed(state, sectionId, collapsed) {
-    if (!state) return;
-    const id = this.normalizeSectionId(sectionId);
-    if (!id) return;
-    if (!state.sectionCollapsed || typeof state.sectionCollapsed !== 'object') {
-      state.sectionCollapsed = this.createDefaultSectionCollapsedState();
-    }
-    state.sectionCollapsed[id] = collapsed === true;
-  }
-
-  getSearchMode(rawQuery) {
-    const query = (rawQuery || '').trim();
-    if (!query) return 'none';
-    if (query.includes('@') || query.includes('#') || query.includes('"')) return 'query';
-    if (query.includes('(') || query.includes(')')) return 'query';
-    if (query.includes('&&') || query.includes('||')) return 'query';
-    if (/\b(?:AND|OR|NOT)\b/.test(query)) return 'query';
-    return 'text';
-  }
-
-  getQueryAutocompleteCatalogSync() {
-    return this._queryAutocompleteCatalog || {
-      collections: [],
-      users: []
-    };
-  }
-
-  async ensureQueryAutocompleteCatalog() {
-    if (this._queryAutocompleteCatalog) return this._queryAutocompleteCatalog;
-    if (this._queryAutocompleteCatalogPromise) return this._queryAutocompleteCatalogPromise;
-
-    this._queryAutocompleteCatalogPromise = (async () => {
-      let collections = [];
-      try {
-        collections = await this.data.getAllCollections();
-      } catch (e) {
-        collections = [];
-      }
-
-      const catalogCollections = [];
-      for (const collection of collections || []) {
-        const name = (collection?.getName?.() || '').trim();
-        const guid = (collection?.getGuid?.() || '').trim();
-        if (!name || !guid) continue;
-
-        const config = collection?.getConfiguration?.() || null;
-        const fields = [];
-        for (const field of config?.fields || []) {
-          const label = (field?.label || '').trim();
-          if (!label || field?.active === false) continue;
-          fields.push({
-            id: (field?.id || '').trim(),
-            label,
-            type: (field?.type || '').trim()
-          });
-        }
-
-        fields.sort((a, b) => a.label.localeCompare(b.label));
-        catalogCollections.push({ name, guid, fields });
-      }
-
-      catalogCollections.sort((a, b) => a.name.localeCompare(b.name));
-
-      const catalogUsers = [];
-      for (const user of this.data.getActiveUsers?.() || []) {
-        const name = (user?.getDisplayName?.() || '').trim();
-        const guid = (user?.guid || '').trim();
-        if (!name || !guid) continue;
-        catalogUsers.push({ name, guid });
-      }
-
-      catalogUsers.sort((a, b) => a.name.localeCompare(b.name));
-
-      this._queryAutocompleteCatalog = {
-        collections: catalogCollections,
-        users: catalogUsers
-      };
-      this._queryAutocompleteCatalogPromise = null;
-      return this._queryAutocompleteCatalog;
-    })();
-
-    return this._queryAutocompleteCatalogPromise;
-  }
-
-  quoteQueryIdentifier(name) {
-    const value = String(name || '');
-    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-  }
-
-  formatQueryIdentifier(name) {
-    const value = String(name || '').trim();
-    if (!value) return '';
-    return /^[A-Za-z0-9_]+$/.test(value) ? value : this.quoteQueryIdentifier(value);
-  }
-
-  getBuiltInQueryKeys() {
-    return Array.from(this._queryBuiltInKeys || []);
-  }
-
-  getStandaloneQueryFilters() {
-    return Array.from(this._queryStandaloneFilters || []);
-  }
-
-  isBuiltInQueryKey(name) {
-    const value = String(name || '').trim().toLowerCase();
-    return value ? this._queryBuiltInKeys.includes(value) : false;
-  }
-
-  isQueryOperatorToken(token) {
-    return token === '=' || token === '!=' || token === '<' || token === '<=' || token === '>' || token === '>=';
-  }
-
-  buildSearchAutocompleteItem({ label, icon, detail, insertText, replaceStart, replaceEnd } = {}) {
-    return {
-      label: String(label || ''),
-      icon: icon || null,
-      detail: String(detail || ''),
-      insertText: String(insertText || ''),
-      replaceStart: Number.isFinite(replaceStart) ? replaceStart : 0,
-      replaceEnd: Number.isFinite(replaceEnd) ? replaceEnd : 0
-    };
-  }
-
-  dedupeSearchAutocompleteItems(items) {
-    const out = [];
-    const seen = new Set();
-    for (const item of items || []) {
-      const key = `${item?.label || ''}\n${item?.detail || ''}\n${item?.insertText || ''}\n${item?.replaceStart || 0}\n${item?.replaceEnd || 0}`;
-      if (!item?.label || seen.has(key)) continue;
-      seen.add(key);
-      out.push(item);
-    }
-    return out;
-  }
-
-  parseQueryFieldContext(query, caret) {
-    const before = String(query || '').slice(0, caret);
-    const match = before.match(/(?:^|[\s(])@(?:("(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+))\.((?:"(?:[^"\\]|\\.)*")|[A-Za-z0-9_]*)$/);
-    if (!match) return null;
-    const collectionToken = match[1] || '';
-    const fieldToken = match[2] || '';
-    const replaceEnd = caret;
-    const replaceStart = replaceEnd - fieldToken.length;
-    const rawCollection = collectionToken.startsWith('"') && collectionToken.endsWith('"')
-      ? collectionToken.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-      : collectionToken;
-    const normalizedCollection = rawCollection.trim().toLowerCase();
-    return {
-      collectionToken,
-      collectionName: rawCollection,
-      normalizedCollection,
-      fieldToken,
-      fieldPrefix: fieldToken.startsWith('"') ? fieldToken.slice(1).toLowerCase() : fieldToken.toLowerCase(),
-      replaceStart,
-      replaceEnd
-    };
-  }
-
-  parseQueryOperatorContext(query, caret) {
-    const before = String(query || '').slice(0, caret);
-    const match = before.match(/(?:^|[\s(])@(?:("(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+)(?:\.((?:"(?:[^"\\]|\\.)*")|[A-Za-z0-9_]+))?)\s*$/);
-    if (!match) return null;
-
-    const keyToken = match[1] || '';
-    const fieldToken = match[2] || '';
-    const rawKey = keyToken.startsWith('"') && keyToken.endsWith('"')
-      ? keyToken.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-      : keyToken;
-    if (!fieldToken && !this.isBuiltInQueryKey(rawKey)) return null;
-
-    return {
-      replaceStart: caret,
-      replaceEnd: caret
-    };
-  }
-
-  parseQueryTokenContext(query, caret) {
-    const before = String(query || '').slice(0, caret);
-    const match = before.match(/(?:^|[\s(])@((?:"(?:[^"\\]|\\.)*")|[^\s()]*)$/);
-    if (!match) return null;
-    const token = match[1] || '';
-    if (token.includes('.')) return null;
-    const replaceEnd = caret;
-    const replaceStart = replaceEnd - token.length;
-    const unquoted = token.startsWith('"') ? token.slice(1) : token;
-    return {
-      token,
-      prefix: unquoted.toLowerCase(),
-      replaceStart,
-      replaceEnd,
-      quoted: token.startsWith('"')
-    };
-  }
-
-  getSearchAutocompleteItems(query, caret, catalog) {
-    const items = [];
-    const fieldContext = this.parseQueryFieldContext(query, caret);
-    if (fieldContext) {
-      const collection = (catalog?.collections || []).find((entry) => entry.name.trim().toLowerCase() === fieldContext.normalizedCollection) || null;
-      const exactFieldMatch = (collection?.fields || []).some((field) => field.label.trim().toLowerCase() === fieldContext.fieldPrefix.trim().toLowerCase());
-      const isOpenQuotedField = fieldContext.fieldToken.startsWith('"') && !fieldContext.fieldToken.endsWith('"');
-      if (fieldContext.fieldToken && exactFieldMatch && !isOpenQuotedField) {
-        const operatorItems = [];
-        for (const operator of ['=', '!=', '<=', '>=', '<', '>']) {
-          operatorItems.push(this.buildSearchAutocompleteItem({
-            label: operator,
-            icon: 'ti-math-symbols',
-            detail: 'Operator',
-            insertText: ` ${operator} `,
-            replaceStart: caret,
-            replaceEnd: caret
-          }));
-        }
-        return operatorItems;
-      }
-      for (const field of collection?.fields || []) {
-        if (fieldContext.fieldPrefix && !field.label.toLowerCase().includes(fieldContext.fieldPrefix)) continue;
-        items.push(this.buildSearchAutocompleteItem({
-          label: field.label,
-          icon: 'ti-columns-2',
-          detail: field.type || 'Field',
-          insertText: this.formatQueryIdentifier(field.label),
-          replaceStart: fieldContext.replaceStart,
-          replaceEnd: fieldContext.replaceEnd
-        }));
-      }
-      return this.dedupeSearchAutocompleteItems(items);
-    }
-
-    const operatorContext = this.parseQueryOperatorContext(query, caret);
-    if (operatorContext) {
-      for (const operator of ['=', '!=', '<=', '>=', '<', '>']) {
-        items.push(this.buildSearchAutocompleteItem({
-          label: operator,
-          icon: 'ti-math-symbols',
-          detail: 'Operator',
-          insertText: ` ${operator} `,
-          replaceStart: operatorContext.replaceStart,
-          replaceEnd: operatorContext.replaceEnd
-        }));
-      }
-      return items;
-    }
-
-    const tokenContext = this.parseQueryTokenContext(query, caret);
-    if (!tokenContext) return [];
-
-    for (const keyword of this.getStandaloneQueryFilters()) {
-      if (tokenContext.prefix && !keyword.toLowerCase().includes(tokenContext.prefix)) continue;
-      items.push(this.buildSearchAutocompleteItem({
-        label: `@${keyword}`,
-        icon: 'ti-at',
-        detail: 'Filter',
-        insertText: keyword,
-        replaceStart: tokenContext.replaceStart,
-        replaceEnd: tokenContext.replaceEnd
-      }));
-    }
-
-    for (const key of this.getBuiltInQueryKeys()) {
-      if (tokenContext.prefix && !key.toLowerCase().includes(tokenContext.prefix)) continue;
-      items.push(this.buildSearchAutocompleteItem({
-        label: `@${key}`,
-        icon: 'ti-key',
-        detail: 'Built-in key',
-        insertText: key,
-        replaceStart: tokenContext.replaceStart,
-        replaceEnd: tokenContext.replaceEnd
-      }));
-    }
-
-    for (const user of catalog?.users || []) {
-      if (tokenContext.prefix && !user.name.toLowerCase().includes(tokenContext.prefix)) continue;
-      items.push(this.buildSearchAutocompleteItem({
-        label: `@${user.name}`,
-        icon: 'ti-user',
-        detail: 'User',
-        insertText: this.formatQueryIdentifier(user.name),
-        replaceStart: tokenContext.replaceStart,
-        replaceEnd: tokenContext.replaceEnd
-      }));
-    }
-
-    for (const collection of catalog?.collections || []) {
-      if (tokenContext.prefix && !collection.name.toLowerCase().includes(tokenContext.prefix)) continue;
-      items.push(this.buildSearchAutocompleteItem({
-        label: `@${collection.name}`,
-        icon: 'ti-database',
-        detail: 'Collection',
-        insertText: this.formatQueryIdentifier(collection.name),
-        replaceStart: tokenContext.replaceStart,
-        replaceEnd: tokenContext.replaceEnd
-      }));
-    }
-
-    return this.dedupeSearchAutocompleteItems(items).slice(0, 12);
-  }
-
-  renderSearchAutocomplete(state) {
-    const menu = state?.searchAutocompleteEl || null;
-    if (!menu) return;
-
-    menu.innerHTML = '';
-    const items = Array.isArray(state.searchAutocompleteItems) ? state.searchAutocompleteItems : [];
-    if (state.searchAutocompleteOpen !== true || items.length === 0) return;
-
-    const list = document.createElement('div');
-    list.className = 'autocomplete clickable';
-    const scroll = document.createElement('div');
-    scroll.className = 'vscroll-node';
-    const content = document.createElement('div');
-    content.className = 'vcontent';
-    const scrollbar = document.createElement('div');
-    scrollbar.className = 'vscrollbar scrollbar';
-    const thumb = document.createElement('div');
-    thumb.className = 'vscrollbar-thumb scrollbar-thumb clickable';
-    thumb.innerHTML = '&nbsp;';
-
-    items.forEach((item, index) => {
-      const row = document.createElement('div');
-      row.className = 'autocomplete--option';
-      row.dataset.index = String(index);
-      row.setAttribute('role', 'option');
-      if (index === state.searchAutocompleteSelectedIndex) {
-        row.classList.add('autocomplete--option-selected');
-      }
-
-      const iconWrap = document.createElement('span');
-      iconWrap.className = 'autocomplete--option-icon';
-      if (item.icon) {
-        try {
-          iconWrap.appendChild(this.ui.createIcon(item.icon));
-        } catch (e) {
-          iconWrap.textContent = '@';
-        }
-      }
-
+  rebuildChips(state) {
+    if (!state?.chipsRowEl) return;
+    const row = state.chipsRowEl;
+    row.innerHTML = '';
+    for (const phrase of state.searchPhrases || []) {
+      const chip = document.createElement('span');
+      chip.className = 'tlr-chip';
       const label = document.createElement('span');
-      label.className = 'autocomplete--option-label';
-      label.textContent = item.label;
-
-      const right = document.createElement('span');
-      right.className = 'autocomplete--option-right';
-      right.textContent = item.detail || '';
-
-      row.appendChild(iconWrap);
-      row.appendChild(label);
-      row.appendChild(right);
-
-      row.addEventListener('mouseenter', () => {
-        if (state.searchAutocompleteSelectedIndex === index) return;
-        state.searchAutocompleteSelectedIndex = index;
-        this.syncRenderedSearchAutocompleteSelection(state);
-      });
-      row.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-      });
-      row.addEventListener('click', (e) => {
-        e.preventDefault();
-        state.searchAutocompleteSelectedIndex = index;
-        this.applySelectedSearchAutocompleteItem(state);
-      });
-
-      content.appendChild(row);
-    });
-
-    scroll.appendChild(content);
-    scroll.addEventListener('scroll', () => {
-      this.syncSearchAutocompleteScrollbar(state);
-    });
-
-    thumb.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      const startY = e.clientY;
-      const startScrollTop = scroll.scrollTop;
-      const onMouseMove = (moveEvent) => {
-        const trackHeight = scrollbar.clientHeight || scroll.clientHeight || 0;
-        const thumbHeight = thumb.clientHeight || 0;
-        const maxThumbTop = Math.max(1, trackHeight - thumbHeight);
-        const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-        if (maxScrollTop <= 0) return;
-        const deltaRatio = (moveEvent.clientY - startY) / maxThumbTop;
-        scroll.scrollTop = Math.max(0, Math.min(maxScrollTop, startScrollTop + (deltaRatio * maxScrollTop)));
-      };
-
-      const onMouseUp = () => {
-        document.removeEventListener('mousemove', onMouseMove, true);
-        document.removeEventListener('mouseup', onMouseUp, true);
-      };
-
-      document.addEventListener('mousemove', onMouseMove, true);
-      document.addEventListener('mouseup', onMouseUp, true);
-    });
-
-    list.appendChild(scroll);
-    scrollbar.appendChild(thumb);
-    list.appendChild(scrollbar);
-    menu.appendChild(list);
-
-    const sync = () => {
-      this.scrollSelectedSearchAutocompleteItemIntoView(state);
-      this.syncSearchAutocompleteScrollbar(state);
-    };
-    sync();
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(sync);
-    } else {
-      setTimeout(sync, 0);
+      label.className = 'tlr-chip-label';
+      label.textContent = phrase;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'tlr-chip-remove button-none';
+      remove.dataset.action = 'remove-chip';
+      remove.dataset.phrase = phrase;
+      remove.setAttribute('aria-label', `Remove filter: ${phrase}`);
+      remove.textContent = '×';
+      chip.appendChild(label);
+      chip.appendChild(remove);
+      row.appendChild(chip);
     }
-  }
-
-  scrollSelectedSearchAutocompleteItemIntoView(state) {
-    const menu = state?.searchAutocompleteEl || null;
-    const scroll = menu?.querySelector?.('.vscroll-node') || null;
-    const selected = menu?.querySelector?.(`.autocomplete--option[data-index="${state?.searchAutocompleteSelectedIndex || 0}"]`) || null;
-    if (!scroll || !selected) return;
-
-    const rowTop = selected.offsetTop;
-    const rowBottom = rowTop + selected.offsetHeight;
-    const viewportTop = scroll.scrollTop;
-    const viewportBottom = viewportTop + scroll.clientHeight;
-    if (rowTop < viewportTop) {
-      scroll.scrollTop = rowTop;
-    } else if (rowBottom > viewportBottom) {
-      scroll.scrollTop = rowBottom - scroll.clientHeight;
-    }
-  }
-
-  syncRenderedSearchAutocompleteSelection(state) {
-    const menu = state?.searchAutocompleteEl || null;
-    if (!menu) return;
-    const selectedIndex = state?.searchAutocompleteSelectedIndex || 0;
-    const rows = menu.querySelectorAll?.('.autocomplete--option[data-index]') || [];
-    rows.forEach((row) => {
-      const rowIndex = Number(row.dataset.index);
-      row.classList.toggle('autocomplete--option-selected', rowIndex === selectedIndex);
-    });
-  }
-
-  syncSearchAutocompleteScrollbar(state) {
-    const menu = state?.searchAutocompleteEl || null;
-    const scroll = menu?.querySelector?.('.vscroll-node') || null;
-    const scrollbar = menu?.querySelector?.('.vscrollbar') || null;
-    const thumb = menu?.querySelector?.('.vscrollbar-thumb') || null;
-    if (!scroll || !scrollbar || !thumb) return;
-
-    const viewportHeight = scroll.clientHeight || 0;
-    const scrollHeight = scroll.scrollHeight || 0;
-    const trackHeight = scrollbar.clientHeight || viewportHeight;
-    if (!viewportHeight || !scrollHeight || !trackHeight || scrollHeight <= viewportHeight + 1) {
-      scrollbar.classList.remove('has-thumb');
-      thumb.style.height = '0px';
-      thumb.style.transform = 'translateY(0px)';
-      return;
-    }
-
-    const thumbHeight = Math.max(16, Math.round((viewportHeight / scrollHeight) * trackHeight));
-    const maxScrollTop = Math.max(1, scrollHeight - viewportHeight);
-    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-    const thumbTop = maxThumbTop * (scroll.scrollTop / maxScrollTop);
-
-    scrollbar.classList.add('has-thumb');
-    thumb.style.height = `${thumbHeight}px`;
-    thumb.style.transform = `translateY(${thumbTop}px)`;
-  }
-
-  syncSearchAutocompleteControlState(state) {
-    if (!state?.rootEl) return;
-    state.rootEl.classList.toggle('tlr-search-autocomplete-open', state.searchAutocompleteOpen === true);
-  }
-
-  clearPointerDismissHandler(state, handlerKey) {
-    const key = typeof handlerKey === 'string' ? handlerKey.trim() : '';
-    if (!state || !key || !state[key]) return;
-    try {
-      document.removeEventListener('pointerdown', state[key], true);
-      document.removeEventListener('mousedown', state[key], true);
-    } catch (e) {
-      // ignore
-    }
-    state[key] = null;
-  }
-
-  setPointerDismissHandler(state, handlerKey, handler) {
-    const key = typeof handlerKey === 'string' ? handlerKey.trim() : '';
-    if (!state || !key || typeof handler !== 'function') return;
-    this.clearPointerDismissHandler(state, key);
-    state[key] = handler;
-    try {
-      document.addEventListener('pointerdown', handler, true);
-      document.addEventListener('mousedown', handler, true);
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  setSearchAutocompleteOpen(state, open) {
-    if (!state) return;
-    state.searchAutocompleteOpen = open === true && (state.searchAutocompleteItems?.length || 0) > 0;
-
-    this.clearPointerDismissHandler(state, 'searchAutocompleteDismissHandler');
-
-    this.syncSearchAutocompleteControlState(state);
-    this.renderSearchAutocomplete(state);
-
-    if (state.searchAutocompleteOpen !== true) return;
-
-    const onOutsideMouseDown = (ev) => {
-      const menu = state.searchAutocompleteEl || null;
-      const input = state.searchInputEl || null;
-      const target = ev.target;
-      if (!menu || !menu.isConnected || !input || !input.isConnected) {
-        this.setSearchAutocompleteOpen(state, false);
-        return;
-      }
-      if (menu.contains(target)) return;
-      if (input.contains?.(target)) return;
-      this.setSearchAutocompleteOpen(state, false);
-    };
-
-    this.setPointerDismissHandler(state, 'searchAutocompleteDismissHandler', onOutsideMouseDown);
-  }
-
-  moveSearchAutocompleteSelection(state, delta) {
-    const items = state?.searchAutocompleteItems || [];
-    if (!state || state.searchAutocompleteOpen !== true || items.length === 0) return;
-    const lastIndex = items.length - 1;
-    const next = Math.max(0, Math.min(lastIndex, (state.searchAutocompleteSelectedIndex || 0) + delta));
-    if (next === state.searchAutocompleteSelectedIndex) return;
-    state.searchAutocompleteSelectedIndex = next;
-    this.renderSearchAutocomplete(state);
-  }
-
-  applySelectedSearchAutocompleteItem(state) {
-    const items = state?.searchAutocompleteItems || [];
-    const item = items[state?.searchAutocompleteSelectedIndex || 0] || null;
-    const input = state?.searchInputEl || null;
-    if (!state || !item || !input) return;
-
-    const value = state.searchQuery || '';
-    const start = Math.max(0, Math.min(value.length, item.replaceStart || 0));
-    const end = Math.max(start, Math.min(value.length, item.replaceEnd || 0));
-    const nextValue = `${value.slice(0, start)}${item.insertText}${value.slice(end)}`;
-    const caret = start + item.insertText.length;
-
-    state.searchQuery = nextValue;
-    input.value = nextValue;
-    this.setSearchAutocompleteOpen(state, false);
-    this.handleSearchQueryChanged(state, { immediate: false, keepFocus: true });
-
-    setTimeout(() => {
-      try {
-        input.focus();
-        input.setSelectionRange(caret, caret);
-      } catch (e) {
-        // ignore
-      }
-      this.updateSearchAutocomplete(state);
-    }, 0);
-  }
-
-  updateSearchAutocomplete(state) {
-    if (!state?.searchInputEl) return;
-
-    const input = state.searchInputEl;
-    const query = state.searchQuery || '';
-    const caret = Number.isFinite(input.selectionStart) ? input.selectionStart : query.length;
-    if (document.activeElement !== input || caret !== query.length) {
-      state.searchAutocompleteItems = [];
-      state.searchAutocompleteSelectedIndex = 0;
-      this.setSearchAutocompleteOpen(state, false);
-      return;
-    }
-
-    const catalog = this.getQueryAutocompleteCatalogSync();
-    const items = this.getSearchAutocompleteItems(query, caret, catalog);
-    state.searchAutocompleteItems = items;
-    state.searchAutocompleteSelectedIndex = Math.max(0, Math.min(items.length - 1, state.searchAutocompleteSelectedIndex || 0));
-    this.setSearchAutocompleteOpen(state, items.length > 0);
-
-    const requestSeq = (state.searchAutocompleteRequestSeq || 0) + 1;
-    state.searchAutocompleteRequestSeq = requestSeq;
-    this.ensureQueryAutocompleteCatalog()
-      .then(() => {
-        const liveState = this._panelStates.get(state.panelId) || null;
-        if (!liveState || liveState.searchAutocompleteRequestSeq !== requestSeq) return;
-        if (document.activeElement !== liveState.searchInputEl) return;
-        const liveQuery = liveState.searchQuery || '';
-        const liveCaret = Number.isFinite(liveState.searchInputEl?.selectionStart)
-          ? liveState.searchInputEl.selectionStart
-          : liveQuery.length;
-        const liveItems = this.getSearchAutocompleteItems(liveQuery, liveCaret, this.getQueryAutocompleteCatalogSync());
-        liveState.searchAutocompleteItems = liveItems;
-        liveState.searchAutocompleteSelectedIndex = Math.max(0, Math.min(liveItems.length - 1, liveState.searchAutocompleteSelectedIndex || 0));
-        this.setSearchAutocompleteOpen(liveState, liveItems.length > 0);
-      })
-      .catch(() => {
-        // ignore
-      });
-  }
-
-  isIncompleteQueryDraft(rawQuery) {
-    const query = (rawQuery || '').trim();
-    if (this.getSearchMode(query) !== 'query') return false;
-    if (/(?:^|[\s(])@$/.test(query)) return true;
-    if (/(?:^|[\s(])@"(?:[^"\\]|\\.)*$/.test(query)) return true;
-    if (/(?:^|[\s(])@(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+)\.$/.test(query)) return true;
-    if (/(?:^|[\s(])@(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+)\.(?:"(?:[^"\\]|\\.)*|[A-Za-z0-9_]*)$/.test(query)) return true;
-    if (/(?:^|[\s(])@(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+)\.(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+)\s*$/.test(query)) return true;
-    if (/(?:^|[\s(])@(?:created_at|modified_at|created_by|modified_by|text|type|date|due|time|mention|scheduled|hashtag|link|collection|guid|pguid|rguid|backref|linkto)\s*$/i.test(query)) {
-      return true;
-    }
-    if (/(?:^|[\s(])@(?:(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+)(?:\.(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9_]+))?)\s*(?:=|!=|<=|>=|<|>)\s*$/i.test(query)) {
-      return true;
-    }
-    return false;
-  }
-
-  createQueryFilterState(query, { loading, ready, error, includesUnlinked, matchedRecordGuids, matchedLineGuids, matchedLineRecordGuids } = {}) {
-    return {
-      query: (query || '').trim(),
-      loading: loading === true,
-      ready: ready === true,
-      error: typeof error === 'string' ? error : '',
-      includesUnlinked: includesUnlinked === true,
-      matchedRecordGuids: matchedRecordGuids instanceof Set ? matchedRecordGuids : new Set(),
-      matchedLineGuids: matchedLineGuids instanceof Set ? matchedLineGuids : new Set(),
-      matchedLineRecordGuids: matchedLineRecordGuids instanceof Set ? matchedLineRecordGuids : new Set()
-    };
-  }
-
-  getQueryFilterState(state, query) {
-    const current = state?.queryFilterState || null;
-    const normalizedQuery = (query || '').trim();
-    if (!current) return null;
-    if ((current.query || '') !== normalizedQuery) return null;
-    return current;
-  }
-
-  clearQueryFilterState(state) {
-    if (!state) return;
-    if (state.queryFilterTimer) {
-      clearTimeout(state.queryFilterTimer);
-      state.queryFilterTimer = null;
-    }
-    state.queryFilterState = null;
-  }
-
-  handleSearchQueryChanged(state, { immediate, keepFocus } = {}) {
-    if (!state) return;
-    this.syncSearchControlState(state);
-    this.syncScopedQueryWithCurrentInput(state, { immediate: immediate === true, reason: 'input' });
-    this.renderFromCache(state);
-    this.updateSearchAutocomplete(state);
-
-    if (keepFocus === true && state.searchInputEl) {
-      setTimeout(() => {
-        try {
-          state.searchInputEl?.focus?.();
-        } catch (e) {
-          // ignore
-        }
-      }, 0);
-    }
-  }
-
-  syncScopedQueryWithCurrentInput(state, { immediate, reason } = {}) {
-    if (!state) return;
-    const query = (state.searchQuery || '').trim();
-    if (this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
-      this.clearQueryFilterState(state);
-      return;
-    }
-    this.scheduleQueryFilterRefresh(state, { immediate: immediate === true, reason: reason || 'sync' });
-  }
-
-  shouldIncludeUnlinkedInQueryScope(state, results) {
-    if (!state || !results) return false;
-    if (this.isSectionCollapsed(state, 'unlinked')) return false;
-    if (results.unlinkedDeferred === true) return false;
-    if (results.unlinkedLoading === true) return false;
-    return true;
-  }
-
-  collectQueryScopeRecordGuids(results, { includeUnlinked } = {}) {
-    const out = [];
-    const seen = new Set();
-
-    const add = (record) => {
-      const guid = (record?.guid || '').trim();
-      if (!guid || seen.has(guid)) return;
-      seen.add(guid);
-      out.push(guid);
-    };
-
-    for (const group of results?.propertyGroups || []) {
-      for (const record of group?.records || []) add(record);
-    }
-    for (const group of results?.linkedGroups || []) add(group?.record || null);
-    if (includeUnlinked === true) {
-      for (const group of results?.unlinkedGroups || []) add(group?.record || null);
-    }
-
-    return out;
-  }
-
-  filterPropertyGroups(groups, predicate) {
-    const match = typeof predicate === 'function' ? predicate : null;
-    if (!match) return [];
-
-    const out = [];
-    for (const group of groups || []) {
-      const propertyName = (group?.propertyName || '').trim();
-      if (!propertyName) continue;
-      const records = (group?.records || []).filter((record) => match(record, group));
-      if (records.length === 0) continue;
-      out.push({ propertyName, records });
-    }
-    return out;
-  }
-
-  filterLineGroups(groups, predicate) {
-    const match = typeof predicate === 'function' ? predicate : null;
-    if (!match) return [];
-
-    const out = [];
-    for (const group of groups || []) {
-      const record = group?.record || null;
-      if (!record?.guid) continue;
-      const lines = (group?.lines || []).filter((line) => match(line, record, group));
-      if (lines.length === 0) continue;
-      out.push({ record, lines });
-    }
-    return out;
-  }
-
-  scheduleQueryFilterRefresh(state, { immediate, reason } = {}) {
-    if (!state) return;
-
-    const query = (state.searchQuery || '').trim();
-    if (this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
-      this.clearQueryFilterState(state);
-      return;
-    }
-
-    const previous = this.getQueryFilterState(state, query);
-    state.queryFilterState = previous
-      ? this.createQueryFilterState(query, {
-          loading: true,
-          ready: previous.ready === true,
-          error: '',
-          includesUnlinked: previous.includesUnlinked === true,
-          matchedRecordGuids: previous.matchedRecordGuids,
-          matchedLineGuids: previous.matchedLineGuids,
-          matchedLineRecordGuids: previous.matchedLineRecordGuids
-        })
-      : this.createQueryFilterState(query, { loading: true });
-
-    if (state.queryFilterTimer) {
-      clearTimeout(state.queryFilterTimer);
-      state.queryFilterTimer = null;
-    }
-
-    const seq = (state.queryFilterSeq || 0) + 1;
-    state.queryFilterSeq = seq;
-    const delay = immediate === true ? 0 : this._queryFilterDebounceMs;
-    state.queryFilterTimer = setTimeout(() => {
-      state.queryFilterTimer = null;
-      this.refreshScopedQueryFilter(state.panelId, seq, { reason: reason || 'scheduled-query-filter' }).catch(() => {
-        // ignore
-      });
-    }, delay);
-  }
-
-  async refreshScopedQueryFilter(panelId, seq, { reason } = {}) {
-    const state = this._panelStates.get(panelId) || null;
-    if (!state) return;
-
-    const results = state.lastResults || null;
-    const query = (state.searchQuery || '').trim();
-    if (!results || this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
-      this.clearQueryFilterState(state);
-      this.renderFromCache(state);
-      return;
-    }
-
-    const includeUnlinked = this.shouldIncludeUnlinkedInQueryScope(state, results);
-    const recordGuids = this.collectQueryScopeRecordGuids(results, { includeUnlinked });
-    if (recordGuids.length === 0) {
-      if (!this._panelStates.has(panelId)) return;
-      state.queryFilterState = this.createQueryFilterState(query, {
-        loading: false,
-        ready: true,
-        includesUnlinked: includeUnlinked
-      });
-      this.renderFromCache(state);
-      return;
-    }
-
-    let result = null;
-    let error = '';
-    try {
-      result = await this.data.searchByQuery(query, this._queryFilterMaxResults);
-      if (typeof result?.error === 'string' && result.error.trim()) error = result.error.trim();
-    } catch (e) {
-      error = 'Could not apply query filter.';
-    }
-
-    if (!this._panelStates.has(panelId)) return;
-    if ((state.searchQuery || '').trim() !== query) return;
-
-    const latestResults = state.lastResults || results;
-    const latestIncludesUnlinked = this.shouldIncludeUnlinkedInQueryScope(state, latestResults);
-    const latestScopedRecordGuids = new Set(
-      this.collectQueryScopeRecordGuids(latestResults, { includeUnlinked: latestIncludesUnlinked })
-    );
-
-    if (latestScopedRecordGuids.size === 0) {
-      state.queryFilterState = this.createQueryFilterState(query, {
-        loading: false,
-        ready: true,
-        includesUnlinked: latestIncludesUnlinked
-      });
-      this.renderFromCache(state);
-      return;
-    }
-
-    const previous = this.getQueryFilterState(state, query);
-    if (error) {
-      state.queryFilterState = this.createQueryFilterState(query, {
-        loading: false,
-        ready: previous?.ready === true,
-        error,
-        includesUnlinked: latestIncludesUnlinked,
-        matchedRecordGuids: previous?.matchedRecordGuids,
-        matchedLineGuids: previous?.matchedLineGuids,
-        matchedLineRecordGuids: previous?.matchedLineRecordGuids
-      });
-      this.renderFromCache(state);
-      return;
-    }
-
-    const matchedRecordGuids = new Set();
-    const matchedLineGuids = new Set();
-    const matchedLineRecordGuids = new Set();
-
-    for (const record of result?.records || []) {
-      const guid = (record?.guid || '').trim();
-      if (!guid || !latestScopedRecordGuids.has(guid)) continue;
-      matchedRecordGuids.add(guid);
-      matchedLineRecordGuids.add(guid);
-    }
-
-    for (const line of result?.lines || []) {
-      const recordGuid = (line?.getRecord?.()?.guid || '').trim();
-      if (!recordGuid || !latestScopedRecordGuids.has(recordGuid)) continue;
-      const guid = (line?.guid || '').trim();
-      if (guid) matchedLineGuids.add(guid);
-      matchedLineRecordGuids.add(recordGuid);
-    }
-
-    state.queryFilterState = this.createQueryFilterState(query, {
-      loading: false,
-      ready: true,
-      includesUnlinked: latestIncludesUnlinked,
-      matchedRecordGuids,
-      matchedLineGuids,
-      matchedLineRecordGuids
-    });
-    this.renderFromCache(state);
-  }
-
-  filterPropertyGroupsByScopedQuery(groups, queryFilterState) {
-    const matchedRecordGuids = queryFilterState?.matchedRecordGuids || new Set();
-    const matchedLineRecordGuids = queryFilterState?.matchedLineRecordGuids || new Set();
-    return this.filterPropertyGroups(groups, (record) => {
-      const guid = (record?.guid || '').trim();
-      if (!guid) return false;
-      return matchedRecordGuids.has(guid) || matchedLineRecordGuids.has(guid);
-    });
-  }
-
-  filterLineGroupsByScopedQuery(groups, queryFilterState) {
-    const matchedRecordGuids = queryFilterState?.matchedRecordGuids || new Set();
-    const matchedLineGuids = queryFilterState?.matchedLineGuids || new Set();
-    const out = [];
-
-    for (const group of groups || []) {
-      const record = group?.record || null;
-      const recordGuid = (record?.guid || '').trim();
-      if (!recordGuid) continue;
-
-      if (matchedRecordGuids.has(recordGuid)) {
-        out.push({
-          record,
-          lines: Array.isArray(group?.lines) ? Array.from(group.lines) : []
-        });
-        continue;
-      }
-
-      const lines = (group?.lines || []).filter((line) => matchedLineGuids.has((line?.guid || '').trim()));
-      if (lines.length === 0) continue;
-      out.push({ record, lines });
-    }
-
-    return out;
-  }
-
-  hasSearchQuery(state) {
-    return Boolean((state?.searchQuery || '').trim());
-  }
-
-  updateSearchFieldState(state) {
-    if (!state) return;
-    const query = state.searchQuery || '';
-    const hasValue = query.length > 0;
-
-    if (state.searchInputEl && state.searchInputEl.value !== query) {
-      state.searchInputEl.value = query;
-    }
-    if (state.searchHighlightTextEl) {
-      state.searchHighlightTextEl.textContent = query;
-    }
-    if (state.searchClearEl) {
-      state.searchClearEl.style.display = hasValue ? 'flex' : 'none';
-    }
-    if (state.searchRefreshEl) {
-      state.searchRefreshEl.style.display = hasValue ? 'none' : 'flex';
-    }
-  }
-
-  syncSearchControlState(state) {
-    if (!state) return;
-    const open = state.searchOpen === true;
-    const active = open || this.hasSearchQuery(state);
-    const hasQuery = this.hasSearchQuery(state);
-    const footerCollapsed = state.rootEl?.classList?.contains?.('tlr-collapsed') === true;
-
-    if (state.rootEl) {
-      state.rootEl.classList.toggle('tlr-search-open', open);
-      state.rootEl.classList.toggle('tlr-search-active', active);
-    }
-    if (state.searchRowEl) {
-      state.searchRowEl.style.display = open && footerCollapsed !== true ? 'block' : 'none';
-    }
-    if (state.searchToggleEl) {
-      state.searchToggleEl.setAttribute('aria-expanded', open ? 'true' : 'false');
-      state.searchToggleEl.classList.toggle('is-active', active);
-      const tooltip = open ? 'Hide filter bar' : hasQuery ? 'Filter (active)' : 'Filter';
-      state.searchToggleEl.setAttribute('aria-label', tooltip);
-      state.searchToggleEl.setAttribute('data-tooltip', tooltip);
-      state.searchToggleEl.title = tooltip;
-      const icon = state.searchToggleEl.querySelector?.('.id--filter-icon') || null;
-      icon?.classList?.toggle?.('text-primary-icon', active);
-      icon?.classList?.toggle?.('bold', active);
-    }
-
-    this.updateSearchFieldState(state);
   }
 
   setSearchOpen(state, open) {
     if (!state) return;
     state.searchOpen = open === true;
-    if (state.searchOpen === true) {
-      this.setSortMenuOpen(state, false);
-    } else {
-      this.setSearchAutocompleteOpen(state, false);
-      try {
-        state.searchInputEl?.blur?.();
-      } catch (e) {
-        // ignore
+    if (state.searchOpen === true) this.setSortMenuOpen(state, false);
+    if (!state.rootEl) return;
+
+    state.rootEl.classList.toggle('tlr-search-open', state.searchOpen === true);
+    state.searchToggleEl?.setAttribute?.('aria-expanded', state.searchOpen === true ? 'true' : 'false');
+
+    if (state.searchInputEl) {
+      state.searchInputEl.value = state.searchTyped || '';
+      if (state.searchOpen === true) {
+        setTimeout(() => {
+          try {
+            state.searchInputEl?.focus?.();
+          } catch (e) {
+            // ignore
+          }
+        }, 0);
       }
-    }
-
-    this.syncSearchControlState(state);
-
-    if (state.searchOpen === true && state.searchInputEl) {
-      setTimeout(() => {
-        try {
-          state.searchInputEl?.focus?.();
-        } catch (e) {
-          // ignore
-        }
-      }, 0);
     }
   }
 
@@ -2113,121 +945,53 @@ class Plugin extends AppPlugin {
 
     menu.innerHTML = '';
 
-    const list = document.createElement('div');
-    list.className = 'autocomplete clickable';
-
-    const scroll = document.createElement('div');
-    scroll.className = 'vscroll-node';
-
-    const content = document.createElement('div');
-    content.className = 'vcontent';
-
-    const scrollbar = document.createElement('div');
-    scrollbar.className = 'vscrollbar scrollbar';
-
-    const thumb = document.createElement('div');
-    thumb.className = 'vscrollbar-thumb scrollbar-thumb clickable';
-    thumb.innerHTML = '&nbsp;';
-
     const title = document.createElement('div');
     title.className = 'tlr-sort-menu-title text-details';
-    title.textContent = 'Sort by';
-    content.appendChild(title);
+    title.textContent = 'Sort By';
+    menu.appendChild(title);
 
     for (const option of this.getSortOptions()) {
       const row = document.createElement('button');
       row.type = 'button';
-      row.className = 'tlr-sort-option autocomplete--option button-none';
+      row.className = 'tlr-sort-option button-normal button-normal-hover';
       row.dataset.action = 'set-sort-by';
       row.dataset.sortBy = option.id;
-      row.setAttribute('role', 'menuitemradio');
-      row.setAttribute('aria-checked', option.id === sortBy ? 'true' : 'false');
-      if (option.id === sortBy) row.classList.add('autocomplete--option-selected');
+      if (option.id === sortBy) row.classList.add('is-active');
 
       const label = document.createElement('span');
-      label.className = 'tlr-sort-option-label autocomplete--option-label';
+      label.className = 'tlr-sort-option-label';
       label.textContent = option.label;
 
       row.appendChild(label);
-      content.appendChild(row);
+      menu.appendChild(row);
     }
 
     const divider = document.createElement('div');
     divider.className = 'tlr-sort-menu-divider';
-    content.appendChild(divider);
+    menu.appendChild(divider);
 
-    const directionTitle = document.createElement('div');
-    directionTitle.className = 'tlr-sort-menu-title text-details';
-    directionTitle.textContent = 'Direction';
-    content.appendChild(directionTitle);
+    const dirRow = document.createElement('div');
+    dirRow.className = 'tlr-sort-dir-row';
 
     const ascBtn = document.createElement('button');
     ascBtn.type = 'button';
-    ascBtn.className = 'tlr-sort-option autocomplete--option button-none';
+    ascBtn.className = 'tlr-sort-dir-btn button-normal button-normal-hover button-small';
     ascBtn.dataset.action = 'set-sort-dir';
     ascBtn.dataset.sortDir = 'asc';
-    ascBtn.setAttribute('role', 'menuitemradio');
-    ascBtn.setAttribute('aria-checked', sortDir === 'asc' ? 'true' : 'false');
     ascBtn.textContent = 'Ascending';
-    if (sortDir === 'asc') ascBtn.classList.add('autocomplete--option-selected');
+    if (sortDir === 'asc') ascBtn.classList.add('is-active');
 
     const descBtn = document.createElement('button');
     descBtn.type = 'button';
-    descBtn.className = 'tlr-sort-option autocomplete--option button-none';
+    descBtn.className = 'tlr-sort-dir-btn button-normal button-normal-hover button-small';
     descBtn.dataset.action = 'set-sort-dir';
     descBtn.dataset.sortDir = 'desc';
-    descBtn.setAttribute('role', 'menuitemradio');
-    descBtn.setAttribute('aria-checked', sortDir === 'desc' ? 'true' : 'false');
     descBtn.textContent = 'Descending';
-    if (sortDir === 'desc') descBtn.classList.add('autocomplete--option-selected');
+    if (sortDir === 'desc') descBtn.classList.add('is-active');
 
-    content.appendChild(ascBtn);
-    content.appendChild(descBtn);
-
-    scroll.appendChild(content);
-    scroll.addEventListener('scroll', () => {
-      this.syncSortMenuScrollbar(state);
-    });
-
-    thumb.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      const startY = e.clientY;
-      const startScrollTop = scroll.scrollTop;
-      const onMouseMove = (moveEvent) => {
-        const trackHeight = scrollbar.clientHeight || scroll.clientHeight || 0;
-        const thumbHeight = thumb.clientHeight || 0;
-        const maxThumbTop = Math.max(1, trackHeight - thumbHeight);
-        const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-        if (maxScrollTop <= 0) return;
-        const deltaRatio = (moveEvent.clientY - startY) / maxThumbTop;
-        scroll.scrollTop = Math.max(0, Math.min(maxScrollTop, startScrollTop + (deltaRatio * maxScrollTop)));
-      };
-
-      const onMouseUp = () => {
-        document.removeEventListener('mousemove', onMouseMove, true);
-        document.removeEventListener('mouseup', onMouseUp, true);
-      };
-
-      document.addEventListener('mousemove', onMouseMove, true);
-      document.addEventListener('mouseup', onMouseUp, true);
-    });
-
-    list.appendChild(scroll);
-    scrollbar.appendChild(thumb);
-    list.appendChild(scrollbar);
-    menu.appendChild(list);
-
-    const sync = () => {
-      this.syncSortMenuScrollbar(state);
-    };
-    sync();
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(sync);
-    } else {
-      setTimeout(sync, 0);
-    }
+    dirRow.appendChild(ascBtn);
+    dirRow.appendChild(descBtn);
+    menu.appendChild(dirRow);
   }
 
   syncSortControlState(state) {
@@ -2242,7 +1006,6 @@ class Plugin extends AppPlugin {
 
     if (state.sortToggleEl) {
       state.sortToggleEl.title = `Sort: ${sortLabel} (${dirLabel})`;
-      state.sortToggleEl.setAttribute('aria-label', `Sort options: ${sortLabel}, ${dirLabel}`);
       state.sortToggleEl.setAttribute('aria-expanded', state.sortMenuOpen === true ? 'true' : 'false');
     }
 
@@ -2255,14 +1018,14 @@ class Plugin extends AppPlugin {
     if (!state) return;
     state.sortMenuOpen = open === true;
 
-    this.clearPointerDismissHandler(state, 'sortMenuDismissHandler');
-    if (state.sortMenuKeyHandler) {
+    if (state.sortMenuDismissHandler) {
       try {
-        document.removeEventListener('keydown', state.sortMenuKeyHandler, true);
+        document.removeEventListener('pointerdown', state.sortMenuDismissHandler, true);
+        document.removeEventListener('mousedown', state.sortMenuDismissHandler, true);
       } catch (e) {
         // ignore
       }
-      state.sortMenuKeyHandler = null;
+      state.sortMenuDismissHandler = null;
     }
 
     this.syncSortControlState(state);
@@ -2283,52 +1046,13 @@ class Plugin extends AppPlugin {
       this.setSortMenuOpen(state, false);
     };
 
-    this.setPointerDismissHandler(state, 'sortMenuDismissHandler', onOutsideMouseDown);
-
-    const onMenuKeyDown = (ev) => {
-      if (ev.key !== 'Escape') return;
-      ev.preventDefault();
-      this.setSortMenuOpen(state, false);
-      try {
-        state.sortToggleEl?.focus?.();
-      } catch (e) {
-        // ignore
-      }
-    };
-
-    state.sortMenuKeyHandler = onMenuKeyDown;
+    state.sortMenuDismissHandler = onOutsideMouseDown;
     try {
-      document.addEventListener('keydown', onMenuKeyDown, true);
+      document.addEventListener('pointerdown', onOutsideMouseDown, true);
+      document.addEventListener('mousedown', onOutsideMouseDown, true);
     } catch (e) {
       // ignore
     }
-  }
-
-  syncSortMenuScrollbar(state) {
-    const menu = state?.sortMenuEl || null;
-    const scroll = menu?.querySelector?.('.vscroll-node') || null;
-    const scrollbar = menu?.querySelector?.('.vscrollbar') || null;
-    const thumb = menu?.querySelector?.('.vscrollbar-thumb') || null;
-    if (!scroll || !scrollbar || !thumb) return;
-
-    const viewportHeight = scroll.clientHeight || 0;
-    const scrollHeight = scroll.scrollHeight || 0;
-    const trackHeight = scrollbar.clientHeight || viewportHeight;
-    if (!viewportHeight || !scrollHeight || !trackHeight || scrollHeight <= viewportHeight + 1) {
-      scrollbar.classList.remove('has-thumb');
-      thumb.style.height = '0px';
-      thumb.style.transform = 'translateY(0px)';
-      return;
-    }
-
-    const thumbHeight = Math.max(16, Math.round((viewportHeight / scrollHeight) * trackHeight));
-    const maxScrollTop = Math.max(1, scrollHeight - viewportHeight);
-    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-    const thumbTop = maxThumbTop * (scroll.scrollTop / maxScrollTop);
-
-    scrollbar.classList.add('has-thumb');
-    thumb.style.height = `${thumbHeight}px`;
-    thumb.style.transform = `translateY(${thumbTop}px)`;
   }
 
   renderFromCache(state) {
@@ -2345,168 +1069,84 @@ class Plugin extends AppPlugin {
     this.renderReferences(state, cached);
   }
 
-  readJsonStorage(key) {
-    const storageKey = typeof key === 'string' ? key.trim() : '';
-    if (!storageKey) return null;
+  loadCollapsedSetting() {
     try {
-      const raw = localStorage.getItem(storageKey);
-      if (typeof raw !== 'string' || !raw.trim()) return null;
-      return JSON.parse(raw);
+      const v = localStorage.getItem(this._storageKeyCollapsed);
+      if (v === '1') return true;
+      if (v === '0') return false;
     } catch (e) {
       // ignore
     }
-    return null;
-  }
-
-  writeJsonStorage(key, value) {
-    const storageKey = typeof key === 'string' ? key.trim() : '';
-    if (!storageKey) return;
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(value));
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  parseStoredStringSet(value) {
-    if (!Array.isArray(value)) return null;
-    const out = new Set();
-    for (const item of value) {
-      if (typeof item !== 'string') continue;
-      const text = item.trim();
-      if (text) out.add(text);
-    }
-    return out;
-  }
-
-  parseStoredRecordMap(value, normalizeEntry) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const normalize = typeof normalizeEntry === 'function' ? normalizeEntry : null;
-    const out = {};
-    for (const [recordGuid, entry] of Object.entries(value)) {
-      const guid = typeof recordGuid === 'string' ? recordGuid.trim() : '';
-      if (!guid) continue;
-      const normalized = normalize ? normalize(entry) : entry;
-      if (normalized == null) continue;
-      out[guid] = normalized;
-    }
-    return out;
-  }
-
-  normalizePageViewPreference(pref) {
-    const sections = this.cloneSectionCollapsedState(pref?.sections);
-    const footerCollapsed = typeof pref?.footerCollapsed === 'boolean' ? pref.footerCollapsed : null;
-    return { footerCollapsed, sections };
-  }
-
-  loadPageViewByRecordSetting() {
-    return this.parseStoredRecordMap(
-      this.readJsonStorage(this._storageKeyPageViewByRecord),
-      (pref) => this.normalizePageViewPreference(pref)
-    ) || {};
-  }
-
-  savePageViewByRecordSetting() {
-    this.writeJsonStorage(this._storageKeyPageViewByRecord, this._pageViewByRecord || {});
-  }
-
-  getPageViewPreference(recordGuid) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return this.normalizePageViewPreference(null);
-    return this.normalizePageViewPreference(this._pageViewByRecord?.[guid] || null);
-  }
-
-  ensurePageViewPreference(recordGuid) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return null;
-    if (!this._pageViewByRecord || typeof this._pageViewByRecord !== 'object') {
-      this._pageViewByRecord = {};
-    }
-    const nextPref = this.normalizePageViewPreference(this._pageViewByRecord[guid] || null);
-    this._pageViewByRecord[guid] = nextPref;
-    return nextPref;
-  }
-
-  setFooterCollapsedPreferenceForRecord(recordGuid, collapsed) {
-    const pref = this.ensurePageViewPreference(recordGuid);
-    if (!pref) return;
-    pref.footerCollapsed = collapsed === true;
-    this.savePageViewByRecordSetting();
-  }
-
-  setSectionCollapsedPreferenceForRecord(recordGuid, sectionId, collapsed) {
-    const id = this.normalizeSectionId(sectionId);
-    if (!id) return;
-    const pref = this.ensurePageViewPreference(recordGuid);
-    if (!pref) return;
-    pref.sections = this.cloneSectionCollapsedState(pref.sections);
-    pref.sections[id] = collapsed === true;
-    this.savePageViewByRecordSetting();
-  }
-
-  applyFooterCollapsedPreferenceForRecord(recordGuid, collapsed) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return;
-    this.setFooterCollapsedPreferenceForRecord(guid, collapsed);
-
-    for (const state of this._panelStates.values()) {
-      if (!state || state.recordGuid !== guid) continue;
-      state.footerCollapsed = collapsed === true;
-      this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, this.getCollapseMetrics(state.lastResults)));
-    }
-  }
-
-  applySectionCollapsedPreferenceForRecord(recordGuid, sectionId, collapsed) {
-    const guid = (recordGuid || '').trim();
-    const id = this.normalizeSectionId(sectionId);
-    if (!guid || !id) return;
-    this.setSectionCollapsedPreferenceForRecord(guid, id, collapsed);
-
-    for (const state of this._panelStates.values()) {
-      if (!state || state.recordGuid !== guid) continue;
-      state.sectionCollapsed = this.cloneSectionCollapsedState(state.sectionCollapsed);
-      state.sectionCollapsed[id] = collapsed === true;
-      this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'section-preference-changed' });
-      this.renderFromCache(state);
-      if (id === 'unlinked' && collapsed !== true && state.lastResults?.unlinkedDeferred === true) {
-        this.ensureDeferredUnlinkedLoaded(state).catch(() => {
-          // ignore
-        });
-      }
-    }
-  }
-
-  loadPropGroupCollapsedSetting() {
-    const current = this.parseStoredStringSet(this.readJsonStorage(this._storageKeyPropGroupCollapsed));
-    if (current) return current;
 
     // Migration: older versions used a back"links" storage key.
     try {
-      const legacyKey = this._legacyStorageKeyPropGroupCollapsed;
-      if (legacyKey && legacyKey !== this._storageKeyPropGroupCollapsed) {
-        const set = this.parseStoredStringSet(this.readJsonStorage(legacyKey));
-        if (set) {
-          this.writeJsonStorage(this._storageKeyPropGroupCollapsed, Array.from(set));
-          return set;
+      const legacyKey = this._legacyStorageKeyCollapsed;
+      if (legacyKey && legacyKey !== this._storageKeyCollapsed) {
+        const v = localStorage.getItem(legacyKey);
+        if (v === '1' || v === '0') {
+          try {
+            localStorage.setItem(this._storageKeyCollapsed, v);
+          } catch (e) {
+            // ignore
+          }
+          return v === '1';
         }
       }
     } catch (e) {
       // ignore
     }
 
-    return new Set();
+    return false;
   }
 
-  loadRecordGroupCollapsedSetting() {
-    const current = this.parseStoredStringSet(this.readJsonStorage(this._storageKeyRecordGroupCollapsed));
-    if (current) return current;
+  saveCollapsedSetting(collapsed) {
+    try {
+      localStorage.setItem(this._storageKeyCollapsed, collapsed ? '1' : '0');
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  loadPropGroupCollapsedSetting() {
+    const parse = (v) => {
+      if (typeof v !== 'string' || !v.trim()) return null;
+      try {
+        const parsed = JSON.parse(v);
+        if (!Array.isArray(parsed)) return null;
+
+        const out = new Set();
+        for (const x of parsed) {
+          if (typeof x !== 'string') continue;
+          const t = x.trim();
+          if (t) out.add(t);
+        }
+        return out;
+      } catch (e) {
+        // ignore
+      }
+      return null;
+    };
 
     try {
-      const legacyKey = this._legacyStorageKeyRecordGroupCollapsed;
-      if (legacyKey && legacyKey !== this._storageKeyRecordGroupCollapsed) {
-        const set = this.parseStoredStringSet(this.readJsonStorage(legacyKey));
+      const v = localStorage.getItem(this._storageKeyPropGroupCollapsed);
+      const set = parse(v);
+      if (set) return set;
+    } catch (e) {
+      // ignore
+    }
+
+    // Migration: older versions used a back"links" storage key.
+    try {
+      const legacyKey = this._legacyStorageKeyPropGroupCollapsed;
+      if (legacyKey && legacyKey !== this._storageKeyPropGroupCollapsed) {
+        const v = localStorage.getItem(legacyKey);
+        const set = parse(v);
         if (set) {
-          this.writeJsonStorage(this._storageKeyRecordGroupCollapsed, Array.from(set));
+          try {
+            localStorage.setItem(this._storageKeyPropGroupCollapsed, JSON.stringify(Array.from(set)));
+          } catch (e) {
+            // ignore
+          }
           return set;
         }
       }
@@ -2518,11 +1158,12 @@ class Plugin extends AppPlugin {
   }
 
   savePropGroupCollapsedSetting() {
-    this.writeJsonStorage(this._storageKeyPropGroupCollapsed, Array.from(this._propGroupCollapsed || []));
-  }
-
-  saveRecordGroupCollapsedSetting() {
-    this.writeJsonStorage(this._storageKeyRecordGroupCollapsed, Array.from(this._recordGroupCollapsed || []));
+    try {
+      const arr = Array.from(this._propGroupCollapsed || []);
+      localStorage.setItem(this._storageKeyPropGroupCollapsed, JSON.stringify(arr));
+    } catch (e) {
+      // ignore
+    }
   }
 
   isPropGroupCollapsed(propName) {
@@ -2540,53 +1181,49 @@ class Plugin extends AppPlugin {
     this.savePropGroupCollapsedSetting();
   }
 
-  normalizeRecordGroupSectionId(sectionId) {
-    return sectionId === 'linked' || sectionId === 'unlinked' ? sectionId : null;
-  }
-
-  getRecordGroupCollapsedKey(sectionId, recordGuid) {
-    const normalizedSectionId = this.normalizeRecordGroupSectionId(sectionId);
-    const guid = typeof recordGuid === 'string' ? recordGuid.trim() : '';
-    if (!normalizedSectionId || !guid) return '';
-    return `${normalizedSectionId}:${guid}`;
-  }
-
-  isRecordGroupCollapsed(sectionId, recordGuid) {
-    const key = this.getRecordGroupCollapsedKey(sectionId, recordGuid);
-    if (!key) return false;
-    return this._recordGroupCollapsed?.has?.(key) === true;
-  }
-
-  setRecordGroupCollapsed(sectionId, recordGuid, collapsed) {
-    const key = this.getRecordGroupCollapsedKey(sectionId, recordGuid);
-    if (!key) return;
-    if (!this._recordGroupCollapsed) this._recordGroupCollapsed = new Set();
-    if (collapsed === true) this._recordGroupCollapsed.add(key);
-    else this._recordGroupCollapsed.delete(key);
-    this.saveRecordGroupCollapsedSetting();
-  }
-
   loadSortByRecordSetting() {
-    const normalizeSortPref = (pref) => {
-      const sortBy = this.normalizeSortBy(pref?.sortBy);
-      const sortDir = this.normalizeSortDir(pref?.sortDir);
-      if (!sortBy || !sortDir) return null;
-      return { sortBy, sortDir };
+    const parse = (v) => {
+      if (typeof v !== 'string' || !v.trim()) return null;
+      try {
+        const parsed = JSON.parse(v);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+        const out = {};
+        for (const [recordGuid, pref] of Object.entries(parsed)) {
+          const guid = typeof recordGuid === 'string' ? recordGuid.trim() : '';
+          if (!guid) continue;
+          const sortBy = this.normalizeSortBy(pref?.sortBy);
+          const sortDir = this.normalizeSortDir(pref?.sortDir);
+          if (!sortBy || !sortDir) continue;
+          out[guid] = { sortBy, sortDir };
+        }
+        return out;
+      } catch (e) {
+        // ignore
+      }
+      return null;
     };
 
-    const current = this.parseStoredRecordMap(
-      this.readJsonStorage(this._storageKeySortByRecord),
-      normalizeSortPref
-    );
-    if (current) return current;
+    try {
+      const v = localStorage.getItem(this._storageKeySortByRecord);
+      const map = parse(v);
+      if (map) return map;
+    } catch (e) {
+      // ignore
+    }
 
     // Migration: older versions used a back"links" storage key.
     try {
       const legacyKey = this._legacyStorageKeySortByRecord;
       if (legacyKey && legacyKey !== this._storageKeySortByRecord) {
-        const map = this.parseStoredRecordMap(this.readJsonStorage(legacyKey), normalizeSortPref);
+        const v = localStorage.getItem(legacyKey);
+        const map = parse(v);
         if (map) {
-          this.writeJsonStorage(this._storageKeySortByRecord, map);
+          try {
+            localStorage.setItem(this._storageKeySortByRecord, JSON.stringify(map));
+          } catch (e) {
+            // ignore
+          }
           return map;
         }
       }
@@ -2598,7 +1235,11 @@ class Plugin extends AppPlugin {
   }
 
   saveSortByRecordSetting() {
-    this.writeJsonStorage(this._storageKeySortByRecord, this._sortByRecord || {});
+    try {
+      localStorage.setItem(this._storageKeySortByRecord, JSON.stringify(this._sortByRecord || {}));
+    } catch (e) {
+      // ignore
+    }
   }
 
   setSortPreferenceForRecord(recordGuid, sortBy, sortDir) {
@@ -2963,7 +1604,7 @@ class Plugin extends AppPlugin {
 
   // ---------- Refresh orchestration ----------
 
-  scheduleRefreshForPanel(panel, { force, reason }) {
+  scheduleRefreshForPanel(panel, { force, reason, debounceMs }) {
     const panelId = panel?.getId?.() || null;
     if (!panelId) return;
     let state = this._panelStates.get(panelId) || null;
@@ -2975,7 +1616,7 @@ class Plugin extends AppPlugin {
       state.refreshTimer = null;
     }
 
-    const delay = force ? 0 : this._refreshDebounceMs;
+    const delay = force ? 0 : (typeof debounceMs === 'number' ? debounceMs : this._refreshDebounceMs);
     state.refreshTimer = setTimeout(() => {
       state.refreshTimer = null;
       this.refreshPanel(panelId, { reason: reason || 'scheduled' }).catch(() => {
@@ -2989,149 +1630,6 @@ class Plugin extends AppPlugin {
       const panel = state?.panel || null;
       if (!panel) continue;
       this.scheduleRefreshForPanel(panel, { force: force === true, reason: reason || 'all' });
-    }
-  }
-
-  getRefreshConfig() {
-    const cfg = this.getConfiguration?.() || {};
-    return {
-      maxResults: this.coercePositiveInt(cfg.custom?.maxResults, this._defaultMaxResults),
-      showSelf: cfg.custom?.showSelf === true
-    };
-  }
-
-  isRefreshStateCurrent(panelId, state, seq) {
-    if (!panelId || !state) return false;
-    if (!this._panelStates.has(panelId)) return false;
-    return state.refreshSeq === seq;
-  }
-
-  async runLinkedReferenceSearch(recordGuid, maxResults) {
-    try {
-      return {
-        status: 'fulfilled',
-        value: await this.data.searchByQuery(`@linkto = "${recordGuid}"`, maxResults)
-      };
-    } catch (e) {
-      return {
-        status: 'rejected',
-        reason: e
-      };
-    }
-  }
-
-  resolveLinkedReferenceSearch(searchSettled, recordGuid, { showSelf }) {
-    let linkedError = '';
-    let linkedGroups = [];
-    let propertyCandidateRecords = null;
-
-    if (searchSettled?.status === 'fulfilled') {
-      const result = searchSettled.value;
-      if (result?.error) {
-        linkedError = result.error;
-      } else {
-        const lines = Array.isArray(result?.lines) ? result.lines : [];
-        propertyCandidateRecords = Array.isArray(result?.records) ? result.records : null;
-        linkedGroups = this.groupBacklinkLines(lines, recordGuid, { showSelf });
-      }
-    } else {
-      linkedError = 'Error loading linked references.';
-    }
-
-    return { linkedError, linkedGroups, propertyCandidateRecords };
-  }
-
-  async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf }) {
-    try {
-      const result = await this.data.searchByQuery(recordName, maxResults);
-      if (result?.error) {
-        return { unlinkedError: result.error, unlinkedGroups: [] };
-      }
-
-      const lines = Array.isArray(result?.lines) ? result.lines : [];
-      return {
-        unlinkedError: '',
-        unlinkedGroups: this.groupUnlinkedReferenceLines(lines, linkedGroups, recordGuid, recordName, { showSelf })
-      };
-    } catch (e) {
-      return {
-        unlinkedError: 'Error loading unlinked references.',
-        unlinkedGroups: []
-      };
-    }
-  }
-
-  async loadFollowupReferenceResults(state, record, {
-    recordGuid,
-    recordName,
-    maxResults,
-    showSelf,
-    propertyCandidateRecords,
-    linkedGroups
-  }) {
-    const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
-    const followupPromises = [
-      this.getPropertyBacklinkGroups(record, recordGuid, {
-        showSelf,
-        candidateRecords: propertyCandidateRecords
-      })
-    ];
-
-    if (shouldLoadUnlinked) {
-      followupPromises.push(
-        this.loadUnlinkedReferenceGroups(recordName, maxResults, {
-          recordGuid,
-          linkedGroups,
-          showSelf
-        })
-      );
-    }
-
-    const [propertySettled, unlinkedSettled] = await Promise.allSettled(followupPromises);
-
-    let propertyError = '';
-    let propertyGroups = [];
-    if (propertySettled.status === 'fulfilled') {
-      propertyGroups = Array.isArray(propertySettled.value) ? propertySettled.value : [];
-    } else {
-      propertyError = 'Error loading property references.';
-    }
-
-    const unlinkedDeferred = Boolean(recordName) && !shouldLoadUnlinked;
-    let unlinkedError = '';
-    let unlinkedGroups = [];
-    if (recordName && shouldLoadUnlinked) {
-      if (unlinkedSettled.status === 'fulfilled') {
-        unlinkedError = unlinkedSettled.value?.unlinkedError || '';
-        unlinkedGroups = Array.isArray(unlinkedSettled.value?.unlinkedGroups)
-          ? unlinkedSettled.value.unlinkedGroups
-          : [];
-      } else {
-        unlinkedError = 'Error loading unlinked references.';
-      }
-    }
-
-    return {
-      propertyError,
-      propertyGroups,
-      unlinkedError,
-      unlinkedGroups,
-      unlinkedDeferred,
-      unlinkedLoading: false,
-      maxResults
-    };
-  }
-
-  applyRefreshedResults(state, results, { reason } = {}) {
-    state.lastResults = results;
-    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: reason || 'refresh' });
-    this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
-    this.invalidateLinkedContextCache(state);
-    this.renderFromCache(state);
-    if (state.lastResults?.unlinkedDeferred === true && !this.isSectionCollapsed(state, 'unlinked')) {
-      this.ensureDeferredUnlinkedLoaded(state).catch(() => {
-        // ignore
-      });
     }
   }
 
@@ -3158,78 +1656,99 @@ class Plugin extends AppPlugin {
 
     this.setLoadingState(state, true);
 
-    const { maxResults, showSelf } = this.getRefreshConfig();
+    const cfg = this.getConfiguration?.() || {};
+    const maxResults = this.coercePositiveInt(cfg.custom?.maxResults, this._defaultMaxResults);
+    const showSelf = cfg.custom?.showSelf === true;
 
-    const recordName = (record?.getName?.() || '').trim();
-    const searchSettled = await this.runLinkedReferenceSearch(recordGuid, maxResults);
+    const query = `@linkto = "${recordGuid}"`;
+    const searchSettled = await Promise.allSettled([
+      this.data.searchByQuery(query, maxResults)
+    ]).then((x) => x[0]);
 
-    if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
+    // Ignore stale refreshes.
+    if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
 
-    const { linkedError, linkedGroups, propertyCandidateRecords } = this.resolveLinkedReferenceSearch(
-      searchSettled,
-      recordGuid,
-      { showSelf }
-    );
-
-    const followupResults = await this.loadFollowupReferenceResults(state, record, {
-      recordGuid,
-      recordName,
-      maxResults,
-      showSelf,
-      propertyCandidateRecords,
-      linkedGroups
-    });
-
-    if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
-
-    this.applyRefreshedResults(state, {
-      ...followupResults,
-      linkedGroups,
-      linkedError
-    }, { reason: reason || 'refresh' });
-    this.setLoadingState(state, false);
-    this.syncStatusItem();
-  }
-
-  async ensureDeferredUnlinkedLoaded(state) {
-    const results = state?.lastResults || null;
-    if (!state || !results) return;
-    if (results.unlinkedDeferred !== true) return;
-    if (results.unlinkedLoading === true) return;
-
-    const panel = state.panel || null;
-    const record = panel?.getActiveRecord?.() || null;
-    const recordGuid = record?.guid || state.recordGuid || null;
-    const recordName = (record?.getName?.() || '').trim();
-    if (!recordGuid || !recordName) return;
-
-    const seq = state.refreshSeq || 0;
-    results.unlinkedLoading = true;
-    results.unlinkedError = '';
-    this.renderFromCache(state);
-
-    const { maxResults, showSelf } = this.getRefreshConfig();
-    const { unlinkedGroups: nextGroups, unlinkedError: nextError } = await this.loadUnlinkedReferenceGroups(
-      recordName,
-      maxResults,
-      {
-        recordGuid,
-        linkedGroups: Array.isArray(results.linkedGroups) ? results.linkedGroups : [],
-        showSelf
+    let linkedError = '';
+    let linkedGroups = [];
+    let propertyCandidateRecords = null;
+    if (searchSettled.status === 'fulfilled') {
+      const result = searchSettled.value;
+      if (result?.error) {
+        linkedError = result.error;
+      } else {
+        const lines = Array.isArray(result?.lines) ? result.lines : [];
+        propertyCandidateRecords = Array.isArray(result?.records) ? result.records : null;
+        linkedGroups = this.groupBacklinkLines(lines, recordGuid, { showSelf });
       }
-    );
+    } else {
+      linkedError = 'Error loading linked references.';
+    }
 
-    if (!this._panelStates.has(state.panelId)) return;
-    if (state.lastResults !== results) return;
-    if (state.refreshSeq !== seq) return;
-    if ((state.recordGuid || '') !== recordGuid) return;
+    let propertyError = '';
+    let propertyGroups = [];
+    try {
+      propertyGroups = await this.getPropertyBacklinkGroups(record, recordGuid, {
+        showSelf,
+        candidateRecords: propertyCandidateRecords
+      });
+    } catch (e) {
+      propertyError = 'Error loading property references.';
+    }
 
-    results.unlinkedGroups = nextGroups;
-    results.unlinkedError = nextError;
-    results.unlinkedDeferred = false;
-    results.unlinkedLoading = false;
-    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
+    // --- Unlinked references ---
+    let unlinkedError = '';
+    let unlinkedGroups = [];
+
+    try {
+      const recordName = (record?.getName?.() || '').trim();
+      if (recordName) {
+        const alreadyLinkedLineGuids = new Set();
+        for (const g of linkedGroups) {
+          for (const line of g?.lines || []) {
+            if (line?.guid) alreadyLinkedLineGuids.add(line.guid);
+          }
+        }
+
+        const unlinkedSearchResult = await this.data.searchByQuery(recordName, maxResults);
+
+        if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
+
+        if (unlinkedSearchResult?.error) {
+          unlinkedError = unlinkedSearchResult.error;
+        } else {
+          const allLines = Array.isArray(unlinkedSearchResult?.lines) ? unlinkedSearchResult.lines : [];
+          const candidateLines = [];
+          for (const line of allLines) {
+            if (!line || !line.guid) continue;
+            if (alreadyLinkedLineGuids.has(line.guid)) continue;
+            const srcGuid = line.record?.guid || null;
+            if (!showSelf && srcGuid === recordGuid) continue;
+            if (this.lineHasRefToRecord(line, recordGuid)) continue;
+            if (!this.lineHasTextMentionOf(line, recordName)) continue;
+            candidateLines.push(line);
+          }
+          unlinkedGroups = this.groupBacklinkLines(candidateLines, recordGuid, { showSelf });
+        }
+      }
+    } catch (e) {
+      unlinkedError = 'Error loading unlinked references.';
+    }
+
+    if (!this._panelStates.has(panelId) || state.refreshSeq !== seq) return;
+
+    state.lastResults = {
+      propertyGroups,
+      propertyError,
+      linkedGroups,
+      linkedError,
+      unlinkedGroups,
+      unlinkedError,
+      maxResults
+    };
+    this.applyLiveSnapshot(state, this.buildResultsSnapshot(propertyGroups, linkedGroups));
+    this.invalidateLinkedContextCache(state);
     this.renderFromCache(state);
+    this.setLoadingState(state, false);
     this.syncStatusItem();
   }
 
@@ -3264,6 +1783,7 @@ class Plugin extends AppPlugin {
       ? (ev.getSegments() || [])
       : [];
     const referenced = this.extractReferencedRecordGuids(segments);
+    const editedRecordGuid = ev.recordGuid || null;
 
     for (const state of this._panelStates.values()) {
       const panel = state?.panel || null;
@@ -3271,30 +1791,133 @@ class Plugin extends AppPlugin {
       if (!state.recordGuid) continue;
 
       const hitsTargetRecord = referenced.has(state.recordGuid);
-      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, ev.recordGuid || null);
+      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, editedRecordGuid);
       if (!hitsTargetRecord && !hitsKnownSource) continue;
 
+      // If the user is typing in the panel's own active record, the backreference
+      // list cannot change — skip the refresh entirely.
+      if (editedRecordGuid && editedRecordGuid === state.recordGuid) continue;
+
       this.markStatePendingRemote(state, ev);
-      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.updated' });
+
+      // If only a known-source record was edited (user typing in a page that already
+      // references this record), the set of backreferences cannot change — only their
+      // text content might. Use a long debounce so typing does not repeatedly tear
+      // down expanded previews. hitsTargetRecord edits (newly added/removed [[ref]])
+      // still get the normal short debounce.
+      const debounceMs = hitsTargetRecord ? this._refreshDebounceMs : 8000;
+      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.updated', debounceMs });
     }
   }
 
   handleLineItemCreated(ev) {
-    this.handleWorkspaceInvalidation(ev, 'lineitem.created');
+    if (!ev) return;
+
+    // Apply the same per-panel filtering as handleLineItemUpdated.
+    // Creating a new bullet (pressing Enter) fires this event and would otherwise
+    // collapse all expanded previews on every keystroke.
+    const segments = ev?.hasSegments?.() && typeof ev.getSegments === 'function'
+      ? (ev.getSegments() || [])
+      : [];
+    const referenced = this.extractReferencedRecordGuids(segments);
+    const editedRecordGuid = ev.recordGuid || null;
+
+    for (const state of this._panelStates.values()) {
+      const panel = state?.panel || null;
+      if (!panel) continue;
+      if (!state.recordGuid) continue;
+
+      const hitsTargetRecord = referenced.has(state.recordGuid);
+      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, editedRecordGuid);
+      if (!hitsTargetRecord && !hitsKnownSource) continue;
+
+      if (editedRecordGuid && editedRecordGuid === state.recordGuid) continue;
+
+      this.markStatePendingRemote(state, ev);
+      const debounceMs = hitsTargetRecord ? this._refreshDebounceMs : 8000;
+      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.created', debounceMs });
+    }
   }
 
   handleLineItemMoved(ev) {
-    this.handleWorkspaceInvalidation(ev, 'lineitem.moved');
+    if (!ev) return;
+
+    // A moved item stays in its record — the source record guid tells us which
+    // panels might be affected. Fall back to full refresh if unknown.
+    const editedRecordGuid = ev.recordGuid || null;
+    if (!editedRecordGuid) {
+      this.handleWorkspaceInvalidation(ev, 'lineitem.moved');
+      return;
+    }
+
+    for (const state of this._panelStates.values()) {
+      const panel = state?.panel || null;
+      if (!panel) continue;
+      if (!state.recordGuid) continue;
+
+      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, editedRecordGuid);
+      if (!hitsKnownSource) continue;
+      if (editedRecordGuid === state.recordGuid) continue;
+
+      this.markStatePendingRemote(state, ev);
+      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.moved', debounceMs: 8000 });
+    }
   }
 
   handleLineItemUndeleted(ev) {
-    this.handleWorkspaceInvalidation(ev, 'lineitem.undeleted');
+    if (!ev) return;
+
+    const segments = ev?.hasSegments?.() && typeof ev.getSegments === 'function'
+      ? (ev.getSegments() || [])
+      : [];
+    const referenced = this.extractReferencedRecordGuids(segments);
+    const editedRecordGuid = ev.recordGuid || null;
+
+    for (const state of this._panelStates.values()) {
+      const panel = state?.panel || null;
+      if (!panel) continue;
+      if (!state.recordGuid) continue;
+
+      const hitsTargetRecord = referenced.has(state.recordGuid);
+      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, editedRecordGuid);
+      if (!hitsTargetRecord && !hitsKnownSource) continue;
+      if (editedRecordGuid && editedRecordGuid === state.recordGuid) continue;
+
+      this.markStatePendingRemote(state, ev);
+      const debounceMs = hitsTargetRecord ? this._refreshDebounceMs : 8000;
+      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.undeleted', debounceMs });
+    }
   }
 
   handleLineItemDeleted(ev) {
-    // We don't know which record(s) were referenced by the deleted item.
-    // This is rare, so we just refresh all visible footers (debounced).
-    this.handleWorkspaceInvalidation(ev, 'lineitem.deleted');
+    // On delete we don't have segments (the item is gone), so we can't filter by
+    // referenced GUIDs. We can still skip panels where the deleted item's record
+    // is not a known source — this avoids thrashing unrelated open pages.
+    if (!ev) return;
+
+    const editedRecordGuid = ev.recordGuid || null;
+    if (!editedRecordGuid) {
+      // No record info at all — fall back to full refresh.
+      this.handleWorkspaceInvalidation(ev, 'lineitem.deleted');
+      return;
+    }
+
+    for (const state of this._panelStates.values()) {
+      const panel = state?.panel || null;
+      if (!panel) continue;
+      if (!state.recordGuid) continue;
+
+      // If the deleted item was in a record that references this panel's record,
+      // a backreference may have disappeared — refresh at normal speed.
+      // If it was in the panel's own record, skip (can't remove a backref to self).
+      if (editedRecordGuid === state.recordGuid) continue;
+
+      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, editedRecordGuid);
+      if (!hitsKnownSource) continue;
+
+      this.markStatePendingRemote(state, ev);
+      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.deleted', debounceMs: this._refreshDebounceMs });
+    }
   }
 
   countLinkedReferences(groups) {
@@ -3410,15 +2033,13 @@ class Plugin extends AppPlugin {
     ctx.error = '';
   }
 
-  findContextLineByGuid(state, lineGuid) {
+  findLinkedLineByGuid(state, lineGuid) {
     const target = (lineGuid || '').trim();
     if (!target || !state?.lastResults) return null;
-    const groups = [
-      ...(Array.isArray(state.lastResults?.linkedGroups) ? state.lastResults.linkedGroups : []),
-      ...(Array.isArray(state.lastResults?.unlinkedGroups) ? state.lastResults.unlinkedGroups : [])
-    ];
+    const linked = Array.isArray(state.lastResults?.linkedGroups) ? state.lastResults.linkedGroups : [];
+    const unlinked = Array.isArray(state.lastResults?.unlinkedGroups) ? state.lastResults.unlinkedGroups : [];
 
-    for (const g of groups) {
+    for (const g of [...linked, ...unlinked]) {
       for (const line of g?.lines || []) {
         if ((line?.guid || '') === target) return line;
       }
@@ -3431,8 +2052,6 @@ class Plugin extends AppPlugin {
     const descendants = [];
     const depthByGuid = {};
     const seen = new Set();
-    const rootGuid = line?.guid || null;
-    if (rootGuid) seen.add(rootGuid);
 
     const walk = async (items, depth) => {
       for (const item of items || []) {
@@ -3578,7 +2197,7 @@ class Plugin extends AppPlugin {
   }
 
   async handleLinkedContextAction(state, action, lineGuid) {
-    const line = this.findContextLineByGuid(state, lineGuid);
+    const line = this.findLinkedLineByGuid(state, lineGuid);
     if (!line) return;
 
     const ctx = this.getLinkedContextState(state, lineGuid);
@@ -3618,31 +2237,15 @@ class Plugin extends AppPlugin {
 
   // ---------- Grouping + rendering ----------
 
-  async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf, candidateRecords }) {
+  async getPropertyBacklinkGroups(_targetRecord, targetGuid, { showSelf, candidateRecords }) {
     if (!targetGuid) return [];
 
-    const indexedCandidates = Array.isArray(candidateRecords)
+    // searchByQuery("@linkto = ...") already returns page-level matches for property-only
+    // record links in result.records, so we can inspect only those candidates when available.
+    // Fall back to a full scan only if the search result is unavailable.
+    const sourceRecords = Array.isArray(candidateRecords)
       ? candidateRecords
-      : [];
-    if (indexedCandidates.length > 0) {
-      const groups = this.buildPropertyBacklinkGroupsFromRecords(indexedCandidates, targetGuid, { showSelf });
-      if (groups.length > 0) return groups;
-    }
-
-    try {
-      const backrefRecords = await targetRecord?.getBackReferenceRecords?.();
-      if (Array.isArray(backrefRecords) && backrefRecords.length > 0) {
-        const groups = this.buildPropertyBacklinkGroupsFromRecords(backrefRecords, targetGuid, { showSelf });
-        if (groups.length > 0) return groups;
-      }
-    } catch (e) {
-      // ignore and fall back to the indexed candidate path result
-    }
-
-    return [];
-  }
-
-  buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf }) {
+      : (this.data.getAllRecords?.() || []);
     const byProp = new Map();
     const seenSourceGuids = new Set();
 
@@ -3718,14 +2321,9 @@ class Plugin extends AppPlugin {
       out.push(t);
     };
 
+    // Most record-link properties currently expose their referenced record GUID via .text().
+    // We also look at .choice() as a fallback for older/quirky configs.
     let raw = [];
-    try {
-      if (prop && 'value' in prop) {
-        raw.push(prop.value);
-      }
-    } catch (e) {
-      // ignore
-    }
     try {
       raw.push(prop.text?.());
     } catch (e) {
@@ -3738,58 +2336,12 @@ class Plugin extends AppPlugin {
     }
 
     for (const r of raw) {
-      this.collectPropertyCandidateValues(r, push);
+      for (const v of this.expandPossibleListString(r)) {
+        push(v);
+      }
     }
 
     return out;
-  }
-
-  collectPropertyCandidateValues(raw, push) {
-    if (raw == null) return;
-
-    if (typeof raw === 'string') {
-      for (const v of this.expandPossibleListString(raw)) {
-        push(v);
-      }
-      return;
-    }
-
-    if (Array.isArray(raw)) {
-      const kind = typeof raw[0] === 'string' ? raw[0].trim().toLowerCase() : '';
-      if (raw.length === 2 && kind) {
-        if (kind === 'record' || kind === 'records') {
-          this.collectPropertyCandidateValues(raw[1], push);
-          return;
-        }
-        if (kind === 'text' || kind === 'url' || kind === 'hashtag' || kind === 'choice'
-          || kind === 'datetime' || kind === 'number' || kind === 'banner' || kind === 'file'
-          || kind === 'image') {
-          this.collectPropertyCandidateValues(raw[1], push);
-          return;
-        }
-      }
-
-      for (const item of raw) {
-        this.collectPropertyCandidateValues(item, push);
-      }
-      return;
-    }
-
-    if (typeof raw === 'object') {
-      const guidKeys = ['guid', 'recordGuid', 'record_guid', 'targetGuid', 'target_guid'];
-      for (const key of guidKeys) {
-        const value = raw?.[key];
-        if (typeof value === 'string') push(value);
-      }
-
-      if ('value' in raw) {
-        this.collectPropertyCandidateValues(raw.value, push);
-      }
-
-      if (Array.isArray(raw.records)) {
-        this.collectPropertyCandidateValues(raw.records, push);
-      }
-    }
   }
 
   expandPossibleListString(v) {
@@ -3873,169 +2425,6 @@ class Plugin extends AppPlugin {
     }
 
     return groups;
-  }
-
-  groupUnlinkedReferenceLines(lines, linkedGroups, targetGuid, targetName, { showSelf }) {
-    const linkedLineGuids = new Set();
-    for (const group of linkedGroups || []) {
-      for (const line of group?.lines || []) {
-        const guid = line?.guid || null;
-        if (guid) linkedLineGuids.add(guid);
-      }
-    }
-
-    const candidates = [];
-    for (const line of lines || []) {
-      const guid = line?.guid || null;
-      if (!guid || linkedLineGuids.has(guid)) continue;
-
-      const srcGuid = line?.record?.guid || null;
-      if (!showSelf && srcGuid === targetGuid) continue;
-      if (this.lineHasRefToRecord(line, targetGuid)) continue;
-      if (!this.lineHasTextMentionOfRecord(line, targetName)) continue;
-      candidates.push(line);
-    }
-
-    return this.groupBacklinkLines(candidates, targetGuid, { showSelf });
-  }
-
-  lineHasRefToRecord(line, recordGuid) {
-    const targetGuid = (recordGuid || '').trim();
-    if (!targetGuid) return false;
-
-    for (const seg of line?.segments || []) {
-      if (seg?.type !== 'ref') continue;
-      const textObj = typeof seg?.text === 'string' ? { guid: seg.text } : (seg?.text || {});
-      if ((textObj.guid || '') === targetGuid) return true;
-    }
-    return false;
-  }
-
-  lineHasTextMentionOfRecord(line, recordName) {
-    const matcher = this.buildPhraseBoundaryMatcher(recordName);
-    if (!matcher) return false;
-    const text = this.getLineTextMentionSource(line);
-    if (!text) return false;
-    return matcher.test(text);
-  }
-
-  getLineTextMentionSource(line) {
-    let out = '';
-
-    for (const seg of line?.segments || []) {
-      if (!seg) continue;
-      if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code') {
-        if (typeof seg.text === 'string') out += seg.text;
-      }
-    }
-
-    return out;
-  }
-
-  buildPhraseBoundaryMatcher(phrase) {
-    const trimmed = typeof phrase === 'string' ? phrase.trim() : '';
-    if (!trimmed) return null;
-
-    const parts = trimmed.split(/\s+/).filter(Boolean).map((part) => this.escapeRegExp(part));
-    if (parts.length === 0) return null;
-
-    return new RegExp(`(^|[^a-z0-9])${parts.join('\\s+')}(?=$|[^a-z0-9])`, 'i');
-  }
-
-  buildPhraseBoundaryGlobalMatcher(phrase) {
-    const trimmed = typeof phrase === 'string' ? phrase.trim() : '';
-    if (!trimmed) return null;
-
-    const parts = trimmed.split(/\s+/).filter(Boolean).map((part) => this.escapeRegExp(part));
-    if (parts.length === 0) return null;
-
-    return new RegExp(`(^|[^a-z0-9])(${parts.join('\\s+')})(?=$|[^a-z0-9])`, 'ig');
-  }
-
-  findUnlinkedLineByGuid(state, lineGuid) {
-    const target = (lineGuid || '').trim();
-    if (!target || !state?.lastResults) return null;
-
-    for (const group of state.lastResults?.unlinkedGroups || []) {
-      for (const line of group?.lines || []) {
-        if ((line?.guid || '') === target) return line;
-      }
-    }
-
-    return null;
-  }
-
-  buildReplacedSegments(segments, recordName, recordGuid) {
-    if (!Array.isArray(segments) || !recordGuid) return segments;
-
-    const matcher = this.buildPhraseBoundaryGlobalMatcher(recordName);
-    if (!matcher) return segments;
-
-    const result = [];
-    let changed = false;
-
-    for (const seg of segments) {
-      if (!seg || !['text', 'bold', 'italic', 'code'].includes(seg.type) || typeof seg.text !== 'string') {
-        result.push(seg);
-        continue;
-      }
-
-      const text = seg.text;
-      let lastIndex = 0;
-      let matched = false;
-      let match = null;
-      matcher.lastIndex = 0;
-
-      while ((match = matcher.exec(text)) !== null) {
-        matched = true;
-        changed = true;
-
-        const prefix = match[1] || '';
-        const matchedText = match[2] || '';
-        const start = match.index + prefix.length;
-
-        if (start > lastIndex) {
-          result.push({ type: seg.type, text: text.slice(lastIndex, start) });
-        }
-
-        result.push({ type: 'ref', text: { guid: recordGuid, title: matchedText } });
-        lastIndex = start + matchedText.length;
-        matcher.lastIndex = lastIndex;
-      }
-
-      if (!matched) {
-        result.push(seg);
-        continue;
-      }
-
-      if (lastIndex < text.length) {
-        result.push({ type: seg.type, text: text.slice(lastIndex) });
-      }
-    }
-
-    return changed ? result : segments;
-  }
-
-  async linkUnlinkedReference(state, lineGuid) {
-    const panel = state?.panel || null;
-    const record = panel?.getActiveRecord?.() || null;
-    const recordGuid = (record?.guid || '').trim();
-    const recordName = (record?.getName?.() || '').trim();
-    if (!recordGuid || !recordName) return;
-
-    const line = this.findUnlinkedLineByGuid(state, lineGuid);
-    if (!line || typeof line.setSegments !== 'function') return;
-    if (this.lineHasRefToRecord(line, recordGuid)) return;
-
-    const nextSegments = this.buildReplacedSegments(line.segments || [], recordName, recordGuid);
-    if (nextSegments === line.segments) return;
-
-    await line.setSegments(nextSegments);
-    this.refreshAllPanels({ force: true, reason: 'link-unlinked' });
-  }
-
-  escapeRegExp(value) {
-    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   sortPropertyGroupsForRender(groups, sortSpec, sortMetrics) {
@@ -4204,510 +2593,724 @@ class Plugin extends AppPlugin {
     state.bodyEl.appendChild(el);
   }
 
-  formatCountLabel(count, noun, opts) {
-    const totalCount = typeof opts?.totalCount === 'number' ? opts.totalCount : null;
-    const useRatio = opts?.scoped === true && totalCount !== null && totalCount !== count;
-    const includeZero = opts?.includeZero === true;
-    const unit = totalCount !== null ? totalCount : count;
-
-    if (!includeZero && Number(unit) <= 0 && (!useRatio || Number(count) <= 0)) return '';
-
-    if (useRatio) {
-      return `${count}/${totalCount} ${noun}${totalCount === 1 ? '' : 's'}`;
-    }
-
-    return `${unit} ${noun}${unit === 1 ? '' : 's'}`;
-  }
-
-  collectUniquePageGuids(propertyGroups, linkedGroups, unlinkedGroups) {
-    const guids = new Set();
-
-    for (const group of propertyGroups || []) {
-      for (const record of group?.records || []) {
-        const guid = record?.guid || null;
-        if (guid) guids.add(guid);
-      }
-    }
-
-    for (const group of linkedGroups || []) {
-      const guid = group?.record?.guid || null;
-      if (guid) guids.add(guid);
-    }
-
-    for (const group of unlinkedGroups || []) {
-      const guid = group?.record?.guid || null;
-      if (guid) guids.add(guid);
-    }
-
-    return guids;
-  }
-
-  filterPropertyGroupsByText(groups, textQueryLower) {
-    const nextGroups = [];
-    for (const group of groups || []) {
-      const propertyName = (group?.propertyName || '').trim();
-      if (!propertyName) continue;
-      const records = (group?.records || []).filter((record) => {
-        const name = (record?.getName?.() || '').toLowerCase();
-        return name.includes(textQueryLower);
-      });
-      if (records.length > 0) nextGroups.push({ propertyName, records });
-    }
-    return nextGroups;
-  }
-
-  filterLineGroupsByText(groups, textQueryLower) {
-    const nextGroups = [];
-    for (const group of groups || []) {
-      const record = group?.record || null;
-      const recordGuid = record?.guid || null;
-      if (!recordGuid) continue;
-      const lines = (group?.lines || []).filter((line) => {
-        const text = this.segmentsToPlainText(line?.segments || []);
-        return text.toLowerCase().includes(textQueryLower);
-      });
-      if (lines.length > 0) nextGroups.push({ record, lines });
-    }
-    return nextGroups;
-  }
-
-  filterReferenceGroupsForRender({
-    propsAll,
-    linkedAll,
-    unlinkedAll,
-    searchMode,
-    textQueryLower,
-    queryFilterState,
-    canApplyScopedQuery,
-    shouldScopeUnlinked
-  }) {
-    let props = propsAll;
-    let linked = linkedAll;
-    let unlinked = shouldScopeUnlinked ? unlinkedAll : [];
-
-    if (searchMode === 'query') {
-      if (canApplyScopedQuery) {
-        props = this.filterPropertyGroupsByScopedQuery(propsAll, queryFilterState);
-        linked = this.filterLineGroupsByScopedQuery(linkedAll, queryFilterState);
-        unlinked = shouldScopeUnlinked
-          ? this.filterLineGroupsByScopedQuery(unlinkedAll, queryFilterState)
-          : [];
-      }
-    } else if (textQueryLower) {
-      props = this.filterPropertyGroupsByText(props, textQueryLower);
-      linked = this.filterLineGroupsByText(linked, textQueryLower);
-      unlinked = this.filterLineGroupsByText(unlinked, textQueryLower);
-    }
-
-    return { props, linked, unlinked };
-  }
-
-  buildReferenceSummaryParts({
-    searchMode,
-    incompleteQueryDraft,
-    queryFilterState,
-    canApplyScopedQuery,
-    hasScopedView,
-    filteredUniquePagesSize,
-    totalUniquePagesSize,
-    filteredVisibleRefCount,
-    totalVisibleRefCount
-  }) {
-    const parts = [];
-
-    if (searchMode === 'query') {
-      if (incompleteQueryDraft) {
-        parts.push('Continue typing...');
-      } else if (queryFilterState?.error) {
-        parts.push('Invalid query');
-      } else if (queryFilterState?.loading === true && canApplyScopedQuery !== true) {
-        parts.push('Applying...');
-      }
-
-      if (canApplyScopedQuery) {
-        const pageLabel = this.formatCountLabel(filteredUniquePagesSize, 'page', {
-          totalCount: totalUniquePagesSize,
-          scoped: true
-        });
-        const refLabel = this.formatCountLabel(filteredVisibleRefCount, 'ref', {
-          totalCount: totalVisibleRefCount,
-          scoped: true
-        });
-        if (pageLabel) parts.push(pageLabel);
-        if (refLabel) parts.push(refLabel);
-      } else {
-        const pageLabel = this.formatCountLabel(totalUniquePagesSize, 'page');
-        const refLabel = this.formatCountLabel(totalVisibleRefCount, 'ref');
-        if (pageLabel) parts.push(pageLabel);
-        if (refLabel) parts.push(refLabel);
-      }
-      return parts;
-    }
-
-    if (hasScopedView) {
-      const pageLabel = this.formatCountLabel(filteredUniquePagesSize, 'page', {
-        totalCount: totalUniquePagesSize,
-        scoped: true
-      });
-      const refLabel = this.formatCountLabel(filteredVisibleRefCount, 'ref', {
-        totalCount: totalVisibleRefCount,
-        scoped: true
-      });
-      if (pageLabel) parts.push(pageLabel);
-      if (refLabel) parts.push(refLabel);
-      return parts;
-    }
-
-    const pageLabel = this.formatCountLabel(totalUniquePagesSize, 'page');
-    const refLabel = this.formatCountLabel(totalVisibleRefCount, 'ref');
-    if (pageLabel) parts.push(pageLabel);
-    if (refLabel) parts.push(refLabel);
-    return parts;
-  }
-
-  buildReferenceSectionMeta(visibleCount, totalCount, showScopedCounts) {
-    return this.formatCountLabel(visibleCount, 'ref', {
-      totalCount: showScopedCounts ? totalCount : null,
-      scoped: showScopedCounts,
-      includeZero: true
-    });
-  }
-
-  buildUnknownReferenceSectionMeta() {
-    return '- refs';
-  }
-
-  buildReferenceViewState(state, {
-    propertyGroups,
-    propertyError,
-    linkedGroups,
-    linkedError,
-    unlinkedGroups,
-    unlinkedError,
-    unlinkedDeferred,
-    unlinkedLoading,
-    maxResults
-  }) {
-    const query = (state.searchQuery || '').trim();
-    const searchMode = this.getSearchMode(query);
-    const incompleteQueryDraft = searchMode === 'query' && this.isIncompleteQueryDraft(query);
-    const textQueryLower = searchMode === 'text' ? query.toLowerCase() : '';
-    const queryFilterState = searchMode === 'query' ? this.getQueryFilterState(state, query) : null;
-    const canApplyScopedQuery = searchMode === 'query' && incompleteQueryDraft !== true && queryFilterState?.ready === true;
-    const shouldScopeUnlinked = searchMode === 'query'
-      ? this.shouldIncludeUnlinkedInQueryScope(state, state.lastResults || {})
-      : true;
-    const highlightQuery = searchMode === 'text' ? query : '';
-
-    const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
-    const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
-    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
-
-    const totalPropRefCount = propsAll.reduce((total, group) => total + (group?.records?.length || 0), 0);
-    const totalLinkedRefCount = this.countLinkedReferences(linkedAll);
-    const totalUnlinkedRefCount = this.countLinkedReferences(unlinkedAll);
-    const collapseMetrics = {
-      ready: true,
-      propertyCount: totalPropRefCount,
-      linkedCount: totalLinkedRefCount,
-      unlinkedCount: totalUnlinkedRefCount,
-      propertyError: Boolean(propertyError),
-      linkedError: Boolean(linkedError),
-      unlinkedError: Boolean(unlinkedError),
-      unlinkedDeferred: unlinkedDeferred === true
-    };
-    const totalUniquePages = this.collectUniquePageGuids(propsAll, linkedAll, []);
-    const filteredGroups = this.filterReferenceGroupsForRender({
-      propsAll,
-      linkedAll,
-      unlinkedAll,
-      searchMode,
-      textQueryLower,
-      queryFilterState,
-      canApplyScopedQuery,
-      shouldScopeUnlinked
-    });
-
-    let { props, linked, unlinked } = filteredGroups;
-    const filteredPropRefCount = props.reduce((total, group) => total + (group?.records?.length || 0), 0);
-    const filteredLinkedRefCount = this.countLinkedReferences(linked);
-    const filteredUnlinkedRefCount = this.countLinkedReferences(unlinked);
-    const hasScopedView = (searchMode === 'text' && Boolean(textQueryLower)) || (searchMode === 'query' && canApplyScopedQuery);
-    const showUnlinkedCounts = searchMode !== 'query' || shouldScopeUnlinked;
-    const showScopedCounts = hasScopedView || (searchMode === 'query' && canApplyScopedQuery);
-    const totalVisibleRefCount = totalPropRefCount + totalLinkedRefCount;
-    const filteredVisibleRefCount = filteredPropRefCount + filteredLinkedRefCount;
-    const filteredUniquePages = this.collectUniquePageGuids(props, linked, []);
-
-    const sortSpec = {
-      sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
-      sortDir: this.normalizeSortDir(state?.sortDir) || this._defaultSortDir
-    };
-    const sortMetrics = this.computeRecordSortMetrics(props, [...linked, ...unlinked]);
-    props = this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
-    linked = this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
-    unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
-
-    return {
-      searchMode,
-      incompleteQueryDraft,
-      queryFilterState,
-      canApplyScopedQuery,
-      shouldScopeUnlinked,
-      highlightQuery,
-      props,
-      linked,
-      unlinked,
-      propertyError,
-      linkedError,
-      unlinkedError,
-      unlinkedDeferred,
-      unlinkedLoading,
-      maxResults,
-      totalPropRefCount,
-      totalLinkedRefCount,
-      totalUnlinkedRefCount,
-      filteredPropRefCount,
-      filteredLinkedRefCount,
-      filteredUnlinkedRefCount,
-      totalVisibleRefCount,
-      filteredVisibleRefCount,
-      totalUniquePagesSize: totalUniquePages.size,
-      filteredUniquePagesSize: filteredUniquePages.size,
-      collapseMetrics,
-      hasScopedView,
-      showUnlinkedCounts,
-      showScopedCounts,
-      propertySectionCollapsed: this.isSectionCollapsed(state, 'property', collapseMetrics),
-      linkedSectionCollapsed: this.isSectionCollapsed(state, 'linked', collapseMetrics),
-      unlinkedSectionCollapsed: this.isSectionCollapsed(state, 'unlinked', collapseMetrics),
-      summaryText: this.buildReferenceSummaryParts({
-        searchMode,
-        incompleteQueryDraft,
-        queryFilterState,
-        canApplyScopedQuery,
-        hasScopedView,
-        filteredUniquePagesSize: filteredUniquePages.size,
-        totalUniquePagesSize: totalUniquePages.size,
-        filteredVisibleRefCount,
-        totalVisibleRefCount
-      }).join(' | ')
-    };
-  }
-
-  appendReferenceStatus(body, viewState) {
-    if (viewState.searchMode === 'query' && viewState.incompleteQueryDraft) {
-      this.appendNote(body, 'Finish the query to filter the current backreferences.');
-    } else if (viewState.searchMode === 'query' && viewState.queryFilterState?.error) {
-      this.appendError(body, viewState.queryFilterState.error);
-    } else if (viewState.searchMode === 'query' && viewState.queryFilterState?.loading === true) {
-      this.appendNote(
-        body,
-        viewState.canApplyScopedQuery
-          ? 'Refreshing query results...'
-          : 'Applying query to current backreferences...'
-      );
-    }
-  }
-
-  renderPropertyReferenceSection(body, state, viewState) {
-    const section = this.appendCollapsibleSection(body, state, {
-      sectionId: 'property',
-      title: 'Property References',
-      collapsed: viewState.propertySectionCollapsed,
-      meta: this.buildReferenceSectionMeta(
-        viewState.showScopedCounts ? viewState.filteredPropRefCount : viewState.totalPropRefCount,
-        viewState.totalPropRefCount,
-        viewState.showScopedCounts
-      )
-    });
-
-    if (viewState.propertyError) {
-      this.appendError(section.bodyEl, viewState.propertyError);
-    } else if (viewState.props.length === 0) {
-      this.appendEmpty(
-        section.bodyEl,
-        viewState.hasScopedView ? 'No matching property references.' : 'No property references.'
-      );
-    } else {
-      this.appendPropertyReferenceGroups(section.bodyEl, viewState.props, {
-        query: viewState.highlightQuery,
-        state
-      });
-    }
-  }
-
-  renderLinkedReferenceSection(body, state, viewState) {
-    const section = this.appendCollapsibleSection(body, state, {
-      sectionId: 'linked',
-      title: 'Linked References',
-      collapsed: viewState.linkedSectionCollapsed,
-      meta: this.buildReferenceSectionMeta(
-        viewState.showScopedCounts ? viewState.filteredLinkedRefCount : viewState.totalLinkedRefCount,
-        viewState.totalLinkedRefCount,
-        viewState.showScopedCounts
-      )
-    });
-
-    if (viewState.linkedError) {
-      this.appendError(section.bodyEl, viewState.linkedError);
-    } else {
-      this.appendLinkedReferenceGroups(section.bodyEl, viewState.linked, {
-        groupSectionId: 'linked',
-        state,
-        maxResults: viewState.maxResults,
-        query: viewState.highlightQuery,
-        totalLineCount: viewState.totalLinkedRefCount,
-        emptyMessage: viewState.hasScopedView ? 'No matching linked references.' : 'No linked references.'
-      });
-    }
-  }
-
-  renderUnlinkedReferenceSection(body, state, viewState) {
-    const section = this.appendCollapsibleSection(body, state, {
-      sectionId: 'unlinked',
-      title: 'Unlinked References',
-      collapsed: viewState.unlinkedSectionCollapsed,
-      meta: (viewState.unlinkedDeferred === true || viewState.unlinkedLoading === true)
-        ? this.buildUnknownReferenceSectionMeta()
-        : this.buildReferenceSectionMeta(
-          viewState.showScopedCounts && viewState.showUnlinkedCounts
-            ? viewState.filteredUnlinkedRefCount
-            : viewState.totalUnlinkedRefCount,
-          viewState.totalUnlinkedRefCount,
-          viewState.showScopedCounts && viewState.showUnlinkedCounts
-        )
-    });
-
-    if (viewState.unlinkedLoading) {
-      this.appendNote(section.bodyEl, 'Loading unlinked references...');
-      return;
-    }
-
-    if (viewState.unlinkedError) {
-      this.appendError(section.bodyEl, viewState.unlinkedError);
-      return;
-    }
-
-    if (viewState.unlinkedDeferred) {
-      if (!viewState.unlinkedSectionCollapsed) {
-        this.appendNote(section.bodyEl, 'Loading unlinked references...');
-      }
-      return;
-    }
-
-    this.appendLinkedReferenceGroups(section.bodyEl, viewState.unlinked, {
-      groupSectionId: 'unlinked',
-      state,
-      maxResults: viewState.maxResults,
-      query: viewState.highlightQuery,
-      totalLineCount: viewState.totalUnlinkedRefCount,
-      emptyMessage: viewState.hasScopedView ? 'No matching unlinked references.' : 'No unlinked references.'
-    });
-  }
-
-  appendReferenceDivider(container) {
-    const divider = document.createElement('div');
-    divider.className = 'tlr-divider';
-    container.appendChild(divider);
-  }
-
-  renderReferences(state, {
-    propertyGroups,
-    propertyError,
-    linkedGroups,
-    linkedError,
-    unlinkedGroups,
-    unlinkedError,
-    unlinkedDeferred,
-    unlinkedLoading,
-    maxResults
-  }) {
+  renderReferences(state, { propertyGroups, propertyError, linkedGroups, linkedError, unlinkedGroups, unlinkedError, maxResults }) {
     if (!state?.bodyEl || !state?.countEl) return;
 
     const body = state.bodyEl;
     body.innerHTML = '';
 
-    const viewState = this.buildReferenceViewState(state, {
-      propertyGroups,
-      propertyError,
-      linkedGroups,
-      linkedError,
-      unlinkedGroups,
-      unlinkedError,
-      unlinkedDeferred,
-      unlinkedLoading,
-      maxResults
+    // Build phrases array: all pinned chips + current typed text (if any)
+    const pinnedPhrases = (state.searchPhrases || []).map((p) => p.toLowerCase()).filter(Boolean);
+    const typedPhrase = (state.searchTyped || '').trim().toLowerCase();
+    const phrases = typedPhrase ? [...pinnedPhrases, typedPhrase] : [...pinnedPhrases];
+    const hasFilter = phrases.length > 0;
+
+    // AND-match helper: every phrase must appear at a word boundary (word-start)
+    const wordStartRe = (p) => new RegExp(`(?:^|[^a-z0-9])${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+    const allMatch = (text) => {
+      return phrases.every((p) => wordStartRe(p).test(text));
+    };
+
+    // For compact empty state, use first phrase or empty string for display
+    const queryDisplay = pinnedPhrases.length > 0
+      ? pinnedPhrases.join(' + ') + (typedPhrase ? ` + ${typedPhrase}` : '')
+      : typedPhrase;
+
+    const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
+    const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
+    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
+
+    const totalPropRefCount = propsAll.reduce((n, g) => n + (g?.records?.length || 0), 0);
+    const totalLinkedRefCount = this.countLinkedReferences(linkedAll);
+    const totalUnlinkedRefCount = this.countLinkedReferences(unlinkedAll);
+    const hasAnyErrors = Boolean(propertyError || linkedError);
+    const isEmptyWithoutFilter = !hasAnyErrors && totalPropRefCount === 0 && totalLinkedRefCount === 0 && totalUnlinkedRefCount === 0;
+    const useCompactEmpty = isEmptyWithoutFilter && !hasFilter && state.emptyStateExpanded !== true;
+
+    if (useCompactEmpty) {
+      state.rootEl?.classList?.add('tlr-empty-compact');
+      this.setSearchOpen(state, false);
+      this.setSortMenuOpen(state, false);
+      state.countEl.textContent = 'No references yet';
+      this.appendCompactEmptyState(body);
+      return;
+    }
+
+    state.rootEl?.classList?.remove('tlr-empty-compact');
+
+    const totalUniqueLinkedPages = new Set();
+    for (const g of linkedAll) {
+      const guid = g?.record?.guid || null;
+      if (guid) totalUniqueLinkedPages.add(guid);
+    }
+    const totalUniqueUnlinkedPages = new Set();
+    for (const g of unlinkedAll) {
+      const guid = g?.record?.guid || null;
+      if (guid) totalUniqueUnlinkedPages.add(guid);
+    }
+    const totalUniquePages = new Set([...totalUniqueLinkedPages, ...totalUniqueUnlinkedPages]);
+
+    let props = propsAll;
+    let linked = linkedAll;
+    let unlinked = unlinkedAll;
+
+    if (hasFilter) {
+      const nextProps = [];
+      for (const g of propsAll) {
+        const propertyName = (g?.propertyName || '').trim();
+        if (!propertyName) continue;
+        const recs = (g?.records || []).filter((r) => {
+          const name = r?.getName?.() || '';
+          return allMatch(name);
+        });
+        if (recs.length > 0) nextProps.push({ propertyName, records: recs });
+      }
+      props = nextProps;
+
+      const nextLinked = [];
+      for (const g of linkedAll) {
+        const record = g?.record || null;
+        const recordGuid = record?.guid || null;
+        if (!recordGuid) continue;
+        const lines = (g?.lines || []).filter((line) => {
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return allMatch(text);
+        });
+        if (lines.length > 0) nextLinked.push({ record, lines });
+      }
+      linked = nextLinked;
+
+      const nextUnlinked = [];
+      for (const g of unlinkedAll) {
+        const record = g?.record || null;
+        const recordGuid = record?.guid || null;
+        if (!recordGuid) continue;
+        const lines = (g?.lines || []).filter((line) => {
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return allMatch(text);
+        });
+        if (lines.length > 0) nextUnlinked.push({ record, lines });
+      }
+      unlinked = nextUnlinked;
+    }
+
+    const filteredLinkedRefCount = this.countLinkedReferences(linked);
+    const filteredUnlinkedRefCount = this.countLinkedReferences(unlinked);
+
+    const filteredUniqueLinkedPages = new Set();
+    for (const g of linked) {
+      const guid = g?.record?.guid || null;
+      if (guid) filteredUniqueLinkedPages.add(guid);
+    }
+    const filteredUniqueUnlinkedPages = new Set();
+    for (const g of unlinked) {
+      const guid = g?.record?.guid || null;
+      if (guid) filteredUniqueUnlinkedPages.add(guid);
+    }
+    const filteredUniquePages = new Set([...filteredUniqueLinkedPages, ...filteredUniqueUnlinkedPages]);
+
+    const sortSpec = {
+      sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
+      sortDir: this.normalizeSortDir(state?.sortDir) || this._defaultSortDir
+    };
+    const sortMetrics = this.computeRecordSortMetrics(props, linked);
+    props = this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
+    linked = this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
+    unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
+
+    // Pass phrases array directly to highlighting (avoids join/re-split losing multi-word chips)
+    const query = phrases.slice();
+
+    const parts = [];
+    if (hasFilter) {
+      const shortDisplay = queryDisplay.length > 30 ? `${queryDisplay.slice(0, 30)}…` : queryDisplay;
+      parts.push(`Filter: "${shortDisplay}"`);
+      if (totalUniquePages.size > 0) parts.push(`${filteredUniquePages.size}/${totalUniquePages.size} pages`);
+      if (totalLinkedRefCount > 0) parts.push(`${filteredLinkedRefCount}/${totalLinkedRefCount} linked`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${filteredUnlinkedRefCount}/${totalUnlinkedRefCount} unlinked`);
+    } else {
+      if (totalUniquePages.size > 0) parts.push(`${totalUniquePages.size} page${totalUniquePages.size === 1 ? '' : 's'}`);
+      if (totalLinkedRefCount > 0) parts.push(`${totalLinkedRefCount} linked`);
+      if (totalUnlinkedRefCount > 0) parts.push(`${totalUnlinkedRefCount} unlinked`);
+    }
+    state.countEl.textContent = parts.join(' | ');
+
+    // --- Property References section ---
+    const propBlock = this.buildSectionBlock({
+      sectionKey: 'property',
+      title: 'Property References',
+      count: props.reduce((n, g) => n + (g?.records?.length || 0), 0),
+      collapsed: this._propertyRefsCollapsed,
+      toggleAction: 'toggle-property-refs'
     });
+    body.appendChild(propBlock);
+    const propBody = propBlock.querySelector('.tlr-section-body');
+    if (propertyError) {
+      this.appendError(propBody, propertyError);
+    } else if (props.length === 0) {
+      this.appendEmpty(propBody, hasFilter ? 'No matching property references.' : 'No property references.');
+    } else {
+      this.appendPropertyReferenceGroups(propBody, props, { query, state });
+    }
 
-    this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, viewState.collapseMetrics));
+    // --- Linked References section ---
+    const linkedBlock = this.buildSectionBlock({
+      sectionKey: 'linked',
+      title: 'Linked References',
+      count: filteredLinkedRefCount,
+      collapsed: this._linkedRefsCollapsed,
+      toggleAction: 'toggle-linked-refs'
+    });
+    body.appendChild(linkedBlock);
+    const linkedBody = linkedBlock.querySelector('.tlr-section-body');
+    if (linkedError) {
+      this.appendError(linkedBody, linkedError);
+    } else {
+      this.appendLinkedReferenceGroups(linkedBody, linked, {
+        state,
+        maxResults,
+        query,
+        totalLineCount: totalLinkedRefCount,
+        emptyMessage: hasFilter ? 'No matching linked references.' : 'No linked references.'
+      });
+    }
 
-    state.countEl.textContent = viewState.summaryText;
-    this.appendReferenceStatus(body, viewState);
-    this.renderPropertyReferenceSection(body, state, viewState);
-    this.appendReferenceDivider(body);
-    this.renderLinkedReferenceSection(body, state, viewState);
-    this.appendReferenceDivider(body);
-    this.renderUnlinkedReferenceSection(body, state, viewState);
+    // --- Unlinked References section ---
+    const unlinkedBlock = this.buildSectionBlock({
+      sectionKey: 'unlinked',
+      title: 'Unlinked References',
+      count: filteredUnlinkedRefCount,
+      collapsed: this._unlinkedCollapsed,
+      toggleAction: 'toggle-unlinked-refs',
+      extraHeaderContent: (filteredUnlinkedRefCount > 1) ? this.buildLinkAllButton(filteredUnlinkedRefCount) : null
+    });
+    body.appendChild(unlinkedBlock);
+    const unlinkedBody = unlinkedBlock.querySelector('.tlr-section-body');
+    if (unlinkedError) {
+      this.appendError(unlinkedBody, unlinkedError);
+    } else if (unlinked.length === 0) {
+      this.appendEmpty(unlinkedBody, hasFilter ? 'No matching unlinked references.' : 'No unlinked references.');
+    } else {
+      this.appendUnlinkedReferenceGroups(unlinkedBody, unlinked, { query, state });
+    }
   }
 
-  buildChevronIcon(collapsed, extraClass) {
-    const iconEl = document.createElement('span');
-    iconEl.classList.add('ti', 'tlr-fold-icon');
-    if (extraClass) iconEl.classList.add(extraClass);
-    this.syncChevronIcon(iconEl, collapsed === true);
-    iconEl.setAttribute('aria-hidden', 'true');
-    return iconEl;
-  }
+  buildSectionBlock({ sectionKey, title, count, collapsed, toggleAction, extraHeaderContent }) {
+    const block = document.createElement('div');
+    block.className = 'tlr-section-block';
+    block.dataset.section = sectionKey || '';
+    if (collapsed) block.classList.add('tlr-section-collapsed');
 
-  syncChevronIcon(iconEl, collapsed) {
-    if (!iconEl?.classList) return;
-    iconEl.classList.remove('ti-chevron-down', 'ti-chevron-right');
-    iconEl.classList.add(collapsed === true ? 'ti-chevron-right' : 'ti-chevron-down');
-  }
+    const headerRow = document.createElement('div');
+    headerRow.className = 'tlr-section-header-row';
 
-  appendCollapsibleSection(container, state, { sectionId, title, meta, collapsed }) {
-    if (!container) return;
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'tlr-section-header button-normal button-normal-hover';
+    header.dataset.action = toggleAction || '';
 
-    const id = this.normalizeSectionId(sectionId) || 'property';
-    const sectionCollapsed = collapsed === true;
+    const caret = document.createElement('span');
+    caret.className = 'tlr-section-caret';
+    caret.setAttribute('aria-hidden', 'true');
 
-    const sectionEl = document.createElement('div');
-    sectionEl.className = 'tlr-section form-field';
-    if (sectionCollapsed) sectionEl.classList.add('tlr-section-collapsed');
-
-    const headerEl = document.createElement('div');
-    headerEl.className = 'tlr-section-header form-field-row';
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.className = 'tlr-btn tlr-section-toggle button-none button-small button-minimal-hover';
-    toggleBtn.dataset.action = 'toggle-section';
-    toggleBtn.dataset.sectionId = id;
-    toggleBtn.title = 'Collapse/expand';
-    toggleBtn.setAttribute('aria-label', sectionCollapsed ? 'Expand section' : 'Collapse section');
-    toggleBtn.setAttribute('aria-expanded', sectionCollapsed ? 'false' : 'true');
-    toggleBtn.appendChild(this.buildChevronIcon(sectionCollapsed, 'tlr-section-caret'));
-
-    const titleEl = document.createElement('div');
-    titleEl.className = 'tlr-section-title text-details';
+    const titleEl = document.createElement('span');
+    titleEl.className = 'tlr-section-title-text';
     titleEl.textContent = title || '';
 
-    const metaEl = document.createElement('div');
-    metaEl.className = 'tlr-section-meta text-details';
-    metaEl.textContent = meta || '';
+    header.appendChild(caret);
+    header.appendChild(titleEl);
+
+    if (extraHeaderContent) {
+      header.appendChild(extraHeaderContent);
+    } else {
+      const countEl = document.createElement('span');
+      countEl.className = 'tlr-section-count text-details';
+      countEl.textContent = typeof count === 'number' ? `${count}` : '';
+      header.appendChild(countEl);
+    }
+
+    headerRow.appendChild(header);
 
     const bodyEl = document.createElement('div');
     bodyEl.className = 'tlr-section-body';
 
-    headerEl.appendChild(toggleBtn);
-    headerEl.appendChild(titleEl);
-    headerEl.appendChild(metaEl);
-    sectionEl.appendChild(headerEl);
-    sectionEl.appendChild(bodyEl);
-    container.appendChild(sectionEl);
+    block.appendChild(headerRow);
+    block.appendChild(bodyEl);
+    return block;
+  }
 
-    return { sectionEl, bodyEl };
+  buildLinkAllButton(count) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tlr-link-all-btn button-none';
+    btn.dataset.action = 'link-all-unlinked';
+    btn.title = 'Create links for all unlinked references';
+    const label = document.createElement('span');
+    label.textContent = 'Link all';
+    btn.appendChild(label);
+    if (typeof count === 'number') {
+      const countSpan = document.createElement('span');
+      countSpan.className = 'tlr-link-all-count text-details';
+      countSpan.textContent = `${count}`;
+      btn.appendChild(countSpan);
+    }
+    return btn;
+  }
+
+  appendUnlinkedReferenceGroups(container, groups, opts) {
+    if (!container) return;
+
+    const state = opts?.state || null;
+    const query = Array.isArray(opts?.query) ? opts.query : (typeof opts?.query === 'string' ? opts.query : '');
+
+    for (const g of groups || []) {
+      const record = g.record || null;
+      const recordGuid = record?.guid || null;
+      if (!recordGuid) continue;
+
+      const isCollapsed = this.isRecordGroupCollapsed(recordGuid);
+
+      const groupEl = document.createElement('div');
+      groupEl.className = 'tlr-group';
+      if (isCollapsed) groupEl.classList.add('tlr-group-collapsed');
+      // Re-apply expanded class so the preview div is visible after a DOM rebuild.
+      if (state?.recordExpandedState?.get?.(recordGuid)?.expanded === true) {
+        groupEl.classList.add('tlr-record-expanded');
+      }
+
+      const header = document.createElement('button');
+      header.type = 'button';
+      header.className = 'tlr-group-header button-normal button-normal-hover';
+      header.dataset.action = 'toggle-record-group';
+      header.dataset.recordGuid = recordGuid;
+
+      const caret = document.createElement('span');
+      caret.className = 'tlr-group-caret';
+      caret.setAttribute('aria-hidden', 'true');
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'tlr-group-title';
+      titleEl.textContent = record.getName?.() || 'Untitled';
+
+      const meta = document.createElement('div');
+      meta.className = 'tlr-group-meta text-details';
+      meta.textContent = `${(g.lines || []).length}`;
+
+      header.appendChild(caret);
+      header.appendChild(titleEl);
+      header.appendChild(meta);
+
+      const linesEl = document.createElement('div');
+      linesEl.className = 'tlr-lines';
+
+      for (const line of g.lines || []) {
+        const entryEl = document.createElement('div');
+        entryEl.className = 'tlr-line-entry';
+
+        const ctx = state ? this.getLinkedContextState(state, line.guid) : null;
+        if (state && ctx && this.hasRequestedLinkedContext(ctx) && ctx.loaded !== true && ctx.loading !== true) {
+          this.ensureLinkedContextLoaded(state, line).catch(() => {});
+        }
+
+        this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'top');
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tlr-line button-none';
+        btn.dataset.action = 'open-line';
+        btn.dataset.recordGuid = recordGuid;
+        btn.dataset.lineGuid = line.guid;
+        this.appendLineText(btn, line, query);
+
+        const linkBtn = document.createElement('button');
+        linkBtn.type = 'button';
+        linkBtn.className = 'tlr-link-btn button-none';
+        linkBtn.dataset.action = 'link-unlinked';
+        linkBtn.dataset.lineGuid = line.guid;
+        linkBtn.textContent = 'Link';
+        linkBtn.title = 'Create a link for this reference';
+
+        const mainRow = document.createElement('div');
+        mainRow.className = 'tlr-line-main';
+        mainRow.appendChild(btn);
+
+        // Inline actions: Link button + context toggle, right-aligned
+        const actionsRow = document.createElement('div');
+        actionsRow.className = 'tlr-unlinked-actions-row';
+        actionsRow.appendChild(linkBtn);
+        if (state && ctx) {
+          actionsRow.appendChild(this.buildLinkedContextControls(line.guid, ctx));
+        }
+        mainRow.appendChild(actionsRow);
+        entryEl.appendChild(mainRow);
+
+        if (state && ctx) {
+          if (ctx.loading === true) {
+            const loadingEl = document.createElement('div');
+            loadingEl.className = 'tlr-note tlr-context-note';
+            loadingEl.textContent = 'Loading context...';
+            entryEl.appendChild(loadingEl);
+          } else if (ctx.error) {
+            const errorEl = document.createElement('div');
+            errorEl.className = 'tlr-error tlr-context-note';
+            errorEl.textContent = ctx.error;
+            entryEl.appendChild(errorEl);
+          }
+        }
+
+        this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'bottom');
+        linesEl.appendChild(entryEl);
+      }
+
+      groupEl.appendChild(header);
+      groupEl.appendChild(this.buildExpandRecordBtn(recordGuid, state));
+      groupEl.appendChild(this.buildRecordPreviewEl(recordGuid, state));
+      groupEl.appendChild(linesEl);
+      container.appendChild(groupEl);
+    }
+  }
+
+  // ---------- Inline record preview (Logseq-style transclusion) ----------
+
+  buildExpandRecordBtn(recordGuid, state) {
+    const isExpanded = state?.recordExpandedState?.get?.(recordGuid)?.expanded === true;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tlr-expand-record-btn button-none' + (isExpanded ? ' is-expanded' : '');
+    btn.dataset.action = 'expand-record';
+    btn.dataset.recordGuid = recordGuid;
+    btn.title = isExpanded ? 'Hide record preview' : 'Preview record content inline';
+    btn.setAttribute('aria-label', btn.title);
+    btn.textContent = isExpanded ? '▼' : '▶';
+    return btn;
+  }
+
+  buildRecordPreviewEl(recordGuid, state) {
+    const previewEl = document.createElement('div');
+    previewEl.className = 'tlr-record-preview';
+    previewEl.dataset.previewGuid = recordGuid;
+    const cached = state?.recordExpandedState?.get?.(recordGuid);
+    if (cached?.expanded && cached?.allItems) {
+      this.renderRecordPreview(previewEl, cached.allItems, recordGuid, cached.collapsedNodes || new Set());
+    }
+    return previewEl;
+  }
+
+  async toggleRecordExpansion(state, recordGuid, groupEl) {
+    if (!state || !recordGuid || !groupEl) return;
+
+    const expandBtn = groupEl.querySelector(`.tlr-expand-record-btn[data-record-guid="${recordGuid}"]`);
+    const previewEl = groupEl.querySelector('.tlr-record-preview');
+    const cached = state.recordExpandedState.get(recordGuid);
+
+    // Collapse if already expanded
+    if (cached?.expanded) {
+      state.recordExpandedState.set(recordGuid, { expanded: false, allItems: null, collapsedNodes: new Set() });
+      groupEl.classList.remove('tlr-record-expanded');
+      if (expandBtn) {
+        expandBtn.classList.remove('is-expanded');
+        expandBtn.title = 'Preview record content inline';
+        expandBtn.textContent = '▶';
+      }
+      if (previewEl) previewEl.innerHTML = '';
+      return;
+    }
+
+    // Show loading indicator while fetching
+    if (previewEl) {
+      previewEl.innerHTML = '';
+      const loading = document.createElement('div');
+      loading.className = 'tlr-expand-loading tlr-note';
+      loading.textContent = 'Loading…';
+      previewEl.appendChild(loading);
+    }
+    groupEl.classList.add('tlr-record-expanded');
+
+    try {
+      const record = this.data.getRecord?.(recordGuid) || null;
+      if (!record) throw new Error('Record not found');
+
+      const allItems = await record.getLineItems();
+      const collapsedNodes = new Set();
+
+      state.recordExpandedState.set(recordGuid, { expanded: true, allItems, collapsedNodes });
+
+      if (previewEl) this.renderRecordPreview(previewEl, allItems, recordGuid, collapsedNodes);
+    } catch (e) {
+      if (previewEl) {
+        previewEl.innerHTML = '';
+        const err = document.createElement('div');
+        err.className = 'tlr-error';
+        err.textContent = 'Could not load record content.';
+        previewEl.appendChild(err);
+      }
+      state.recordExpandedState.set(recordGuid, { expanded: true, allItems: [], collapsedNodes: new Set() });
+    }
+
+    if (expandBtn) {
+      expandBtn.classList.add('is-expanded');
+      expandBtn.title = 'Hide record preview';
+      expandBtn.textContent = '▼';
+    }
+  }
+
+  renderRecordPreview(previewEl, allItems, recordGuid, collapsedNodes) {
+    if (!previewEl) return;
+    previewEl.innerHTML = '';
+
+    if (!allItems || allItems.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'tlr-expand-empty';
+      empty.textContent = '(empty)';
+      previewEl.appendChild(empty);
+      return;
+    }
+
+    // Build parent→children map
+    const childrenOf = new Map();
+    for (const item of allItems) {
+      const p = item.parent_guid || recordGuid;
+      if (!childrenOf.has(p)) childrenOf.set(p, []);
+      childrenOf.get(p).push(item);
+    }
+
+    const renderNode = (item, depth) => {
+      const guid = item.guid || '';
+      const children = childrenOf.get(guid) || [];
+      const hasChildren = children.length > 0;
+      const isCollapsed = collapsedNodes.has(guid);
+
+      const nodeEl = document.createElement('div');
+      nodeEl.className = 'tlr-preview-node';
+      nodeEl.dataset.nodeGuid = guid;
+      nodeEl.style.setProperty('--tlr-depth', depth);
+
+      const rowEl = document.createElement('div');
+      rowEl.className = 'tlr-preview-row';
+
+      // Collapse toggle (only if has children)
+      const toggleEl = document.createElement('button');
+      toggleEl.type = 'button';
+      toggleEl.className = 'tlr-preview-toggle button-none';
+      if (hasChildren) {
+        toggleEl.dataset.action = 'toggle-preview-node';
+        toggleEl.dataset.nodeGuid = guid;
+        toggleEl.dataset.recordGuid = recordGuid;
+        toggleEl.setAttribute('aria-label', isCollapsed ? 'Expand' : 'Collapse');
+        const arrow = document.createElement('span');
+        arrow.className = 'tlr-preview-arrow' + (isCollapsed ? ' is-collapsed' : '');
+        toggleEl.appendChild(arrow);
+      }
+      rowEl.appendChild(toggleEl);
+
+      // Line content — clickable to navigate
+      const lineBtn = document.createElement('button');
+      lineBtn.type = 'button';
+      lineBtn.className = 'tlr-expand-line button-none';
+      lineBtn.dataset.action = 'open-line';
+      lineBtn.dataset.recordGuid = recordGuid;
+      lineBtn.dataset.lineGuid = guid;
+      this.appendLineText(lineBtn, item, '');
+      rowEl.appendChild(lineBtn);
+
+      nodeEl.appendChild(rowEl);
+
+      // Children container
+      if (hasChildren) {
+        const childrenEl = document.createElement('div');
+        childrenEl.className = 'tlr-preview-children' + (isCollapsed ? ' is-hidden' : '');
+        for (const child of children) {
+          childrenEl.appendChild(renderNode(child, depth + 1));
+        }
+        nodeEl.appendChild(childrenEl);
+      }
+
+      return nodeEl;
+    };
+
+    const roots = childrenOf.get(recordGuid) || [];
+    for (const root of roots) {
+      previewEl.appendChild(renderNode(root, 0));
+    }
+  }
+
+  lineHasRefToRecord(line, recordGuid) {
+    for (const seg of line?.segments || []) {
+      if (seg?.type !== 'ref') continue;
+      if ((seg?.text?.guid || '') === recordGuid) return true;
+    }
+    return false;
+  }
+
+  lineHasTextMentionOf(line, name) {
+    const nameLower = name.toLowerCase();
+    for (const seg of line?.segments || []) {
+      if (seg?.type === 'text' || seg?.type === 'bold' || seg?.type === 'italic' || seg?.type === 'code') {
+        if (typeof seg.text === 'string' && seg.text.toLowerCase().includes(nameLower)) return true;
+      }
+    }
+    return false;
+  }
+
+  async linkUnlinkedReference(state, lineGuid) {
+    const targetRecordGuid = state?.recordGuid || null;
+    if (!targetRecordGuid || !lineGuid) return;
+
+    const groups = state?.lastResults?.unlinkedGroups || [];
+    let targetLine = null;
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if ((line?.guid || '') === lineGuid) { targetLine = line; break; }
+      }
+      if (targetLine) break;
+    }
+    if (!targetLine) return;
+
+    const record = this.data.getRecord?.(targetRecordGuid) || null;
+    const recordName = (record?.getName?.() || '').trim();
+    if (!recordName) return;
+
+    const segments = targetLine?.segments || [];
+    const newSegments = this.buildReplacedSegments(segments, recordName, targetRecordGuid);
+    try {
+      await targetLine.setSegments(newSegments);
+      this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'link-unlinked' });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  async linkAllUnlinkedReferences(state) {
+    const targetRecordGuid = state?.recordGuid || null;
+    if (!targetRecordGuid) return;
+
+    const record = this.data.getRecord?.(targetRecordGuid) || null;
+    const recordName = (record?.getName?.() || '').trim();
+    if (!recordName) return;
+
+    const allGroups = state?.lastResults?.unlinkedGroups || [];
+
+    // When a filter is active, only link visible (filtered) lines
+    const pinnedPhrases = (state.searchPhrases || []).map((p) => p.toLowerCase()).filter(Boolean);
+    const typedPhrase = (state.searchTyped || '').trim().toLowerCase();
+    const phrases = typedPhrase ? [...pinnedPhrases, typedPhrase] : [...pinnedPhrases];
+    const hasFilter = phrases.length > 0;
+
+    let groups = allGroups;
+    if (hasFilter) {
+      const wordStartRe = (p) => new RegExp(`(?:^|[^a-z0-9])${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+      const allMatch = (text) => phrases.every((p) => wordStartRe(p).test(text));
+      groups = [];
+      for (const g of allGroups) {
+        const lines = (g?.lines || []).filter((line) => {
+          const text = this.segmentsToPlainText(line?.segments || []);
+          return allMatch(text);
+        });
+        if (lines.length > 0) groups.push({ ...g, lines });
+      }
+    }
+
+    const tasks = [];
+    for (const g of groups) {
+      for (const line of g?.lines || []) {
+        if (!line?.guid) continue;
+        const newSegments = this.buildReplacedSegments(line.segments || [], recordName, targetRecordGuid);
+        tasks.push(line.setSegments(newSegments).catch(() => {}));
+      }
+    }
+    await Promise.all(tasks);
+    this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'link-all-unlinked' });
+  }
+
+  buildReplacedSegments(segments, recordName, recordGuid) {
+    const result = [];
+    const escaped = recordName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Word-start: must be at beginning of string or after a non-alphanumeric char
+    const re = new RegExp(`(?:^|(?<=[^a-zA-Z0-9]))${escaped}`, 'gi');
+    for (const seg of segments || []) {
+      if ((seg?.type === 'text' || seg?.type === 'bold' || seg?.type === 'italic' || seg?.type === 'code') && typeof seg.text === 'string') {
+        const text = seg.text;
+        let lastIndex = 0;
+        let matched = false;
+        let m;
+        re.lastIndex = 0;
+        while ((m = re.exec(text)) !== null) {
+          matched = true;
+          const start = m.index;
+          if (start > lastIndex) result.push({ type: seg.type, text: text.slice(lastIndex, start) });
+          result.push({ type: 'ref', text: { guid: recordGuid } });
+          lastIndex = start + recordName.length;
+          re.lastIndex = lastIndex;
+        }
+        if (matched) {
+          if (lastIndex < text.length) result.push({ type: seg.type, text: text.slice(lastIndex) });
+          continue;
+        }
+      }
+      result.push(seg);
+    }
+    return result;
+  }
+
+  isRecordGroupCollapsed(guid) {
+    if (!guid || !this._recordGroupCollapsed) return false;
+    return this._recordGroupCollapsed[guid] === true;
+  }
+
+  setRecordGroupCollapsed(guid, collapsed) {
+    if (!guid) return;
+    if (!this._recordGroupCollapsed) this._recordGroupCollapsed = {};
+    if (collapsed) {
+      this._recordGroupCollapsed[guid] = true;
+    } else {
+      delete this._recordGroupCollapsed[guid];
+    }
+    this.saveRecordGroupCollapsedSetting();
+  }
+
+  loadRecordGroupCollapsedSetting() {
+    try {
+      const raw = localStorage.getItem(this._storageKeyRecordGroupCollapsed);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {
+      // ignore
+    }
+    return {};
+  }
+
+  saveRecordGroupCollapsedSetting() {
+    try {
+      localStorage.setItem(this._storageKeyRecordGroupCollapsed, JSON.stringify(this._recordGroupCollapsed || {}));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  loadBoolSetting(key, defaultValue) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (e) {
+      // ignore
+    }
+    return defaultValue === true;
+  }
+
+  saveBoolSetting(key, value) {
+    try {
+      localStorage.setItem(key, value ? '1' : '0');
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  appendSectionTitle(container, text) {
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = 'tlr-section-title text-details';
+    el.textContent = text || '';
+    container.appendChild(el);
   }
 
   appendError(container, message) {
@@ -4726,18 +3329,35 @@ class Plugin extends AppPlugin {
     container.appendChild(el);
   }
 
-  appendNote(container, message) {
+  appendCompactEmptyState(container) {
     if (!container) return;
-    const el = document.createElement('div');
-    el.className = 'tlr-note';
-    el.textContent = message || '';
-    container.appendChild(el);
+
+    const field = document.createElement('div');
+    field.className = 'tlr-empty-compact-card form-field';
+
+    const row = document.createElement('div');
+    row.className = 'tlr-empty-compact-row form-field-row';
+
+    const summary = document.createElement('div');
+    summary.className = 'tlr-empty-compact-copy text-details';
+    summary.textContent = 'No references yet.';
+
+    const expandBtn = document.createElement('button');
+    expandBtn.type = 'button';
+    expandBtn.className = 'tlr-empty-compact-btn button-none button-small button-minimal-hover';
+    expandBtn.dataset.action = 'expand-empty';
+    expandBtn.textContent = 'Show sections';
+
+    row.appendChild(summary);
+    row.appendChild(expandBtn);
+    field.appendChild(row);
+    container.appendChild(field);
   }
 
   appendPropertyReferenceGroups(container, groups, opts) {
     if (!container) return;
 
-    const query = (opts?.query || '').trim();
+    const query = Array.isArray(opts?.query) ? opts.query : (typeof opts?.query === 'string' ? opts.query : '');
     const state = opts?.state || null;
 
     for (const g of groups || []) {
@@ -4751,25 +3371,16 @@ class Plugin extends AppPlugin {
 
       if (isCollapsed) groupEl.classList.add('tlr-prop-collapsed');
 
-      const rowEl = document.createElement('div');
-      rowEl.className = 'tlr-prop-row';
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.type = 'button';
-      toggleBtn.className = 'tlr-btn tlr-prop-toggle button-none button-small button-minimal-hover';
-      toggleBtn.dataset.action = 'toggle-prop-group';
-      toggleBtn.dataset.propName = propName;
-      toggleBtn.title = isCollapsed ? 'Expand' : 'Collapse';
-      toggleBtn.setAttribute('aria-label', isCollapsed ? 'Expand' : 'Collapse');
-      toggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-      toggleBtn.appendChild(this.buildChevronIcon(isCollapsed, 'tlr-prop-caret'));
-
       const header = document.createElement('button');
       header.type = 'button';
       header.className = 'tlr-prop-header button-normal button-normal-hover';
       header.dataset.action = 'toggle-prop-group';
       header.dataset.propName = propName;
       header.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+
+      const caret = document.createElement('span');
+      caret.className = 'tlr-prop-caret';
+      caret.setAttribute('aria-hidden', 'true');
 
       const title = document.createElement('div');
       title.className = 'tlr-prop-title';
@@ -4779,11 +3390,9 @@ class Plugin extends AppPlugin {
       meta.className = 'tlr-prop-meta text-details';
       meta.textContent = `${g?.records?.length || 0}`;
 
+      header.appendChild(caret);
       header.appendChild(title);
       header.appendChild(meta);
-
-      rowEl.appendChild(toggleBtn);
-      rowEl.appendChild(header);
 
       const recsEl = document.createElement('div');
       recsEl.className = 'tlr-prop-records';
@@ -4792,19 +3401,34 @@ class Plugin extends AppPlugin {
         const guid = r?.guid || null;
         if (!guid) continue;
 
+        const recWrap = document.createElement('div');
+        recWrap.className = 'tlr-prop-record-wrap tlr-group';
+        if (state?.recordExpandedState?.get?.(guid)?.expanded === true) {
+          recWrap.classList.add('tlr-record-expanded');
+        }
+
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'tlr-prop-record button-none button-minimal-hover';
+        btn.className = 'tlr-prop-record button-none';
         btn.dataset.action = 'open-record';
         btn.dataset.recordGuid = guid;
         const name = r.getName?.() || 'Untitled';
         btn.textContent = '';
         this.appendHighlightedText(btn, name, query);
         this.appendLiveBadges(btn, state, this.getPropertySnapshotKey(propName, guid));
-        recsEl.appendChild(btn);
+
+        const btnRow = document.createElement('div');
+        btnRow.style.display = 'flex';
+        btnRow.style.alignItems = 'center';
+        btnRow.style.gap = '4px';
+        btnRow.appendChild(this.buildExpandRecordBtn(guid, state));
+        btnRow.appendChild(btn);
+        recWrap.appendChild(btnRow);
+        recWrap.appendChild(this.buildRecordPreviewEl(guid, state));
+        recsEl.appendChild(recWrap);
       }
 
-      groupEl.appendChild(rowEl);
+      groupEl.appendChild(header);
       groupEl.appendChild(recsEl);
       container.appendChild(groupEl);
     }
@@ -4813,10 +3437,9 @@ class Plugin extends AppPlugin {
   appendLinkedReferenceGroups(container, groups, opts) {
     if (!container) return;
 
-    const groupSectionId = this.normalizeRecordGroupSectionId(opts?.groupSectionId) || 'linked';
     const state = opts?.state || null;
     const maxResults = opts?.maxResults || 0;
-    const query = (opts?.query || '').trim();
+    const query = Array.isArray(opts?.query) ? opts.query : (typeof opts?.query === 'string' ? opts.query : '');
     const totalLineCount = typeof opts?.totalLineCount === 'number' ? opts.totalLineCount : null;
     const emptyMessage = (opts?.emptyMessage || '').trim() || 'No linked references.';
 
@@ -4835,31 +3458,26 @@ class Plugin extends AppPlugin {
       const record = g.record || null;
       const recordGuid = record?.guid || null;
       if (!recordGuid) continue;
-      const groupCollapsed = this.isRecordGroupCollapsed(groupSectionId, recordGuid);
+
+      const isCollapsed = this.isRecordGroupCollapsed(recordGuid);
 
       const groupEl = document.createElement('div');
       groupEl.className = 'tlr-group';
-      if (groupCollapsed) groupEl.classList.add('tlr-group-collapsed');
-
-      const rowEl = document.createElement('div');
-      rowEl.className = 'tlr-group-row';
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.type = 'button';
-      toggleBtn.className = 'tlr-btn tlr-group-toggle button-none button-small button-minimal-hover';
-      toggleBtn.dataset.action = 'toggle-record-group';
-      toggleBtn.dataset.groupSectionId = groupSectionId;
-      toggleBtn.dataset.recordGuid = recordGuid;
-      toggleBtn.title = groupCollapsed ? 'Expand' : 'Collapse';
-      toggleBtn.setAttribute('aria-label', groupCollapsed ? 'Expand' : 'Collapse');
-      toggleBtn.setAttribute('aria-expanded', groupCollapsed ? 'false' : 'true');
-      toggleBtn.appendChild(this.buildChevronIcon(groupCollapsed, 'tlr-group-caret'));
+      if (isCollapsed) groupEl.classList.add('tlr-group-collapsed');
+      // Re-apply expanded class so the preview div is visible after a DOM rebuild.
+      if (state?.recordExpandedState?.get?.(recordGuid)?.expanded === true) {
+        groupEl.classList.add('tlr-record-expanded');
+      }
 
       const header = document.createElement('button');
       header.type = 'button';
       header.className = 'tlr-group-header button-normal button-normal-hover';
-      header.dataset.action = 'open-record';
+      header.dataset.action = 'toggle-record-group';
       header.dataset.recordGuid = recordGuid;
+
+      const caret = document.createElement('span');
+      caret.className = 'tlr-group-caret';
+      caret.setAttribute('aria-hidden', 'true');
 
       const title = document.createElement('div');
       title.className = 'tlr-group-title';
@@ -4869,11 +3487,9 @@ class Plugin extends AppPlugin {
       meta.className = 'tlr-group-meta text-details';
       meta.textContent = `${(g.lines || []).length}`;
 
+      header.appendChild(caret);
       header.appendChild(title);
       header.appendChild(meta);
-
-      rowEl.appendChild(toggleBtn);
-      rowEl.appendChild(header);
 
       const linesEl = document.createElement('div');
       linesEl.className = 'tlr-lines';
@@ -4893,7 +3509,7 @@ class Plugin extends AppPlugin {
 
         const lineEl = document.createElement('button');
         lineEl.type = 'button';
-        lineEl.className = 'tlr-line button-none button-minimal-hover';
+        lineEl.className = 'tlr-line button-none';
         lineEl.dataset.action = 'open-line';
         lineEl.dataset.recordGuid = recordGuid;
         lineEl.dataset.lineGuid = line.guid;
@@ -4905,10 +3521,7 @@ class Plugin extends AppPlugin {
         entryEl.appendChild(mainRowEl);
 
         if (state && ctx) {
-          if (ctx.showMoreContext === true) mainRowEl.classList.add('is-context-open');
-          mainRowEl.appendChild(this.buildLinkedContextControls(line.guid, ctx, {
-            showLinkAction: groupSectionId === 'unlinked'
-          }));
+          mainRowEl.appendChild(this.buildLinkedContextControls(line.guid, ctx));
 
           if (ctx.loading === true) {
             const loadingEl = document.createElement('div');
@@ -4927,7 +3540,9 @@ class Plugin extends AppPlugin {
         linesEl.appendChild(entryEl);
       }
 
-      groupEl.appendChild(rowEl);
+      groupEl.appendChild(header);
+      groupEl.appendChild(this.buildExpandRecordBtn(recordGuid, state));
+      groupEl.appendChild(this.buildRecordPreviewEl(recordGuid, state));
       groupEl.appendChild(linesEl);
       container.appendChild(groupEl);
     }
@@ -4940,16 +3555,12 @@ class Plugin extends AppPlugin {
     }
   }
 
-  buildLinkedContextControls(lineGuid, ctx, opts = {}) {
+  buildLinkedContextControls(lineGuid, ctx) {
     const controls = document.createElement('div');
     controls.className = 'tlr-line-actions text-details';
 
     const group = document.createElement('div');
     group.className = 'tlr-line-actions-group';
-
-    if (opts.showLinkAction === true) {
-      group.appendChild(this.buildUnlinkedLinkButton(lineGuid));
-    }
 
     if (ctx?.showMoreContext === true) {
       group.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
@@ -4975,35 +3586,6 @@ class Plugin extends AppPlugin {
 
     controls.appendChild(group);
     return controls;
-  }
-
-  buildUnlinkedLinkButton(lineGuid) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'tlr-unlinked-link-btn button-none button-small button-minimal-hover tooltip';
-    btn.dataset.action = 'link-unlinked';
-    btn.dataset.lineGuid = lineGuid || '';
-    btn.title = 'Link mention';
-    btn.setAttribute('aria-label', 'Link mention');
-    btn.setAttribute('data-tooltip', 'Link mention');
-    btn.setAttribute('data-tooltip-dir', 'top');
-
-    let iconEl = null;
-    try {
-      iconEl = this.ui.createIcon('ti-link');
-    } catch (e) {
-      iconEl = null;
-    }
-
-    if (iconEl) {
-      iconEl.classList.add('tlr-unlinked-link-icon');
-      btn.appendChild(iconEl);
-    } else {
-      btn.textContent = 'Link';
-      btn.classList.add('tlr-unlinked-link-btn-fallback');
-    }
-
-    return btn;
   }
 
   buildLinkedContextButton(action, lineGuid, opts) {
@@ -5070,12 +3652,7 @@ class Plugin extends AppPlugin {
 
     const content = document.createElement('span');
     content.className = 'tlr-line-content';
-    const segments = Array.isArray(line?.segments) ? line.segments : [];
-    if (segments.length > 0) {
-      this.appendSegments(content, segments, query);
-    } else {
-      this.appendHighlightedText(content, this.getLineContentText(line), query);
-    }
+    this.appendSegments(content, line?.segments || [], query);
     container.appendChild(content);
   }
 
@@ -5111,7 +3688,6 @@ class Plugin extends AppPlugin {
       const line = item.line || null;
       const guid = line?.guid || null;
       if (!guid) continue;
-      if (!this.hasRenderableLineContent(line)) continue;
 
       const row = document.createElement('button');
       row.type = 'button';
@@ -5143,76 +3719,56 @@ class Plugin extends AppPlugin {
     return '';
   }
 
-  getSegmentDisplayText(seg) {
-    if (!seg) return '';
-
-    if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code' || seg.type === 'link') {
-      return typeof seg.text === 'string' ? seg.text : '';
-    }
-
-    if (seg.type === 'linkobj') {
-      const link = seg.text?.link || '';
-      return seg.text?.title || link || '';
-    }
-
-    if (seg.type === 'hashtag') {
-      const text = typeof seg.text === 'string' ? seg.text : '';
-      if (!text) return '';
-      return text.startsWith('#') ? text : `#${text}`;
-    }
-
-    if (seg.type === 'datetime') {
-      return this.formatDateTimeSegment(seg.text);
-    }
-
-    if (seg.type === 'mention') {
-      return this.formatMention(typeof seg.text === 'string' ? seg.text : '');
-    }
-
-    if (seg.type === 'ref') {
-      const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
-      const guid = textObj.guid || null;
-      return textObj.title || (guid ? this.resolveRecordName(guid) : '') || '';
-    }
-
-    return typeof seg.text === 'string' ? seg.text : '';
-  }
-
-  getSegmentHref(seg) {
-    if (!seg) return '';
-    if (seg.type === 'link') return typeof seg.text === 'string' ? seg.text : '';
-    if (seg.type === 'linkobj') return seg.text?.link || '';
-    return '';
-  }
-
-  appendSegmentTextElement(container, className, text, query) {
-    if (!container) return;
-    const el = document.createElement('span');
-    el.className = className || '';
-    el.textContent = '';
-    this.appendHighlightedText(el, text, query);
-    container.appendChild(el);
-  }
-
   segmentsToPlainText(segments) {
     if (!Array.isArray(segments) || segments.length === 0) return '';
 
     let out = '';
     for (const seg of segments) {
-      out += this.getSegmentDisplayText(seg);
+      if (!seg) continue;
+
+      if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code' || seg.type === 'link') {
+        if (typeof seg.text === 'string') out += seg.text;
+        continue;
+      }
+
+      if (seg.type === 'linkobj') {
+        const link = seg.text?.link || '';
+        const title = seg.text?.title || link;
+        out += title;
+        continue;
+      }
+
+      if (seg.type === 'hashtag') {
+        const t = typeof seg.text === 'string' ? seg.text : '';
+        if (!t) continue;
+        out += t.startsWith('#') ? t : `#${t}`;
+        continue;
+      }
+
+      if (seg.type === 'datetime') {
+        out += this.formatDateTimeSegment(seg.text);
+        continue;
+      }
+
+      if (seg.type === 'mention') {
+        const guid = typeof seg.text === 'string' ? seg.text : '';
+        out += this.formatMention(guid);
+        continue;
+      }
+
+      if (seg.type === 'ref') {
+        const guid = seg.text?.guid || null;
+        const title = seg.text?.title || (guid ? this.resolveRecordName(guid) : '') || '';
+        out += title;
+        continue;
+      }
+
+      if (typeof seg.text === 'string') {
+        out += seg.text;
+      }
     }
 
     return out;
-  }
-
-  getLineContentText(line) {
-    const segmentText = this.segmentsToPlainText(line?.segments || []);
-    if (segmentText) return segmentText;
-    return typeof line?.text === 'string' ? line.text : '';
-  }
-
-  hasRenderableLineContent(line) {
-    return this.getLineContentText(line).trim().length > 0;
   }
 
   appendHighlightedText(container, text, query) {
@@ -5220,39 +3776,55 @@ class Plugin extends AppPlugin {
     const s = typeof text === 'string' ? text : '';
     if (!s) return;
 
-    const q = typeof query === 'string' ? query.trim() : '';
-    if (!q) {
+    // Accept either a phrases array or a legacy string (split on space)
+    const rawPhrases = Array.isArray(query)
+      ? query.map((p) => String(p).trim()).filter(Boolean)
+      : (typeof query === 'string' ? query.split(' ').map((p) => p.trim()).filter(Boolean) : []);
+
+    if (rawPhrases.length === 0) {
       container.appendChild(document.createTextNode(s));
       return;
     }
 
-    const hayLower = s.toLowerCase();
-    const needleLower = q.toLowerCase();
-    if (!needleLower) {
-      container.appendChild(document.createTextNode(s));
-      return;
-    }
-
-    let idx = 0;
-    while (idx < s.length) {
-      const next = hayLower.indexOf(needleLower, idx);
-      if (next === -1) break;
-
-      if (next > idx) {
-        container.appendChild(document.createTextNode(s.slice(idx, next)));
+    // Collect all word-start match ranges for all phrases
+    const ranges = [];
+    for (const phrase of rawPhrases) {
+      const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(?:^|(?<=[^a-zA-Z0-9]))${escaped}`, 'gi');
+      let m;
+      while ((m = re.exec(s)) !== null) {
+        const start = m.index;
+        ranges.push([start, start + phrase.length]);
       }
+    }
 
+    if (ranges.length === 0) {
+      container.appendChild(document.createTextNode(s));
+      return;
+    }
+
+    // Sort and merge overlapping ranges
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [ranges[0].slice()];
+    for (let i = 1; i < ranges.length; i++) {
+      const last = merged[merged.length - 1];
+      if (ranges[i][0] <= last[1]) {
+        last[1] = Math.max(last[1], ranges[i][1]);
+      } else {
+        merged.push(ranges[i].slice());
+      }
+    }
+
+    let pos = 0;
+    for (const [start, end] of merged) {
+      if (start > pos) container.appendChild(document.createTextNode(s.slice(pos, start)));
       const mark = document.createElement('mark');
       mark.className = 'tlr-search-mark';
-      mark.textContent = s.slice(next, next + needleLower.length);
+      mark.textContent = s.slice(start, end);
       container.appendChild(mark);
-
-      idx = next + needleLower.length;
+      pos = end;
     }
-
-    if (idx < s.length) {
-      container.appendChild(document.createTextNode(s.slice(idx)));
-    }
+    if (pos < s.length) container.appendChild(document.createTextNode(s.slice(pos)));
   }
 
   appendSegments(container, segments, query) {
@@ -5264,25 +3836,23 @@ class Plugin extends AppPlugin {
 
     for (const seg of segments) {
       if (!seg) continue;
-      const text = this.getSegmentDisplayText(seg);
 
       if (seg.type === 'text') {
-        this.appendHighlightedText(container, text, query);
+        this.appendHighlightedText(container, typeof seg.text === 'string' ? seg.text : '', query);
         continue;
       }
 
       if (seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code') {
-        this.appendSegmentTextElement(
-          container,
-          seg.type === 'bold' ? 'tlr-seg-bold' : seg.type === 'italic' ? 'tlr-seg-italic' : 'tlr-seg-code',
-          text,
-          query
-        );
+        const el = document.createElement('span');
+        el.className = seg.type === 'bold' ? 'tlr-seg-bold' : seg.type === 'italic' ? 'tlr-seg-italic' : 'tlr-seg-code';
+        el.textContent = '';
+        this.appendHighlightedText(el, typeof seg.text === 'string' ? seg.text : '', query);
+        container.appendChild(el);
         continue;
       }
 
       if (seg.type === 'link') {
-        const url = this.getSegmentHref(seg);
+        const url = typeof seg.text === 'string' ? seg.text : '';
         if (!url) continue;
         const a = document.createElement('a');
         a.href = url;
@@ -5290,13 +3860,14 @@ class Plugin extends AppPlugin {
         a.rel = 'noopener noreferrer';
         a.className = 'tlr-seg-link';
         a.textContent = '';
-        this.appendHighlightedText(a, text, query);
+        this.appendHighlightedText(a, url, query);
         container.appendChild(a);
         continue;
       }
 
       if (seg.type === 'linkobj') {
-        const link = this.getSegmentHref(seg);
+        const link = seg.text?.link || '';
+        const title = seg.text?.title || link;
         if (!link) continue;
         const a = document.createElement('a');
         a.href = link;
@@ -5304,41 +3875,63 @@ class Plugin extends AppPlugin {
         a.rel = 'noopener noreferrer';
         a.className = 'tlr-seg-link';
         a.textContent = '';
-        this.appendHighlightedText(a, text, query);
+        this.appendHighlightedText(a, title, query);
         container.appendChild(a);
         continue;
       }
 
       if (seg.type === 'hashtag') {
-        this.appendSegmentTextElement(container, 'tlr-seg-hashtag', text, query);
+        const t = typeof seg.text === 'string' ? seg.text : '';
+        if (!t) continue;
+        const el = document.createElement('span');
+        el.className = 'tlr-seg-hashtag';
+        const tag = t.startsWith('#') ? t : `#${t}`;
+        el.textContent = '';
+        this.appendHighlightedText(el, tag, query);
+        container.appendChild(el);
         continue;
       }
 
       if (seg.type === 'datetime') {
-        this.appendSegmentTextElement(container, 'tlr-seg-datetime', text, query);
+        const el = document.createElement('span');
+        el.className = 'tlr-seg-datetime';
+        const text = this.formatDateTimeSegment(seg.text);
+        el.textContent = '';
+        this.appendHighlightedText(el, text, query);
+        container.appendChild(el);
         continue;
       }
 
       if (seg.type === 'mention') {
-        this.appendSegmentTextElement(container, 'tlr-seg-mention', text, query);
+        const el = document.createElement('span');
+        el.className = 'tlr-seg-mention';
+        const guid = typeof seg.text === 'string' ? seg.text : '';
+        const text = this.formatMention(guid);
+        el.textContent = '';
+        this.appendHighlightedText(el, text, query);
+        container.appendChild(el);
         continue;
       }
 
       if (seg.type === 'ref') {
-        const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
-        const guid = textObj.guid || null;
+        const guid = seg.text?.guid || null;
         if (!guid) continue;
         const el = document.createElement('span');
         el.className = 'tlr-seg-ref';
         el.dataset.action = 'open-ref';
         el.dataset.refGuid = guid;
+
+        const title = seg.text?.title || this.resolveRecordName(guid) || '[link]';
         el.textContent = '';
-        this.appendHighlightedText(el, text || '[link]', query);
+        this.appendHighlightedText(el, title, query);
         container.appendChild(el);
         continue;
       }
 
-      if (text) this.appendHighlightedText(container, text, query);
+      // Fallback: render as plain text when possible.
+      if (typeof seg.text === 'string' && seg.text) {
+        this.appendHighlightedText(container, seg.text, query);
+      }
     }
   }
 
@@ -5376,62 +3969,43 @@ class Plugin extends AppPlugin {
   injectCss() {
     this.ui.injectCSS(`
       .tlr-footer {
-        --tlr-child-indent: 26px;
-        --tlr-context-rail-gap: 8px;
-        --tlr-text-default: var(--text-default, var(--text, inherit));
-        --tlr-text-muted: var(--text-muted, var(--text-secondary, var(--tlr-text-default)));
-        --tlr-border-color: var(--divider-color, var(--cmdpal-border-color, var(--border-subtle, transparent)));
-        --tlr-hover-bg: var(--button-normal-hover-color, var(--bg-hover, transparent));
-        --tlr-selected-bg: var(--bg-selected, var(--tlr-hover-bg));
-        margin-top: 14px;
-        color: var(--tlr-text-default);
+        margin-top: 16px;
+        color: #e8e0d0;
         font-size: 13px;
+        background-color: rgba(30, 30, 36, 0.60);
+        border: 1px solid rgba(255, 255, 255, 0.10);
+        border-radius: 10px;
+        padding: 12px 16px 10px;
       }
 
       .tlr-header {
         display: flex;
         align-items: center;
-        gap: 6px;
-        min-height: 20px;
-        margin-bottom: 0;
-      }
-
-      .tlr-header-field {
-        padding-bottom: 0;
-      }
-
-      .tlr-header-main {
-        flex: 1 1 auto;
-        min-width: 0;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .tlr-header-controls {
-        flex: 0 0 auto;
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
+        gap: 8px;
+        min-height: 30px;
+        margin-bottom: 8px;
       }
 
       .tlr-title {
-        flex: 0 0 auto;
-        min-width: 0;
+        color: #e8e0d0;
+        font-weight: 600;
+        font-size: 13px;
         white-space: nowrap;
       }
 
       .tlr-count {
-        flex: 1 1 auto;
-        color: var(--tlr-text-muted);
+        color: #8a7e6a;
         font-size: 12px;
-        line-height: 21px;
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
         overflow: hidden;
         text-overflow: ellipsis;
         min-width: 0;
-        opacity: 0.92;
+      }
+
+      .tlr-spacer {
+        flex: 1 1 auto;
+        min-width: 8px;
       }
 
       .tlr-btn {
@@ -5447,34 +4021,6 @@ class Plugin extends AppPlugin {
         align-items: center;
         justify-content: center;
         min-width: 30px;
-      }
-
-      .tlr-filter-wrap {
-        position: relative;
-        display: inline-flex;
-        align-items: center;
-      }
-
-      .tlr-filter-toggle {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 30px;
-        min-height: 24px;
-        border: 1px solid transparent;
-        border-radius: var(--button-radius, 5px);
-        transition: background-color 0.15s, border-color 0.15s, color 0.15s;
-      }
-
-      .tlr-filter-toggle.is-active {
-        background: var(--button-minimal-bg-active-color, var(--tlr-selected-bg));
-        border-color: var(--button-minimal-hover-color, var(--button-minimal-border-color, transparent));
-        color: var(--button-minimal-fg-color, var(--tlr-text-default));
-      }
-
-      .tlr-filter-toggle.is-active .id--filter-icon {
-        color: var(--button-primary-icon-color, currentColor);
-        font-weight: 700;
       }
 
       .tlr-sort-wrap {
@@ -5551,85 +4097,12 @@ class Plugin extends AppPlugin {
         right: 0;
         min-width: 260px;
         max-width: min(90vw, 340px);
-        z-index: 140;
-      }
-
-      .tlr-sort-menu,
-      .tlr-search-autocomplete {
         padding: 6px;
-        border-radius: var(--radius-normal, 8px);
-        border: 1px solid var(--cmdpal-border-color, var(--tlr-border-color));
-        background: var(--cmdpal-bg-color, var(--panel-bg-color, var(--bg-default, var(--bg-panel, transparent))));
+        border-radius: 5px;
+        border: 1px solid var(--cmdpal-border-color, var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12))));
+        background: var(--cmdpal-bg-color, var(--panel-bg-color, var(--bg-default, var(--bg-panel, rgba(22, 26, 24, 0.96)))));
         box-shadow: var(--cmdpal-box-shadow, 0 12px 34px rgba(0, 0, 0, 0.18));
-      }
-
-      .tlr-search-autocomplete {
-        display: none;
-        position: absolute;
-        top: calc(100% + 6px);
-        left: 0;
-        width: min(420px, max(260px, 100%));
-        max-width: min(90vw, 420px);
-        z-index: 140;
-      }
-
-      .tlr-search-autocomplete .autocomplete,
-      .tlr-sort-menu .autocomplete {
-        position: relative;
-        overflow: hidden;
-        max-height: 300px;
-      }
-
-      .tlr-search-autocomplete .vscroll-node,
-      .tlr-sort-menu .vscroll-node {
-        max-height: 300px;
-        overflow-y: auto;
-        scrollbar-width: none;
-        -ms-overflow-style: none;
-        touch-action: pan-y;
-      }
-
-      .tlr-search-autocomplete .vscroll-node::-webkit-scrollbar,
-      .tlr-sort-menu .vscroll-node::-webkit-scrollbar {
-        width: 0;
-        height: 0;
-      }
-
-      .tlr-search-autocomplete .vcontent,
-      .tlr-sort-menu .vcontent {
-        position: relative;
-      }
-
-      .tlr-search-autocomplete .vscrollbar,
-      .tlr-sort-menu .vscrollbar {
-        position: absolute;
-        right: 0;
-        top: 0;
-        bottom: 0;
-        width: 15px;
-        user-select: none;
-        display: none;
-      }
-
-      .tlr-search-autocomplete .vscrollbar.has-thumb,
-      .tlr-sort-menu .vscrollbar.has-thumb {
-        display: block;
-      }
-
-      .tlr-search-autocomplete .vscrollbar-thumb,
-      .tlr-sort-menu .vscrollbar-thumb {
-        min-height: 16px;
-      }
-
-      .tlr-search-autocomplete .autocomplete--option,
-      .tlr-sort-menu .autocomplete--option {
-        border-radius: 6px;
-      }
-
-      .tlr-search-autocomplete .autocomplete--option-right,
-      .tlr-sort-menu .autocomplete--option-right {
-        color: var(--tlr-text-muted);
-        font-size: 11px;
+        z-index: 120;
       }
 
       .tlr-sort-open .tlr-sort-menu {
@@ -5637,8 +4110,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-sort-menu-title {
-        margin: 0;
-        padding: 8px 10px 4px;
+        margin: 2px 6px 6px;
         font-size: 11px;
       }
 
@@ -5648,7 +4120,11 @@ class Plugin extends AppPlugin {
         align-items: center;
         line-height: 1.35;
         text-align: left;
-        color: var(--tlr-text-default);
+      }
+
+      .tlr-sort-option.is-active {
+        background: var(--cmdpal-selected-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
+        color: var(--cmdpal-selected-fg-color, var(--text, inherit));
       }
 
       .tlr-sort-option-label {
@@ -5656,220 +4132,163 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-sort-menu-divider {
-        margin: 8px 0;
-        border-top: 1px solid var(--cmdpal-border-color, var(--tlr-border-color));
+        margin: 10px 0;
+        border-top: 1px solid var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
       }
 
-      .tlr-search-row {
-        display: none;
-        width: 100%;
-        padding-top: 0;
+      .tlr-sort-dir-row {
+        display: flex;
+        gap: 8px;
       }
 
-      .tlr-search-row-inner {
-        width: 100%;
-      }
-
-      .tlr-search-open .tlr-search-row {
-        display: block;
-      }
-
-      .tlr-search-wrap {
-        position: relative;
-        width: 100%;
-      }
-
-      .tlr-query-input {
-        position: relative;
-        width: 100%;
-      }
-
-      .tlr-query-input .query-input--wrapper {
-        position: relative;
-        display: block;
-      }
-
-      .tlr-query-input .query-input--highlight {
-        display: none;
-      }
-
-      .tlr-search-input {
-        width: 100%;
-        max-width: none;
-        min-width: 0;
-        position: relative;
-        min-height: 34px;
-        border: 1px solid var(--input-border-color, var(--tlr-border-color)) !important;
-        outline: none !important;
-        background: var(--input-bg-color, var(--cmdpal-input-bg-color, var(--bg-panel, transparent))) !important;
-        color: var(--input-fg-color, var(--tlr-text-default)) !important;
-        -webkit-text-fill-color: var(--input-fg-color, var(--tlr-text-default)) !important;
-        caret-color: var(--input-fg-color, var(--tlr-text-default));
-        opacity: 1;
-        font-size: 13px;
-        line-height: 22px;
-        font-family: var(--ed-variable-width-font, inherit);
-        font-weight: 400;
-        padding: 5px 54px 5px 12px;
-        border-radius: var(--radius-normal, 8px);
-        box-shadow: none !important;
-        transition: border-color 0.15s, box-shadow 0.15s, outline-color 0.15s;
-      }
-
-      .tlr-search-input::placeholder {
-        color: var(--text-xmuted, var(--tlr-text-muted));
-      }
-
-      .tlr-search-input:focus {
-        border: var(--input-border-focus, 1px solid var(--input-border-color, var(--tlr-border-color))) !important;
-        outline: var(--input-border-focus, 1px solid var(--input-border-color, var(--tlr-border-color))) !important;
-        box-shadow: var(--input-border-shadow, none) !important;
-      }
-
-      .tlr-search-autocomplete-open .tlr-search-autocomplete {
-        display: block;
-      }
-
-      .tlr-search-clear,
-      .tlr-search-refresh {
-        display: none;
-        position: absolute;
-        right: 6px;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 18px;
-        height: 18px;
-        padding: 0;
-        border: none;
-        background: transparent;
-        border-radius: 50%;
-        cursor: pointer;
-        z-index: 2;
-        font-size: 12px;
-        line-height: 1;
-        color: var(--tlr-text-muted);
-        opacity: 0.7;
-        transition: opacity 0.15s, background 0.15s, color 0.15s;
-        align-items: center;
+      .tlr-sort-dir-btn {
+        flex: 1 1 auto;
         justify-content: center;
       }
 
-      .tlr-search-clear:hover,
-      .tlr-search-refresh:hover {
+      .tlr-sort-dir-btn.is-active {
+        background: var(--cmdpal-selected-bg-color, var(--bg-hover, rgba(0, 0, 0, 0.04)));
+        color: var(--cmdpal-selected-fg-color, var(--text, inherit));
+      }
+
+      .tlr-search-wrap {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px;
+        height: 30px;
+        min-height: 30px;
+        border: 1px solid var(--input-border-color, var(--divider-color, var(--cmdpal-border-color, var(--border-subtle, rgba(0, 0, 0, 0.12)))));
+        border-radius: 3px;
+        background: var(--input-bg-color, var(--cmdpal-input-bg-color, var(--bg-panel, transparent)));
+        box-sizing: border-box;
+      }
+
+      .tlr-search-open .tlr-search-wrap { display: flex; }
+      .tlr-search-open .tlr-search-toggle { display: none; }
+
+      .tlr-empty-compact .tlr-search-toggle,
+      .tlr-empty-compact .tlr-search-wrap,
+      .tlr-empty-compact .tlr-sort-wrap {
+        display: none !important;
+      }
+
+      .tlr-empty-compact .tlr-header {
+        margin-bottom: 6px;
+      }
+
+      .tlr-search-icon {
+        display: flex;
+        align-items: center;
+        color: #8a7e6a;
+      }
+
+      .tlr-search-input {
+        width: clamp(150px, 22vw, 260px);
+        max-width: none;
+        height: 20px;
+        min-height: 20px;
+        border: 0;
+        outline: none;
+        background: transparent;
+        color: var(--input-fg-color, var(--text-default, var(--text, inherit)));
+        -webkit-text-fill-color: var(--input-fg-color, var(--text-default, var(--text, inherit)));
+        caret-color: var(--input-fg-color, var(--text-default, var(--text, inherit)));
         opacity: 1;
-        background: var(--tlr-hover-bg);
+        font-size: 13px;
+        line-height: 20px;
+        padding: 0;
+      }
+
+      .tlr-search-input::placeholder {
+        color: #8a7e6a;
+      }
+
+      .tlr-search-clear {
+        min-width: 20px;
+        padding: 0 4px;
+        color: #8a7e6a;
       }
 
       .tlr-toggle {
-        flex: 0 0 auto;
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        color: var(--tlr-text-muted);
+        width: 26px;
+        padding: 4px 0;
+        text-align: center;
+        font-weight: 700;
       }
 
-      .tlr-body {
-        display: block;
-      }
+      .tlr-body { display: block; }
 
-      .tlr-collapsed .tlr-body,
-      .tlr-collapsed .tlr-search-row {
-        display: none;
-      }
+      .tlr-collapsed .tlr-body { display: none; }
 
       .tlr-empty,
       .tlr-note,
       .tlr-error {
-        color: var(--tlr-text-muted);
-        padding: 6px 0;
+        color: #8a7e6a;
+        padding: 4px 0;
         font-size: 12px;
       }
 
-      .tlr-section-header {
+      .tlr-empty-compact-card {
+        padding: 6px 0 2px;
+      }
+
+      .tlr-empty-compact-row {
         display: flex;
         align-items: center;
-        gap: 8px;
-        margin: 0;
+        justify-content: space-between;
+        gap: 12px;
       }
 
-      .tlr-section-body {
-        padding-top: 8px;
+      .tlr-empty-compact-copy {
+        min-width: 0;
       }
 
-      .tlr-section-toggle {
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        color: var(--tlr-text-muted);
+      .tlr-empty-compact-btn {
         flex: 0 0 auto;
       }
 
       .tlr-section-title {
-        flex: 1 1 auto;
-        min-width: 0;
+        margin-top: 16px;
+        margin-bottom: 8px;
         font-size: 12px;
         font-weight: 650;
-        color: var(--tlr-text-muted);
+        color: #8a7e6a;
         text-transform: none;
         letter-spacing: 0;
       }
 
-      .tlr-section-meta {
-        flex: 0 0 auto;
-        color: var(--tlr-text-muted);
-        font-size: 11px;
-        font-variant-numeric: tabular-nums;
-        white-space: nowrap;
-      }
-
-      .tlr-section-collapsed .tlr-section-body {
-        display: none;
-      }
-
       .tlr-divider {
-        margin: 12px 0 8px;
-        border-top: 1px solid var(--tlr-border-color);
+        margin: 14px 0 10px;
+        border-top: 1px solid var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
       }
 
-      .tlr-prop-group { margin: 10px 0 12px; }
-
-      .tlr-prop-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .tlr-prop-toggle {
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        text-align: center;
-        font-weight: 700;
-        color: var(--tlr-text-muted);
-        flex: 0 0 auto;
-      }
+      .tlr-prop-group { margin: 0 0 2px; }
 
       .tlr-prop-header {
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        justify-content: flex-start;
         gap: 10px;
         width: 100%;
-        flex: 1 1 auto;
-        padding: 7px 10px;
+        padding: 5px 6px;
         text-align: left;
       }
 
-      .tlr-fold-icon {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+      .tlr-prop-caret {
+        width: 0;
+        height: 0;
+        border-top: 5px solid transparent;
+        border-bottom: 5px solid transparent;
+        border-left: 6px solid var(--text-muted, rgba(0, 0, 0, 0.6));
+        opacity: 0.85;
+        transform: rotate(90deg);
+        transition: transform 140ms ease;
         flex: 0 0 auto;
-        color: var(--tlr-text-muted);
-        opacity: 0.9;
-        font-size: 14px;
-        line-height: 1;
-        transition: transform 140ms ease, color 140ms ease, opacity 140ms ease;
+      }
+
+      .tlr-prop-collapsed .tlr-prop-caret {
+        transform: rotate(0deg);
       }
 
       .tlr-prop-collapsed .tlr-prop-records {
@@ -5877,7 +4296,9 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-title {
+        color: #e8e0d0;
         font-weight: 600;
+        font-size: 13px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: normal;
@@ -5887,28 +4308,21 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-meta {
-        color: var(--tlr-text-muted);
+        color: #8a7e6a;
         font-size: 12px;
         margin-left: auto;
         flex: 0 0 auto;
       }
 
-      .tlr-prop-records {
-        margin-top: 10px;
-        margin-left: var(--tlr-child-indent);
-        padding-left: 10px;
-        border-left: 1px solid var(--tlr-border-color);
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
+      .tlr-prop-records { margin-top: 2px; display: flex; flex-direction: column; gap: 2px; }
 
       .tlr-prop-record {
         display: block;
         width: 100%;
-        padding: 7px 10px;
+        padding: 5px 6px;
         text-align: left;
-        color: var(--ed-link-color, var(--link-color, var(--accent, inherit)));
+        color: #e8e0d0;
+        font-size: 13px;
         line-height: 1.4;
         white-space: normal;
         word-break: break-word;
@@ -5916,45 +4330,26 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-record:hover {
-        color: var(--ed-link-hover-color, var(--link-hover-color, var(--ed-link-color, var(--link-color, var(--accent, inherit)))));
-        text-decoration: underline;
+        color: #fff;
+        text-decoration: none;
       }
 
-      .tlr-group { margin: 10px 0 12px; }
-
-      .tlr-group-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .tlr-group-toggle {
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        text-align: center;
-        font-weight: 700;
-        color: var(--tlr-text-muted);
-        flex: 0 0 auto;
-      }
+      .tlr-group { margin: 0 0 2px; }
 
       .tlr-group-header {
         width: 100%;
-        flex: 1 1 auto;
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        padding: 7px 10px;
+        padding: 5px 6px;
         text-align: left;
       }
 
-      .tlr-group-collapsed .tlr-lines {
-        display: none;
-      }
-
       .tlr-group-title {
+        color: #e8e0d0;
         font-weight: 600;
+        font-size: 13px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: normal;
@@ -5963,61 +4358,38 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-group-meta {
-        color: var(--tlr-text-muted);
+        color: #8a7e6a;
         font-size: 12px;
         flex: 0 0 auto;
       }
 
-      .tlr-lines {
-        margin-top: 10px;
-        margin-left: var(--tlr-child-indent);
-        padding-left: 10px;
-        border-left: 1px solid var(--tlr-border-color);
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
+      .tlr-lines { margin-top: 2px; display: flex; flex-direction: column; gap: 2px; }
 
       .tlr-line-entry {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: 2px;
       }
 
       .tlr-line-main {
         display: flex;
         align-items: flex-start;
         gap: 4px;
-        border-radius: var(--radius-normal, 8px);
-        border: 1px solid transparent;
-        background: transparent;
-        transition: background-color 0.15s, border-color 0.15s;
-      }
-
-      .tlr-line-main:hover,
-      .tlr-line-main:focus-within {
-        background: var(--tlr-hover-bg);
-        border-color: var(--tlr-border-color);
-      }
-
-      .tlr-line-main.is-context-open {
-        background: var(--tlr-selected-bg);
-        border-color: var(--tlr-border-color);
       }
 
       .tlr-line {
         display: block;
         flex: 1 1 auto;
         min-width: 0;
-        padding: 8px 10px 8px 12px;
+        padding: 5px 6px;
         text-align: left;
-        color: var(--tlr-text-default);
+        color: var(--text, inherit);
+        font-size: 13px;
         line-height: 1.35;
-        border-radius: inherit;
       }
 
       .tlr-prefix {
-        color: var(--tlr-text-muted);
+        color: #8a7e6a;
       }
 
       .tlr-line-content {
@@ -6031,8 +4403,7 @@ class Plugin extends AppPlugin {
         align-items: center;
         gap: 8px;
         flex: 0 0 auto;
-        padding: 6px 8px 6px 0;
-        min-height: 100%;
+        padding: 0;
       }
 
       .tlr-line-actions-group {
@@ -6043,35 +4414,6 @@ class Plugin extends AppPlugin {
         flex: 0 0 auto;
       }
 
-      .tlr-unlinked-link-btn {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 24px;
-        height: 24px;
-        padding: 0;
-        border-radius: 6px;
-        color: var(--tlr-text-muted);
-        line-height: 1;
-      }
-
-      .tlr-unlinked-link-btn:hover {
-        color: var(--tlr-text-default);
-        background: var(--tlr-selected-bg);
-      }
-
-      .tlr-unlinked-link-icon {
-        width: 14px;
-        height: 14px;
-      }
-
-      .tlr-unlinked-link-btn-fallback {
-        width: auto;
-        min-width: 40px;
-        padding: 0 8px;
-        font-size: 12px;
-      }
-
       .tlr-context-btn {
         display: inline-flex;
         align-items: center;
@@ -6080,13 +4422,13 @@ class Plugin extends AppPlugin {
         height: 24px;
         padding: 0;
         border-radius: 6px;
-        color: var(--tlr-text-muted);
+        color: var(--text-muted, rgba(0, 0, 0, 0.72));
       }
 
       .tlr-context-btn:hover:not(:disabled),
       .tlr-context-btn.is-active {
-        color: var(--tlr-text-default);
-        background: var(--tlr-selected-bg);
+        color: var(--text-default, var(--text, inherit));
+        background: var(--bg-selected, var(--bg-hover, rgba(0, 0, 0, 0.06)));
       }
 
       .tlr-context-btn:disabled {
@@ -6135,26 +4477,19 @@ class Plugin extends AppPlugin {
       .tlr-context-list {
         display: flex;
         flex-direction: column;
-        gap: 3px;
-        margin-left: 0;
-        padding-left: 0;
+        gap: 2px;
       }
 
       .tlr-context-line {
         display: block;
         width: 100%;
-        padding: 5px 10px 5px calc(12px + var(--tlr-context-indent, 0px));
+        padding: 6px 10px 6px calc(10px + var(--tlr-context-indent, 0px));
         text-align: left;
-        color: var(--tlr-text-default);
+        color: var(--text-secondary, var(--text-subtle, var(--text, inherit)));
+        opacity: 0.75;
         line-height: 1.35;
-        border-left: 1px solid var(--tlr-border-color);
-        border-radius: 6px;
-        transition: background-color 0.15s, border-color 0.15s;
-      }
-
-      .tlr-context-line:hover,
-      .tlr-context-line:focus-visible {
-        background: var(--tlr-hover-bg);
+        border-left: 2px solid rgba(255, 255, 255, 0.08);
+        border-radius: 0 3px 3px 0;
       }
 
       .tlr-context-note {
@@ -6166,15 +4501,15 @@ class Plugin extends AppPlugin {
         align-items: center;
         padding: 1px 6px;
         border-radius: 999px;
-        border: 1px solid var(--tlr-border-color);
-        background: var(--tlr-hover-bg);
-        color: var(--tlr-text-muted);
+        border: 1px solid var(--divider-color, var(--border-subtle, rgba(0, 0, 0, 0.12)));
+        background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+        color: var(--text-muted, rgba(0, 0, 0, 0.68));
         font-size: 11px;
         vertical-align: middle;
       }
 
       .tlr-live-badge.is-new {
-        color: var(--tlr-text-default);
+        color: var(--text-default, var(--text, inherit));
       }
 
       .tlr-live-badge.is-remote {
@@ -6207,35 +4542,329 @@ class Plugin extends AppPlugin {
         line-height: inherit;
       }
 
-      .tlr-loading .tlr-search-wrap { opacity: 0.78; }
+      .tlr-loading .tlr-search-toggle { opacity: 0.6; cursor: default; }
       .tlr-loading .tlr-sort-toggle { opacity: 0.6; cursor: default; }
 
+      /* Collapsible section blocks */
+      .tlr-section-block { margin-bottom: 4px; }
+      .tlr-section-header-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .tlr-section-header {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex: 1;
+        min-width: 0;
+        padding: 4px 0;
+        font-size: 0.8em;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        user-select: none;
+        background: none;
+        border: none;
+        color: inherit;
+        opacity: 0.7;
+      }
+      .tlr-section-header:hover { opacity: 1; }
+      .tlr-section-title-text { flex: 1; text-align: left; }
+      .tlr-section-count { margin-left: 2px; }
+      .tlr-section-caret {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+      }
+      .tlr-section-caret::before {
+        content: '';
+        display: block;
+        width: 0;
+        height: 0;
+        margin: 4px auto 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid currentColor;
+        transition: transform 0.15s;
+      }
+      .tlr-section-collapsed .tlr-section-caret::before { transform: rotate(-90deg); }
+      .tlr-section-body { overflow: hidden; }
+      .tlr-section-collapsed .tlr-section-body { display: none; }
+
+      /* Collapsible group headers (linked + unlinked per-page) */
+      .tlr-group-header {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        text-align: left;
+      }
+      .tlr-group-title { flex: 1; text-align: left; }
+      .tlr-group-caret {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+      }
+      .tlr-group-caret::before {
+        content: '';
+        display: block;
+        width: 0;
+        height: 0;
+        margin: 3px auto 0;
+        border-left: 3px solid transparent;
+        border-right: 3px solid transparent;
+        border-top: 4px solid currentColor;
+        transition: transform 0.15s;
+      }
+      .tlr-group-collapsed .tlr-group-caret::before { transform: rotate(-90deg); }
+      .tlr-group-collapsed .tlr-lines { display: none; }
+
+      /* Inline actions for unlinked refs: right-aligned inside tlr-line-main */
+      .tlr-unlinked-actions-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+        margin-left: auto;
+      }
+      .tlr-unlinked-actions-row .tlr-line-actions { margin: 0; }
+
+      /* Link button */
+      .tlr-link-btn {
+        flex-shrink: 0;
+        font-size: 0.8em;
+        color: var(--accent, var(--link-color, #4a90e2));
+        padding: 0;
+        background: none;
+        border: none;
+        cursor: pointer;
+        text-decoration: underline;
+      }
+      .tlr-link-btn:hover { opacity: 0.75; }
+      .tlr-link-all-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.8em;
+        flex-shrink: 0;
+        color: var(--accent, var(--link-color, #4a90e2));
+        padding: 0;
+        background: none;
+        border: none;
+        cursor: pointer;
+        text-decoration: underline;
+        text-transform: none;
+        letter-spacing: normal;
+        font-weight: normal;
+        opacity: 0.8;
+      }
+      .tlr-link-all-btn:hover { opacity: 1; }
+      .tlr-link-all-count { text-decoration: none; }
+
+      /* Filter chips */
+      .tlr-chips-row {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 4px;
+        padding: 0 8px 6px;
+        min-height: 0;
+      }
+      .tlr-chips-row:empty { padding-bottom: 0; }
+      .tlr-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        padding: 1px 6px 1px 8px;
+        border-radius: 999px;
+        font-size: 0.8em;
+        background: var(--accent, var(--link-color, #4a90e2));
+        color: var(--accent-fg, #fff);
+        line-height: 1.6;
+      }
+      .tlr-chip-remove {
+        cursor: pointer;
+        opacity: 0.7;
+        font-size: 1.1em;
+        line-height: 1;
+        padding: 0 1px;
+        color: inherit;
+      }
+      .tlr-chip-remove:hover { opacity: 1; }
+
       @media (max-width: 760px) {
-        .tlr-footer {
-          --tlr-child-indent: 22px;
-          --tlr-context-rail-gap: 6px;
-        }
-
         .tlr-header {
-          gap: 8px;
-          align-items: flex-start;
-        }
-
-        .tlr-header-main {
-          min-width: 0;
-        }
-
-        .tlr-count {
-          min-width: 0;
+          flex-wrap: wrap;
+          row-gap: 8px;
         }
 
         .tlr-sort-menu {
-          right: 0;
-          left: auto;
+          right: auto;
+          left: 0;
           min-width: 240px;
           max-width: min(92vw, 320px);
         }
-        .tlr-search-input { max-width: none; }
+
+        .tlr-search-input {
+          width: min(58vw, 220px);
+          max-width: none;
+        }
+      }
+
+      .tlr-prop-record-wrap {
+        display: flex;
+        flex-direction: column;
+      }
+      .tlr-prop-record-wrap .tlr-record-preview {
+        margin-left: 10px;
+      }
+
+      /* ---- Inline record preview ---- */
+      .tlr-expand-record-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0;
+        margin: 0;
+        border-radius: 0;
+        font-size: 12px;
+        color: var(--text-muted, rgba(0,0,0,0.6));
+        cursor: pointer;
+        transition: color 0.1s;
+        background: none;
+        border: none;
+        font-weight: 600;
+        min-width: auto;
+        line-height: 1;
+      }
+      .tlr-expand-record-btn:hover {
+        color: var(--text-default, inherit);
+      }
+      .tlr-expand-record-btn.is-expanded {
+        color: var(--color-primary-400, var(--ed-link-color, var(--link-color, var(--accent, inherit))));
+      }
+      .tlr-expand-glyph {
+        display: inline-block;
+        width: 0;
+        height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid currentColor;
+        transition: transform 0.15s;
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+      .tlr-expand-record-btn.is-expanded .tlr-expand-glyph {
+        transform: rotate(0deg);
+      }
+      .tlr-expand-record-btn:not(.is-expanded) .tlr-expand-glyph {
+        transform: rotate(-90deg);
+      }
+      .tlr-expand-label {
+        line-height: 1;
+        letter-spacing: 0.01em;
+      }
+      .tlr-record-preview {
+        display: none;
+        flex-direction: column;
+        margin: 4px 0 6px 10px;
+        border-left: 2px solid rgba(255, 255, 255, 0.08);
+        padding-left: 8px;
+        gap: 2px;
+      }
+      .tlr-record-expanded .tlr-record-preview {
+        display: flex;
+      }
+      .tlr-expand-line {
+        display: block;
+        width: 100%;
+        padding: 5px 8px;
+        text-align: left;
+        color: var(--text-secondary, var(--text-subtle, var(--text, inherit)));
+        line-height: 1.4;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: background 0.1s, color 0.1s;
+      }
+      .tlr-expand-line:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-default, inherit);
+      }
+      .tlr-expand-empty {
+        padding: 6px 8px;
+        font-size: 12px;
+        color: var(--text-muted, rgba(0,0,0,0.5));
+        font-style: italic;
+      }
+      .tlr-expand-loading {
+        padding: 6px 8px;
+      }
+      .tlr-expand-more {
+        display: block;
+        padding: 4px 8px;
+        font-size: 11px;
+        color: var(--ed-link-color, var(--link-color, var(--accent, inherit)));
+        text-align: left;
+        margin-top: 2px;
+      }
+      .tlr-expand-more:hover {
+        text-decoration: underline;
+      }
+
+      /* ---- Tree node rendering ---- */
+      .tlr-preview-node {
+        display: flex;
+        flex-direction: column;
+      }
+      .tlr-preview-row {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding-left: calc(var(--tlr-depth, 0) * 16px);
+      }
+      .tlr-preview-toggle {
+        width: 14px;
+        min-width: 14px;
+        height: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        line-height: 1;
+        color: var(--text-muted, rgba(0,0,0,0.6));
+        padding: 0;
+        cursor: pointer;
+        font-size: 8px;
+        transition: color 0.1s;
+      }
+      .tlr-preview-toggle:hover {
+        color: var(--text-default, inherit);
+      }
+      .tlr-preview-arrow {
+        display: block;
+        width: 0;
+        height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid currentColor;
+        transition: transform 0.12s ease;
+      }
+      .tlr-preview-arrow.is-collapsed {
+        transform: rotate(-90deg);
+      }
+      .tlr-preview-children {
+        display: flex;
+        flex-direction: column;
+      }
+      .tlr-preview-children.is-hidden {
+        display: none;
+      }
+      .tlr-preview-row .tlr-expand-line {
+        flex: 1;
+        min-width: 0;
       }
     `);
   }
