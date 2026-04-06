@@ -4334,10 +4334,10 @@ class Plugin extends AppPlugin {
     this.ui.injectCSS(`
       .tlr-footer {
         margin-top: 16px;
-        color: #e8e0d0;
+        color: inherit;
         font-size: 13px;
-        background-color: rgba(30, 30, 36, 0.60);
-        border: 1px solid rgba(255, 255, 255, 0.10);
+        background-color: var(--bg-default, transparent);
+        border: 1px solid var(--border-default, currentColor);
         border-radius: 10px;
         padding: 12px 16px 10px;
       }
@@ -4351,14 +4351,14 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-title {
-        color: #e8e0d0;
+        color: inherit;
         font-weight: 600;
         font-size: 13px;
         white-space: nowrap;
       }
 
       .tlr-count {
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
         font-size: 12px;
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
@@ -4544,7 +4544,7 @@ class Plugin extends AppPlugin {
       .tlr-search-icon {
         display: flex;
         align-items: center;
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
       }
 
       .tlr-search-input {
@@ -4565,13 +4565,13 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-search-input::placeholder {
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
       }
 
       .tlr-search-clear {
         min-width: 20px;
         padding: 0 4px;
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
       }
 
       .tlr-toggle {
@@ -4588,7 +4588,7 @@ class Plugin extends AppPlugin {
       .tlr-empty,
       .tlr-note,
       .tlr-error {
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
         padding: 4px 0;
         font-size: 12px;
       }
@@ -4617,7 +4617,7 @@ class Plugin extends AppPlugin {
         margin-bottom: 8px;
         font-size: 12px;
         font-weight: 650;
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
         text-transform: none;
         letter-spacing: 0;
       }
@@ -4660,7 +4660,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-title {
-        color: #e8e0d0;
+        color: inherit;
         font-weight: 600;
         font-size: 13px;
         overflow: hidden;
@@ -4672,7 +4672,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-meta {
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
         font-size: 12px;
         margin-left: auto;
         flex: 0 0 auto;
@@ -4685,7 +4685,7 @@ class Plugin extends AppPlugin {
         width: 100%;
         padding: 5px 6px;
         text-align: left;
-        color: #e8e0d0;
+        color: inherit;
         font-size: 13px;
         line-height: 1.4;
         white-space: normal;
@@ -4694,7 +4694,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-record:hover {
-        color: #fff;
+        opacity: 0.8;
         text-decoration: none;
       }
 
@@ -4711,7 +4711,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-group-title {
-        color: #e8e0d0;
+        color: inherit;
         font-weight: 600;
         font-size: 13px;
         overflow: hidden;
@@ -4722,7 +4722,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-group-meta {
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
         font-size: 12px;
         flex: 0 0 auto;
       }
@@ -4753,7 +4753,7 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prefix {
-        color: #8a7e6a;
+        color: var(--text-muted, currentColor);
       }
 
       .tlr-line-content {
@@ -4852,7 +4852,7 @@ class Plugin extends AppPlugin {
         color: var(--text-secondary, var(--text-subtle, var(--text, inherit)));
         opacity: 0.75;
         line-height: 1.35;
-        border-left: 2px solid rgba(255, 255, 255, 0.08);
+        border-left: 2px solid var(--border-default, currentColor);
         border-radius: 0 3px 3px 0;
       }
 
@@ -5135,7 +5135,7 @@ class Plugin extends AppPlugin {
         display: none;
         flex-direction: column;
         margin: 4px 0 6px 10px;
-        border-left: 2px solid rgba(255, 255, 255, 0.08);
+        border-left: 2px solid var(--border-default, currentColor);
         padding: 6px 8px 8px 12px;
         border-radius: 0 8px 8px 0;
         background: rgba(0, 0, 0, 0.12);
@@ -5161,7 +5161,7 @@ class Plugin extends AppPlugin {
         transition: background 0.1s, color 0.1s;
       }
       .tlr-expand-line:hover {
-        background: rgba(255, 255, 255, 0.05);
+        background: rgba(0, 0, 0, 0.05);
         color: var(--text-default, inherit);
       }
       .tlr-expand-empty {
