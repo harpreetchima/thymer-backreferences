@@ -1,11 +1,20 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.41';
+    this._version = '0.4.42';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
     this._eventHandlerIds = [];
+    this._maxStoredPageViewRecords = 400;
+    this._maxStoredSortByRecords = 400;
+    this._maxStoredPropGroupStates = 160;
+    this._maxStoredRecordGroupStates = 600;
+    this._legacyIgnoreCleanupFallbackDelayMs = 6000;
+    this._legacyIgnoreCleanupYieldEveryRecords = 8;
+    this._legacyIgnoreCleanupYieldEveryLines = 250;
+    this._ignoreCleanupIdleId = null;
+    this._ignoreCleanupStartTimer = null;
 
     this._storageKeyPageViewByRecord = 'thymer_backreferences_page_view_by_record_v1';
     this._pageViewByRecord = this.loadPageViewByRecordSetting();
@@ -86,11 +95,7 @@ class Plugin extends AppPlugin {
       const p = this.ui.getActivePanel();
       if (p) this.handlePanelChanged(p, 'initial-delayed');
     }, 250);
-    setTimeout(() => {
-      this.runIgnoreCleanupMigrationIfNeeded().catch(() => {
-        // ignore
-      });
-    }, 900);
+    this.scheduleIgnoreCleanupMigration();
   }
 
   onUnload() {
@@ -102,9 +107,9 @@ class Plugin extends AppPlugin {
       }
     }
     this._eventHandlerIds = [];
+    this.clearIgnoreCleanupMigrationSchedule();
 
     this._cmdRefresh?.remove?.();
-    this._statusItem?.remove?.();
 
     for (const panelId of Array.from(this._panelStates?.keys?.() || [])) {
       this.disposePanelState(panelId);
@@ -121,14 +126,12 @@ class Plugin extends AppPlugin {
     const panelEl = panel?.getElement?.() || null;
     if (this.shouldSuppressInPanel(panel, panelEl)) {
       this.disposePanelState(panelId);
-      this.syncStatusItem();
       return;
     }
 
     const mountContainer = this.findMountContainer(panelEl);
     if (!mountContainer) {
       this.disposePanelState(panelId);
-      this.syncStatusItem();
       return;
     }
 
@@ -138,7 +141,6 @@ class Plugin extends AppPlugin {
     if (!recordGuid) {
       // If the panel no longer shows a record, remove our footer.
       this.disposePanelState(panelId);
-      this.syncStatusItem();
       return;
     }
 
@@ -187,7 +189,6 @@ class Plugin extends AppPlugin {
       force: recordChanged,
       reason: reason || (recordChanged ? 'record-changed' : 'record-same')
     });
-    this.syncStatusItem();
   }
 
   shouldSuppressInPanel(panel, panelEl) {
@@ -210,7 +211,6 @@ class Plugin extends AppPlugin {
     const panelId = panel?.getId?.() || null;
     if (!panelId) return;
     this.disposePanelState(panelId);
-    this.syncStatusItem();
   }
 
   getOrCreatePanelState(panel) {
@@ -2368,6 +2368,38 @@ class Plugin extends AppPlugin {
     }
   }
 
+  normalizeTouchedAt(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+  }
+
+  pruneTouchedRecordMap(value, maxEntries) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+    const entries = Object.entries(value);
+    if (!Number.isFinite(maxEntries) || maxEntries < 1 || entries.length <= maxEntries) {
+      return value;
+    }
+
+    const kept = entries
+      .map(([guid, entry], index) => ({
+        guid,
+        entry,
+        index,
+        touchedAt: this.normalizeTouchedAt(entry?.touchedAt)
+      }))
+      .sort((a, b) => (b.touchedAt - a.touchedAt) || (b.index - a.index))
+      .slice(0, maxEntries)
+      .sort((a, b) => (a.touchedAt - b.touchedAt) || (a.index - b.index));
+
+    const out = {};
+    for (const item of kept) {
+      out[item.guid] = item.entry;
+    }
+    return out;
+  }
+
   parseStoredStringSet(value) {
     if (!Array.isArray(value)) return null;
     const out = new Set();
@@ -2377,6 +2409,26 @@ class Plugin extends AppPlugin {
       if (text) out.add(text);
     }
     return out;
+  }
+
+  pruneStoredSet(set, maxEntries) {
+    if (!(set instanceof Set)) return new Set();
+    if (!Number.isFinite(maxEntries) || maxEntries < 1 || set.size <= maxEntries) {
+      return new Set(set);
+    }
+
+    const values = Array.from(set);
+    return new Set(values.slice(values.length - maxEntries));
+  }
+
+  touchStoredSetEntry(set, value, maxEntries) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    const out = set instanceof Set ? new Set(set) : new Set();
+    if (text) {
+      out.delete(text);
+      out.add(text);
+    }
+    return this.pruneStoredSet(out, maxEntries);
   }
 
   parseStoredRecordMap(value, normalizeEntry) {
@@ -2396,17 +2448,27 @@ class Plugin extends AppPlugin {
   normalizePageViewPreference(pref) {
     const sections = this.cloneSectionCollapsedState(pref?.sections);
     const footerCollapsed = typeof pref?.footerCollapsed === 'boolean' ? pref.footerCollapsed : null;
-    return { footerCollapsed, sections };
+    const touchedAt = this.normalizeTouchedAt(pref?.touchedAt);
+    return { footerCollapsed, sections, touchedAt };
   }
 
   loadPageViewByRecordSetting() {
-    return this.parseStoredRecordMap(
+    const current = this.parseStoredRecordMap(
       this.readJsonStorage(this._storageKeyPageViewByRecord),
       (pref) => this.normalizePageViewPreference(pref)
     ) || {};
+    const pruned = this.pruneTouchedRecordMap(current, this._maxStoredPageViewRecords);
+    if (Object.keys(pruned).length !== Object.keys(current).length) {
+      this.writeJsonStorage(this._storageKeyPageViewByRecord, pruned);
+    }
+    return pruned;
   }
 
   savePageViewByRecordSetting() {
+    this._pageViewByRecord = this.pruneTouchedRecordMap(
+      this._pageViewByRecord || {},
+      this._maxStoredPageViewRecords
+    );
     this.writeJsonStorage(this._storageKeyPageViewByRecord, this._pageViewByRecord || {});
   }
 
@@ -2431,6 +2493,7 @@ class Plugin extends AppPlugin {
     const pref = this.ensurePageViewPreference(recordGuid);
     if (!pref) return;
     pref.footerCollapsed = collapsed === true;
+    pref.touchedAt = Date.now();
     this.savePageViewByRecordSetting();
   }
 
@@ -2441,6 +2504,7 @@ class Plugin extends AppPlugin {
     if (!pref) return;
     pref.sections = this.cloneSectionCollapsedState(pref.sections);
     pref.sections[id] = collapsed === true;
+    pref.touchedAt = Date.now();
     this.savePageViewByRecordSetting();
   }
 
@@ -2478,7 +2542,13 @@ class Plugin extends AppPlugin {
 
   loadPropGroupCollapsedSetting() {
     const current = this.parseStoredStringSet(this.readJsonStorage(this._storageKeyPropGroupCollapsed));
-    if (current) return current;
+    if (current) {
+      const pruned = this.pruneStoredSet(current, this._maxStoredPropGroupStates);
+      if (pruned.size !== current.size) {
+        this.writeJsonStorage(this._storageKeyPropGroupCollapsed, Array.from(pruned));
+      }
+      return pruned;
+    }
 
     // Migration: older versions used a back"links" storage key.
     try {
@@ -2486,8 +2556,9 @@ class Plugin extends AppPlugin {
       if (legacyKey && legacyKey !== this._storageKeyPropGroupCollapsed) {
         const set = this.parseStoredStringSet(this.readJsonStorage(legacyKey));
         if (set) {
-          this.writeJsonStorage(this._storageKeyPropGroupCollapsed, Array.from(set));
-          return set;
+          const pruned = this.pruneStoredSet(set, this._maxStoredPropGroupStates);
+          this.writeJsonStorage(this._storageKeyPropGroupCollapsed, Array.from(pruned));
+          return pruned;
         }
       }
     } catch (e) {
@@ -2499,15 +2570,22 @@ class Plugin extends AppPlugin {
 
   loadRecordGroupCollapsedSetting() {
     const current = this.parseStoredStringSet(this.readJsonStorage(this._storageKeyRecordGroupCollapsed));
-    if (current) return current;
+    if (current) {
+      const pruned = this.pruneStoredSet(current, this._maxStoredRecordGroupStates);
+      if (pruned.size !== current.size) {
+        this.writeJsonStorage(this._storageKeyRecordGroupCollapsed, Array.from(pruned));
+      }
+      return pruned;
+    }
 
     try {
       const legacyKey = this._legacyStorageKeyRecordGroupCollapsed;
       if (legacyKey && legacyKey !== this._storageKeyRecordGroupCollapsed) {
         const set = this.parseStoredStringSet(this.readJsonStorage(legacyKey));
         if (set) {
-          this.writeJsonStorage(this._storageKeyRecordGroupCollapsed, Array.from(set));
-          return set;
+          const pruned = this.pruneStoredSet(set, this._maxStoredRecordGroupStates);
+          this.writeJsonStorage(this._storageKeyRecordGroupCollapsed, Array.from(pruned));
+          return pruned;
         }
       }
     } catch (e) {
@@ -2518,10 +2596,18 @@ class Plugin extends AppPlugin {
   }
 
   savePropGroupCollapsedSetting() {
+    this._propGroupCollapsed = this.pruneStoredSet(
+      this._propGroupCollapsed,
+      this._maxStoredPropGroupStates
+    );
     this.writeJsonStorage(this._storageKeyPropGroupCollapsed, Array.from(this._propGroupCollapsed || []));
   }
 
   saveRecordGroupCollapsedSetting() {
+    this._recordGroupCollapsed = this.pruneStoredSet(
+      this._recordGroupCollapsed,
+      this._maxStoredRecordGroupStates
+    );
     this.writeJsonStorage(this._storageKeyRecordGroupCollapsed, Array.from(this._recordGroupCollapsed || []));
   }
 
@@ -2535,8 +2621,15 @@ class Plugin extends AppPlugin {
     const name = (propName || '').trim();
     if (!name) return;
     if (!this._propGroupCollapsed) this._propGroupCollapsed = new Set();
-    if (collapsed === true) this._propGroupCollapsed.add(name);
-    else this._propGroupCollapsed.delete(name);
+    if (collapsed === true) {
+      this._propGroupCollapsed = this.touchStoredSetEntry(
+        this._propGroupCollapsed,
+        name,
+        this._maxStoredPropGroupStates
+      );
+    } else {
+      this._propGroupCollapsed.delete(name);
+    }
     this.savePropGroupCollapsedSetting();
   }
 
@@ -2561,8 +2654,15 @@ class Plugin extends AppPlugin {
     const key = this.getRecordGroupCollapsedKey(sectionId, recordGuid);
     if (!key) return;
     if (!this._recordGroupCollapsed) this._recordGroupCollapsed = new Set();
-    if (collapsed === true) this._recordGroupCollapsed.add(key);
-    else this._recordGroupCollapsed.delete(key);
+    if (collapsed === true) {
+      this._recordGroupCollapsed = this.touchStoredSetEntry(
+        this._recordGroupCollapsed,
+        key,
+        this._maxStoredRecordGroupStates
+      );
+    } else {
+      this._recordGroupCollapsed.delete(key);
+    }
     this.saveRecordGroupCollapsedSetting();
   }
 
@@ -2571,14 +2671,24 @@ class Plugin extends AppPlugin {
       const sortBy = this.normalizeSortBy(pref?.sortBy);
       const sortDir = this.normalizeSortDir(pref?.sortDir);
       if (!sortBy || !sortDir) return null;
-      return { sortBy, sortDir };
+      return {
+        sortBy,
+        sortDir,
+        touchedAt: this.normalizeTouchedAt(pref?.touchedAt)
+      };
     };
 
     const current = this.parseStoredRecordMap(
       this.readJsonStorage(this._storageKeySortByRecord),
       normalizeSortPref
     );
-    if (current) return current;
+    if (current) {
+      const pruned = this.pruneTouchedRecordMap(current, this._maxStoredSortByRecords);
+      if (Object.keys(pruned).length !== Object.keys(current).length) {
+        this.writeJsonStorage(this._storageKeySortByRecord, pruned);
+      }
+      return pruned;
+    }
 
     // Migration: older versions used a back"links" storage key.
     try {
@@ -2586,8 +2696,9 @@ class Plugin extends AppPlugin {
       if (legacyKey && legacyKey !== this._storageKeySortByRecord) {
         const map = this.parseStoredRecordMap(this.readJsonStorage(legacyKey), normalizeSortPref);
         if (map) {
-          this.writeJsonStorage(this._storageKeySortByRecord, map);
-          return map;
+          const pruned = this.pruneTouchedRecordMap(map, this._maxStoredSortByRecords);
+          this.writeJsonStorage(this._storageKeySortByRecord, pruned);
+          return pruned;
         }
       }
     } catch (e) {
@@ -2598,6 +2709,10 @@ class Plugin extends AppPlugin {
   }
 
   saveSortByRecordSetting() {
+    this._sortByRecord = this.pruneTouchedRecordMap(
+      this._sortByRecord || {},
+      this._maxStoredSortByRecords
+    );
     this.writeJsonStorage(this._storageKeySortByRecord, this._sortByRecord || {});
   }
 
@@ -2615,7 +2730,11 @@ class Plugin extends AppPlugin {
     if (nextSortBy === this._defaultSortBy && nextSortDir === this._defaultSortDir) {
       delete this._sortByRecord[guid];
     } else {
-      this._sortByRecord[guid] = { sortBy: nextSortBy, sortDir: nextSortDir };
+      this._sortByRecord[guid] = {
+        sortBy: nextSortBy,
+        sortDir: nextSortDir,
+        touchedAt: Date.now()
+      };
     }
 
     this.saveSortByRecordSetting();
@@ -2671,6 +2790,52 @@ class Plugin extends AppPlugin {
     return false;
   }
 
+  clearIgnoreCleanupMigrationSchedule() {
+    if (this._ignoreCleanupStartTimer) {
+      clearTimeout(this._ignoreCleanupStartTimer);
+      this._ignoreCleanupStartTimer = null;
+    }
+    if (this._ignoreCleanupIdleId != null && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(this._ignoreCleanupIdleId);
+    }
+    this._ignoreCleanupIdleId = null;
+  }
+
+  scheduleIgnoreCleanupMigration() {
+    if (this.hasCompletedIgnoreCleanupMigration()) return;
+    this.clearIgnoreCleanupMigrationSchedule();
+
+    const run = () => {
+      this._ignoreCleanupStartTimer = null;
+      this._ignoreCleanupIdleId = null;
+      this.runIgnoreCleanupMigrationIfNeeded().catch(() => {
+        // ignore
+      });
+    };
+
+    if (typeof requestIdleCallback === 'function') {
+      this._ignoreCleanupIdleId = requestIdleCallback(run, {
+        timeout: this._legacyIgnoreCleanupFallbackDelayMs
+      });
+      return;
+    }
+
+    this._ignoreCleanupStartTimer = setTimeout(
+      run,
+      this._legacyIgnoreCleanupFallbackDelayMs
+    );
+  }
+
+  yieldToBrowser() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => resolve());
+        return;
+      }
+      setTimeout(resolve, 0);
+    });
+  }
+
   async runIgnoreCleanupMigrationIfNeeded() {
     if (this.hasCompletedIgnoreCleanupMigration()) return;
     if (this._ignoreCleanupPromise) return this._ignoreCleanupPromise;
@@ -2692,14 +2857,19 @@ class Plugin extends AppPlugin {
     let removed = 0;
     let failed = 0;
     let scanned = 0;
+    let processedRecords = 0;
 
     for (const record of allRecords || []) {
       if (!record || typeof record.getLineItems !== 'function') continue;
+      processedRecords += 1;
 
       let items = [];
       try {
         items = (await record.getLineItems(false)) || [];
       } catch (e) {
+        if (processedRecords % this._legacyIgnoreCleanupYieldEveryRecords === 0) {
+          await this.yieldToBrowser();
+        }
         continue;
       }
 
@@ -2719,6 +2889,14 @@ class Plugin extends AppPlugin {
 
         if (ok) removed += 1;
         else failed += 1;
+
+        if (scanned % this._legacyIgnoreCleanupYieldEveryLines === 0) {
+          await this.yieldToBrowser();
+        }
+      }
+
+      if (processedRecords % this._legacyIgnoreCleanupYieldEveryRecords === 0) {
+        await this.yieldToBrowser();
       }
     }
 
@@ -2932,24 +3110,6 @@ class Plugin extends AppPlugin {
     }
   }
 
-  syncStatusItem() {
-    const item = this._statusItem || null;
-    if (!item) return;
-
-    const activePanel = this.ui.getActivePanel?.() || null;
-    const panelId = activePanel?.getId?.() || null;
-    const state = panelId ? (this._panelStates.get(panelId) || null) : null;
-    if (!state || !state.liveCurrentSnapshot) {
-      item.hide?.();
-      return;
-    }
-
-    const snapshot = state.liveCurrentSnapshot;
-    item.setLabel?.(`${snapshot.totalCount}`);
-    item.setTooltip?.(`Backreferences: ${snapshot.totalCount} total (${snapshot.pageCount} pages, ${snapshot.propertyCount} property, ${snapshot.linkedCount} linked)`);
-    item.show?.();
-  }
-
   handleWorkspaceInvalidation(ev, reason) {
     this.markAllStatesPendingRemote(ev);
     this.refreshAllPanels({ force: false, reason: reason || 'workspace-invalidated' });
@@ -3041,9 +3201,20 @@ class Plugin extends AppPlugin {
     return { linkedError, linkedGroups, propertyCandidateRecords };
   }
 
+  buildLiteralPhraseSearchQuery(value) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (!text) return '';
+    const escaped = text
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\s+/g, ' ');
+    return `"${escaped}"`;
+  }
+
   async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf }) {
     try {
-      const result = await this.data.searchByQuery(recordName, maxResults);
+      const query = this.buildLiteralPhraseSearchQuery(recordName) || recordName;
+      const result = await this.data.searchByQuery(query, maxResults);
       if (result?.error) {
         return { unlinkedError: result.error, unlinkedGroups: [] };
       }
@@ -3188,7 +3359,6 @@ class Plugin extends AppPlugin {
       linkedError
     }, { reason: reason || 'refresh' });
     this.setLoadingState(state, false);
-    this.syncStatusItem();
   }
 
   async ensureDeferredUnlinkedLoaded(state) {
@@ -3230,7 +3400,6 @@ class Plugin extends AppPlugin {
     results.unlinkedLoading = false;
     this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
     this.renderFromCache(state);
-    this.syncStatusItem();
   }
 
   setLoadingState(state, isLoading) {

@@ -72,6 +72,12 @@ function makePlugin() {
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
+  plugin._maxStoredPageViewRecords = 400;
+  plugin._maxStoredSortByRecords = 400;
+  plugin._maxStoredPropGroupStates = 160;
+  plugin._maxStoredRecordGroupStates = 600;
+  plugin._legacyIgnoreCleanupYieldEveryRecords = 8;
+  plugin._legacyIgnoreCleanupYieldEveryLines = 250;
   plugin._queryBuiltInKeys = [
     'created_at', 'modified_at', 'created_by', 'modified_by', 'text', 'type', 'date',
     'due', 'time', 'mention', 'scheduled', 'hashtag', 'link', 'collection', 'guid',
@@ -337,6 +343,23 @@ test('linkUnlinkedReference updates one unlinked line and refreshes panels', asy
   assert.deepEqual(refreshArgs, { force: true, reason: 'link-unlinked' });
 });
 
+test('unlinked searches quote record titles as literal phrases', async () => {
+  const plugin = makePlugin();
+  let seenQuery = null;
+  plugin.data.searchByQuery = async (query) => {
+    seenQuery = query;
+    return { lines: [] };
+  };
+
+  await plugin.loadUnlinkedReferenceGroups('@task "Acme"', 25, {
+    recordGuid: 'target-guid',
+    linkedGroups: [],
+    showSelf: false
+  });
+
+  assert.equal(seenQuery, '"@task \\"Acme\\""');
+});
+
 test('query-mode helpers distinguish plain text from Thymer query drafts', () => {
   const plugin = makePlugin();
   assert.equal(plugin.getSearchMode('plain text'), 'text');
@@ -475,6 +498,56 @@ test('page view preferences round-trip footer and section state through storage 
     const pref = plugin.getPageViewPreference('record-1');
     assert.equal(pref.footerCollapsed, true);
     assert.equal(pref.sections.linked, true);
+  } finally {
+    global.localStorage = previousLocalStorage;
+  }
+});
+
+test('stored preferences prune oldest entries by recency', () => {
+  const plugin = makePlugin();
+  const previousLocalStorage = global.localStorage;
+  const store = new Map();
+  global.localStorage = {
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      store.set(key, value);
+    }
+  };
+
+  try {
+    plugin._storageKeyPageViewByRecord = 'test-page-view-prune';
+    plugin._storageKeySortByRecord = 'test-sort-prune';
+    plugin._storageKeyRecordGroupCollapsed = 'test-record-groups-prune';
+    plugin._maxStoredPageViewRecords = 2;
+    plugin._maxStoredSortByRecords = 2;
+    plugin._maxStoredRecordGroupStates = 2;
+
+    plugin._pageViewByRecord = {
+      alpha: { footerCollapsed: true, sections: plugin.createDefaultSectionCollapsedState(), touchedAt: 1 },
+      beta: { footerCollapsed: false, sections: plugin.createDefaultSectionCollapsedState(), touchedAt: 2 },
+      gamma: { footerCollapsed: true, sections: plugin.createDefaultSectionCollapsedState(), touchedAt: 3 }
+    };
+    plugin.savePageViewByRecordSetting();
+
+    plugin._sortByRecord = {
+      alpha: { sortBy: 'page_title', sortDir: 'asc', touchedAt: 1 },
+      beta: { sortBy: 'reference_count', sortDir: 'desc', touchedAt: 2 },
+      gamma: { sortBy: 'reference_activity', sortDir: 'desc', touchedAt: 3 }
+    };
+    plugin.saveSortByRecordSetting();
+
+    plugin._recordGroupCollapsed = new Set(['linked:alpha', 'linked:beta', 'linked:gamma']);
+    plugin.saveRecordGroupCollapsedSetting();
+
+    const pagePrefs = JSON.parse(store.get('test-page-view-prune'));
+    const sortPrefs = JSON.parse(store.get('test-sort-prune'));
+    const recordGroups = JSON.parse(store.get('test-record-groups-prune'));
+
+    assert.deepEqual(Object.keys(pagePrefs).sort(), ['beta', 'gamma']);
+    assert.deepEqual(Object.keys(sortPrefs).sort(), ['beta', 'gamma']);
+    assert.deepEqual(recordGroups, ['linked:beta', 'linked:gamma']);
   } finally {
     global.localStorage = previousLocalStorage;
   }
