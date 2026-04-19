@@ -1,7 +1,7 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.42';
+    this._version = '0.4.43';
     this._pluginName = 'Backreferences';
 
     this._panelStates = new Map();
@@ -10,11 +10,6 @@ class Plugin extends AppPlugin {
     this._maxStoredSortByRecords = 400;
     this._maxStoredPropGroupStates = 160;
     this._maxStoredRecordGroupStates = 600;
-    this._legacyIgnoreCleanupFallbackDelayMs = 6000;
-    this._legacyIgnoreCleanupYieldEveryRecords = 8;
-    this._legacyIgnoreCleanupYieldEveryLines = 250;
-    this._ignoreCleanupIdleId = null;
-    this._ignoreCleanupStartTimer = null;
 
     this._storageKeyPageViewByRecord = 'thymer_backreferences_page_view_by_record_v1';
     this._pageViewByRecord = this.loadPageViewByRecordSetting();
@@ -51,9 +46,6 @@ class Plugin extends AppPlugin {
       'due', 'time', 'mention', 'scheduled', 'hashtag', 'link', 'collection', 'guid',
       'pguid', 'rguid', 'backref', 'linkto'
     ];
-    this._legacyIgnoreMetaKey = 'plugin.refs.v1.ignore';
-    this._storageKeyIgnoreCleanupDone = 'thymer_backreferences_ignore_cleanup_v1';
-    this._ignoreCleanupPromise = null;
 
     this.injectCss();
 
@@ -95,7 +87,6 @@ class Plugin extends AppPlugin {
       const p = this.ui.getActivePanel();
       if (p) this.handlePanelChanged(p, 'initial-delayed');
     }, 250);
-    this.scheduleIgnoreCleanupMigration();
   }
 
   onUnload() {
@@ -107,7 +98,6 @@ class Plugin extends AppPlugin {
       }
     }
     this._eventHandlerIds = [];
-    this.clearIgnoreCleanupMigrationSchedule();
 
     this._cmdRefresh?.remove?.();
 
@@ -239,6 +229,10 @@ class Plugin extends AppPlugin {
       mountedIn: null,
       rootEl: null,
       bodyEl: null,
+      statusSlotEl: null,
+      propertySlotEl: null,
+      linkedSlotEl: null,
+      unlinkedSlotEl: null,
       countEl: null,
       footerToggleEl: null,
       sortToggleEl: null,
@@ -265,8 +259,11 @@ class Plugin extends AppPlugin {
       liveCurrentSnapshot: null,
       liveNewKeys: new Set(),
       liveRemoteBadgesByKey: new Map(),
+      liveRenderVersion: 0,
       pendingRemoteSync: false,
       pendingRemoteUsers: new Set(),
+      linkedContextRenderVersion: 0,
+      renderSectionKeys: null,
       sortBy: this._defaultSortBy,
       sortDir: this._defaultSortDir,
       sortMenuOpen: false,
@@ -330,7 +327,12 @@ class Plugin extends AppPlugin {
     if (needsRebuild) {
       state.rootEl = this.buildFooterRoot(state);
       state.bodyEl = state.rootEl.querySelector('[data-role="body"]');
+      state.statusSlotEl = state.rootEl.querySelector('[data-role="status-slot"]');
+      state.propertySlotEl = state.rootEl.querySelector('[data-role="property-slot"]');
+      state.linkedSlotEl = state.rootEl.querySelector('[data-role="linked-slot"]');
+      state.unlinkedSlotEl = state.rootEl.querySelector('[data-role="unlinked-slot"]');
       state.countEl = state.rootEl.querySelector('[data-role="count"]');
+      state.renderSectionKeys = null;
       this.setSearchOpen(state, state.searchOpen === true || Boolean((state.searchQuery || '').trim()));
       this.syncSearchAutocompleteControlState(state);
       this.renderSearchAutocomplete(state);
@@ -633,10 +635,32 @@ class Plugin extends AppPlugin {
     body.className = 'tlr-body';
     body.dataset.role = 'body';
 
+    const statusSlot = document.createElement('div');
+    statusSlot.className = 'tlr-status-slot';
+    statusSlot.dataset.role = 'status-slot';
+
+    const propertySlot = document.createElement('div');
+    propertySlot.className = 'tlr-section-slot tlr-section-slot-property';
+    propertySlot.dataset.role = 'property-slot';
+
+    const linkedSlot = document.createElement('div');
+    linkedSlot.className = 'tlr-section-slot tlr-section-slot-linked';
+    linkedSlot.dataset.role = 'linked-slot';
+
+    const unlinkedSlot = document.createElement('div');
+    unlinkedSlot.className = 'tlr-section-slot tlr-section-slot-unlinked';
+    unlinkedSlot.dataset.role = 'unlinked-slot';
+
     searchRowInner.appendChild(searchWrap);
     searchRow.appendChild(searchRowInner);
     root.appendChild(headerField);
     root.appendChild(searchRow);
+    body.appendChild(statusSlot);
+    body.appendChild(propertySlot);
+    this.appendReferenceDivider(body);
+    body.appendChild(linkedSlot);
+    this.appendReferenceDivider(body);
+    body.appendChild(unlinkedSlot);
     root.appendChild(body);
 
     root.addEventListener('click', (e) => this.handleFooterClick(e));
@@ -656,6 +680,11 @@ class Plugin extends AppPlugin {
     state.searchClearEl = clearBtn;
     state.searchRefreshEl = refreshBtn;
     state.searchAutocompleteEl = autocomplete;
+    state.statusSlotEl = statusSlot;
+    state.propertySlotEl = propertySlot;
+    state.linkedSlotEl = linkedSlot;
+    state.unlinkedSlotEl = unlinkedSlot;
+    state.renderSectionKeys = null;
     return root;
   }
 
@@ -2740,194 +2769,31 @@ class Plugin extends AppPlugin {
     this.saveSortByRecordSetting();
   }
 
-  hasCompletedIgnoreCleanupMigration() {
-    try {
-      return localStorage.getItem(this._storageKeyIgnoreCleanupDone) === '1';
-    } catch (e) {
-      // ignore
-    }
-    return false;
-  }
-
-  markIgnoreCleanupMigrationDone() {
-    try {
-      localStorage.setItem(this._storageKeyIgnoreCleanupDone, '1');
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  clearIgnoreCleanupMigrationDone() {
-    try {
-      localStorage.removeItem(this._storageKeyIgnoreCleanupDone);
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  normalizeLegacyIgnoreValue(value) {
-    if (value === true || value === 1) return true;
-    if (typeof value === 'string') {
-      const v = value.trim().toLowerCase();
-      if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
-    }
-    return false;
-  }
-
-  hasLegacyIgnoreMeta(line) {
-    const props = line?.props;
-    if (!props || typeof props !== 'object') return false;
-
-    const direct = props?.[this._legacyIgnoreMetaKey];
-    if (this.normalizeLegacyIgnoreValue(direct)) return true;
-
-    const underscore = props?.plugin_refs_v1_ignore;
-    if (this.normalizeLegacyIgnoreValue(underscore)) return true;
-
-    const nested = props?.plugin?.refs?.v1?.ignore;
-    if (this.normalizeLegacyIgnoreValue(nested)) return true;
-
-    return false;
-  }
-
-  clearIgnoreCleanupMigrationSchedule() {
-    if (this._ignoreCleanupStartTimer) {
-      clearTimeout(this._ignoreCleanupStartTimer);
-      this._ignoreCleanupStartTimer = null;
-    }
-    if (this._ignoreCleanupIdleId != null && typeof cancelIdleCallback === 'function') {
-      cancelIdleCallback(this._ignoreCleanupIdleId);
-    }
-    this._ignoreCleanupIdleId = null;
-  }
-
-  scheduleIgnoreCleanupMigration() {
-    if (this.hasCompletedIgnoreCleanupMigration()) return;
-    this.clearIgnoreCleanupMigrationSchedule();
-
-    const run = () => {
-      this._ignoreCleanupStartTimer = null;
-      this._ignoreCleanupIdleId = null;
-      this.runIgnoreCleanupMigrationIfNeeded().catch(() => {
-        // ignore
-      });
-    };
-
-    if (typeof requestIdleCallback === 'function') {
-      this._ignoreCleanupIdleId = requestIdleCallback(run, {
-        timeout: this._legacyIgnoreCleanupFallbackDelayMs
-      });
-      return;
-    }
-
-    this._ignoreCleanupStartTimer = setTimeout(
-      run,
-      this._legacyIgnoreCleanupFallbackDelayMs
-    );
-  }
-
-  yieldToBrowser() {
-    return new Promise((resolve) => {
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => resolve());
-        return;
-      }
-      setTimeout(resolve, 0);
-    });
-  }
-
-  async runIgnoreCleanupMigrationIfNeeded() {
-    if (this.hasCompletedIgnoreCleanupMigration()) return;
-    if (this._ignoreCleanupPromise) return this._ignoreCleanupPromise;
-
-    this._ignoreCleanupPromise = this.cleanupLegacyIgnoreMetadata()
-      .then((result) => {
-        if (result.ok === true) this.markIgnoreCleanupMigrationDone();
-        return result;
-      })
-      .finally(() => {
-        this._ignoreCleanupPromise = null;
-      });
-
-    return this._ignoreCleanupPromise;
-  }
-
-  async cleanupLegacyIgnoreMetadata() {
-    const allRecords = this.data.getAllRecords?.() || [];
-    let removed = 0;
-    let failed = 0;
-    let scanned = 0;
-    let processedRecords = 0;
-
-    for (const record of allRecords || []) {
-      if (!record || typeof record.getLineItems !== 'function') continue;
-      processedRecords += 1;
-
-      let items = [];
-      try {
-        items = (await record.getLineItems(false)) || [];
-      } catch (e) {
-        if (processedRecords % this._legacyIgnoreCleanupYieldEveryRecords === 0) {
-          await this.yieldToBrowser();
-        }
-        continue;
-      }
-
-      for (const line of items || []) {
-        scanned += 1;
-        if (!this.hasLegacyIgnoreMeta(line)) continue;
-
-        let ok = false;
-        try {
-          ok = (await line.setMetaProperties({
-            [this._legacyIgnoreMetaKey]: null,
-            plugin_refs_v1_ignore: null
-          })) === true;
-        } catch (e) {
-          ok = false;
-        }
-
-        if (ok) removed += 1;
-        else failed += 1;
-
-        if (scanned % this._legacyIgnoreCleanupYieldEveryLines === 0) {
-          await this.yieldToBrowser();
-        }
-      }
-
-      if (processedRecords % this._legacyIgnoreCleanupYieldEveryRecords === 0) {
-        await this.yieldToBrowser();
-      }
-    }
-
-    if (removed > 0) {
-      this.refreshAllPanels({ force: true, reason: 'legacy-ignore-cleanup' });
-    }
-
-    if (removed > 0 || failed > 0) {
-      try {
-        this.ui.addToaster({
-          title: 'Backreferences',
-          message: failed > 0
-            ? `Legacy ignore cleanup removed ${removed} line item${removed === 1 ? '' : 's'}; ${failed} could not be updated.`
-            : `Legacy ignore cleanup removed ${removed} line item${removed === 1 ? '' : 's'}.`,
-          dismissible: true,
-          autoDestroyTime: failed > 0 ? 5200 : 3200
-        });
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    return { ok: failed === 0, removed, failed, scanned };
+  bumpLinkedContextRenderVersion(state) {
+    if (!state) return;
+    state.linkedContextRenderVersion = (state.linkedContextRenderVersion || 0) + 1;
   }
 
   invalidateLinkedContextCache(state) {
     const map = state?.linkedContextByLine;
     if (!(map instanceof Map)) return;
+    let changed = false;
 
     for (const ctx of map.values()) {
       if (!ctx || typeof ctx !== 'object') continue;
+      if (
+        ctx.loaded === true
+        || ctx.loading === true
+        || (ctx.descendants || []).length > 0
+        || (ctx.aboveItems || []).length > 0
+        || (ctx.belowItems || []).length > 0
+        || ctx.showMoreContext === true
+        || (ctx.siblingAboveCount || 0) > 0
+        || (ctx.siblingBelowCount || 0) > 0
+        || ctx.error
+      ) {
+        changed = true;
+      }
       ctx.loaded = false;
       ctx.loading = false;
       ctx.loadPromise = null;
@@ -2937,6 +2803,7 @@ class Plugin extends AppPlugin {
       ctx.aboveItems = [];
       ctx.belowItems = [];
     }
+    if (changed) this.bumpLinkedContextRenderVersion(state);
   }
 
   getPropertySnapshotKey(propertyName, recordGuid) {
@@ -3014,6 +2881,27 @@ class Plugin extends AppPlugin {
     return changed;
   }
 
+  sameStringSet(a, b) {
+    const left = a instanceof Set ? a : new Set();
+    const right = b instanceof Set ? b : new Set();
+    if (left.size !== right.size) return false;
+    for (const value of left) {
+      if (!right.has(value)) return false;
+    }
+    return true;
+  }
+
+  sameStringMap(a, b) {
+    const left = a instanceof Map ? a : new Map();
+    const right = b instanceof Map ? b : new Map();
+    if (left.size !== right.size) return false;
+    for (const [key, value] of left.entries()) {
+      if (!right.has(key)) return false;
+      if (right.get(key) !== value) return false;
+    }
+    return true;
+  }
+
   markStatePendingRemote(state, ev) {
     if (!state || ev?.source?.isLocal !== false) return;
     state.pendingRemoteSync = true;
@@ -3043,12 +2931,17 @@ class Plugin extends AppPlugin {
     const currentSnapshot = snapshot || this.buildResultsSnapshot([], []);
     const baseline = state.liveBaselineSnapshot;
     const previous = state.liveCurrentSnapshot;
+    const prevNewKeys = state.liveNewKeys instanceof Set ? new Set(state.liveNewKeys) : new Set();
+    const prevRemoteBadges = state.liveRemoteBadgesByKey instanceof Map
+      ? new Map(state.liveRemoteBadgesByKey)
+      : new Map();
 
     if (!baseline || !previous) {
       state.liveBaselineSnapshot = currentSnapshot;
       state.liveCurrentSnapshot = currentSnapshot;
       state.liveNewKeys = new Set();
       state.liveRemoteBadgesByKey = new Map();
+      state.liveRenderVersion = (state.liveRenderVersion || 0) + 1;
       state.pendingRemoteSync = false;
       state.pendingRemoteUsers = new Set();
       return;
@@ -3078,6 +2971,9 @@ class Plugin extends AppPlugin {
     state.liveCurrentSnapshot = currentSnapshot;
     state.liveNewKeys = nextNewKeys;
     state.liveRemoteBadgesByKey = nextRemoteBadges;
+    if (!this.sameStringSet(prevNewKeys, nextNewKeys) || !this.sameStringMap(prevRemoteBadges, nextRemoteBadges)) {
+      state.liveRenderVersion = (state.liveRenderVersion || 0) + 1;
+    }
     state.pendingRemoteSync = false;
     state.pendingRemoteUsers = new Set();
   }
@@ -3211,9 +3107,89 @@ class Plugin extends AppPlugin {
     return `"${escaped}"`;
   }
 
+  shouldIncludeMentionAlias(value) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (!text) return false;
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length >= 2) return true;
+    if (/^[A-Z0-9]{2,8}$/.test(text)) return true;
+    return text.length >= 8;
+  }
+
+  getRecordMentionPhrases(recordName) {
+    const out = [];
+    const seen = new Set();
+
+    const add = (value) => {
+      const text = typeof value === 'string' ? value.trim() : '';
+      if (!text) return;
+      const key = text.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(text);
+    };
+
+    const title = typeof recordName === 'string' ? recordName.trim() : '';
+    if (!title) return out;
+
+    add(title);
+
+    const parentheticalMatch = title.match(/^(.*?)\s*\(([^)]+)\)\s*$/);
+    if (parentheticalMatch) {
+      const baseTitle = parentheticalMatch[1].trim();
+      const alias = parentheticalMatch[2].trim();
+      add(baseTitle);
+      if (this.shouldIncludeMentionAlias(alias)) add(alias);
+    }
+
+    for (const separator of [' / ', ' | ']) {
+      if (!title.includes(separator)) continue;
+      const parts = title.split(separator).map((part) => part.trim()).filter(Boolean);
+      for (const part of parts) {
+        if (this.shouldIncludeMentionAlias(part)) add(part);
+      }
+    }
+
+    return out;
+  }
+
+  getUnlinkedSearchPhrases(recordName) {
+    const out = [];
+    const seen = new Set();
+
+    const add = (value) => {
+      const text = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+      if (!text) return;
+      const key = text.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(text);
+    };
+
+    for (const phrase of this.getRecordMentionPhrases(recordName)) {
+      add(phrase);
+
+      if (/[\/|:_\-\u2010-\u2015]/.test(phrase)) {
+        const normalized = this.getPhraseBoundaryTokens(phrase).join(' ');
+        if (normalized && normalized.toLowerCase() !== phrase.toLowerCase()) add(normalized);
+      }
+    }
+
+    return out.slice(0, 6);
+  }
+
+  buildUnlinkedSearchQuery(recordName) {
+    const phrases = this.getUnlinkedSearchPhrases(recordName)
+      .map((phrase) => this.buildLiteralPhraseSearchQuery(phrase))
+      .filter(Boolean);
+    if (phrases.length === 0) return '';
+    if (phrases.length === 1) return phrases[0];
+    return phrases.join(' OR ');
+  }
+
   async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf }) {
     try {
-      const query = this.buildLiteralPhraseSearchQuery(recordName) || recordName;
+      const query = this.buildUnlinkedSearchQuery(recordName) || this.buildLiteralPhraseSearchQuery(recordName) || recordName;
       const result = await this.data.searchByQuery(query, maxResults);
       if (result?.error) {
         return { unlinkedError: result.error, unlinkedGroups: [] };
@@ -3410,60 +3386,175 @@ class Plugin extends AppPlugin {
 
   // ---------- Event-driven freshness ----------
 
+  getEventRecordGuid(ev) {
+    const guid = typeof ev?.recordGuid === 'string'
+      ? ev.recordGuid
+      : (typeof ev?.guid === 'string' ? ev.guid : '');
+    return guid.trim();
+  }
+
+  getEventLineSegments(ev) {
+    if (!ev) return [];
+    if (ev?.hasSegments?.() && typeof ev.getSegments === 'function') {
+      return ev.getSegments() || [];
+    }
+    if (Array.isArray(ev?.segments)) return ev.segments;
+    if (Array.isArray(ev?.rawSegments)) return ev.rawSegments;
+    return [];
+  }
+
+  getStateRecordName(state) {
+    return (state?.panel?.getActiveRecord?.()?.getName?.() || '').trim();
+  }
+
+  recordReferencesGuid(record, targetGuid) {
+    const guid = (targetGuid || '').trim();
+    if (!guid || !record || typeof record.getAllProperties !== 'function') return false;
+    const props = record.getAllProperties() || [];
+    for (const prop of props) {
+      if (this.propertyReferencesGuid(prop, guid)) return true;
+    }
+    return false;
+  }
+
+  refreshMatchingStates(ev, reason, matcher) {
+    const match = typeof matcher === 'function' ? matcher : null;
+    let refreshed = 0;
+
+    for (const state of this._panelStates.values()) {
+      const panel = state?.panel || null;
+      if (!panel || !state?.recordGuid) continue;
+      if (match && match(state) !== true) continue;
+
+      this.markStatePendingRemote(state, ev);
+      this.scheduleRefreshForPanel(panel, { force: false, reason: reason || 'workspace-invalidated' });
+      refreshed += 1;
+    }
+
+    return refreshed;
+  }
+
+  recordEventAffectsState(state, sourceRecordGuid, sourceRecord) {
+    const targetGuid = (state?.recordGuid || '').trim();
+    if (!targetGuid) return false;
+    if (sourceRecordGuid && sourceRecordGuid === targetGuid) return true;
+    if (sourceRecordGuid && this.snapshotIncludesSourceRecord(state, sourceRecordGuid)) return true;
+    if (sourceRecord && this.recordReferencesGuid(sourceRecord, targetGuid)) return true;
+    return false;
+  }
+
+  lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids } = {}) {
+    const targetGuid = (state?.recordGuid || '').trim();
+    if (!targetGuid) return false;
+    if (sourceRecordGuid && sourceRecordGuid === targetGuid) return true;
+    if (sourceRecordGuid && this.snapshotIncludesSourceRecord(state, sourceRecordGuid)) return true;
+    if (referencedGuids instanceof Set && referencedGuids.has(targetGuid)) return true;
+
+    const targetName = this.getStateRecordName(state);
+    if (targetName && Array.isArray(segments) && segments.length > 0) {
+      return this.lineHasTextMentionOfRecord({ segments }, targetName);
+    }
+
+    return false;
+  }
+
   handleRecordUpdated(ev) {
     // Property-based references (record-link fields) do not emit lineitem events.
     // Refresh footers when key-value properties change so property backlinks stay fresh.
     if (!ev) return;
     if (!ev.properties) return;
-    this.handleWorkspaceInvalidation(ev, 'record.updated');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+    const refreshed = this.refreshMatchingStates(ev, 'record.updated', (state) =>
+      this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
+    );
+    if (refreshed === 0 && !sourceRecordGuid) {
+      this.handleWorkspaceInvalidation(ev, 'record.updated');
+    }
   }
 
   handleRecordCreated(ev) {
-    this.handleWorkspaceInvalidation(ev, 'record.created');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+    const refreshed = this.refreshMatchingStates(ev, 'record.created', (state) =>
+      this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
+    );
+    if (refreshed === 0 && !sourceRecordGuid) {
+      this.handleWorkspaceInvalidation(ev, 'record.created');
+    }
   }
 
   handleRecordMoved(ev) {
-    this.handleWorkspaceInvalidation(ev, 'record.moved');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+    const refreshed = this.refreshMatchingStates(ev, 'record.moved', (state) =>
+      this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
+    );
+    if (refreshed === 0 && !sourceRecordGuid) {
+      this.handleWorkspaceInvalidation(ev, 'record.moved');
+    }
   }
 
   handleLineItemUpdated(ev) {
     if (!ev) return;
 
-    const segments = ev?.hasSegments?.() && typeof ev.getSegments === 'function'
-      ? (ev.getSegments() || [])
-      : [];
-    const referenced = this.extractReferencedRecordGuids(segments);
-
-    for (const state of this._panelStates.values()) {
-      const panel = state?.panel || null;
-      if (!panel) continue;
-      if (!state.recordGuid) continue;
-
-      const hitsTargetRecord = referenced.has(state.recordGuid);
-      const hitsKnownSource = this.snapshotIncludesSourceRecord(state, ev.recordGuid || null);
-      if (!hitsTargetRecord && !hitsKnownSource) continue;
-
-      this.markStatePendingRemote(state, ev);
-      this.scheduleRefreshForPanel(panel, { force: false, reason: 'lineitem.updated' });
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const segments = this.getEventLineSegments(ev);
+    const referencedGuids = this.extractReferencedRecordGuids(segments);
+    const refreshed = this.refreshMatchingStates(ev, 'lineitem.updated', (state) =>
+      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
+    );
+    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+      this.handleWorkspaceInvalidation(ev, 'lineitem.updated');
     }
   }
 
   handleLineItemCreated(ev) {
-    this.handleWorkspaceInvalidation(ev, 'lineitem.created');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const segments = this.getEventLineSegments(ev);
+    const referencedGuids = this.extractReferencedRecordGuids(segments);
+    const refreshed = this.refreshMatchingStates(ev, 'lineitem.created', (state) =>
+      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
+    );
+    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+      this.handleWorkspaceInvalidation(ev, 'lineitem.created');
+    }
   }
 
   handleLineItemMoved(ev) {
-    this.handleWorkspaceInvalidation(ev, 'lineitem.moved');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const segments = this.getEventLineSegments(ev);
+    const referencedGuids = this.extractReferencedRecordGuids(segments);
+    const refreshed = this.refreshMatchingStates(ev, 'lineitem.moved', (state) =>
+      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
+    );
+    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+      this.handleWorkspaceInvalidation(ev, 'lineitem.moved');
+    }
   }
 
   handleLineItemUndeleted(ev) {
-    this.handleWorkspaceInvalidation(ev, 'lineitem.undeleted');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const segments = this.getEventLineSegments(ev);
+    const referencedGuids = this.extractReferencedRecordGuids(segments);
+    const refreshed = this.refreshMatchingStates(ev, 'lineitem.undeleted', (state) =>
+      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
+    );
+    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+      this.handleWorkspaceInvalidation(ev, 'lineitem.undeleted');
+    }
   }
 
   handleLineItemDeleted(ev) {
-    // We don't know which record(s) were referenced by the deleted item.
-    // This is rare, so we just refresh all visible footers (debounced).
-    this.handleWorkspaceInvalidation(ev, 'lineitem.deleted');
+    const sourceRecordGuid = this.getEventRecordGuid(ev);
+    const segments = this.getEventLineSegments(ev);
+    const referencedGuids = this.extractReferencedRecordGuids(segments);
+    const refreshed = this.refreshMatchingStates(ev, 'lineitem.deleted', (state) =>
+      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
+    );
+    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+      this.handleWorkspaceInvalidation(ev, 'lineitem.deleted');
+    }
   }
 
   countLinkedReferences(groups) {
@@ -3740,6 +3831,7 @@ class Plugin extends AppPlugin {
       .finally(() => {
         ctx.loading = false;
         ctx.loadPromise = null;
+        this.bumpLinkedContextRenderVersion(state);
         this.renderFromCache(state);
       });
 
@@ -3756,6 +3848,7 @@ class Plugin extends AppPlugin {
     if (action === 'toggle-context-more') {
       if (ctx.showMoreContext === true) {
         this.resetLinkedContextState(ctx);
+        this.bumpLinkedContextRenderVersion(state);
         this.renderFromCache(state);
         return;
       }
@@ -3768,6 +3861,7 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    this.bumpLinkedContextRenderVersion(state);
     this.renderFromCache(state);
     if (!this.hasRequestedLinkedContext(ctx)) return;
     await this.ensureLinkedContextLoaded(state, line);
@@ -4081,11 +4175,11 @@ class Plugin extends AppPlugin {
   }
 
   lineHasTextMentionOfRecord(line, recordName) {
-    const matcher = this.buildPhraseBoundaryMatcher(recordName);
-    if (!matcher) return false;
+    const matchers = this.buildRecordMentionMatchers(recordName);
+    if (matchers.length === 0) return false;
     const text = this.getLineTextMentionSource(line);
     if (!text) return false;
-    return matcher.test(text);
+    return matchers.some((matcher) => matcher.test(text));
   }
 
   getLineTextMentionSource(line) {
@@ -4101,24 +4195,45 @@ class Plugin extends AppPlugin {
     return out;
   }
 
-  buildPhraseBoundaryMatcher(phrase) {
+  getPhraseBoundaryTokens(phrase) {
     const trimmed = typeof phrase === 'string' ? phrase.trim() : '';
-    if (!trimmed) return null;
+    if (!trimmed) return [];
+    return trimmed
+      .replace(/['’]/g, '')
+      .match(/[a-z0-9]+/gi) || [];
+  }
 
-    const parts = trimmed.split(/\s+/).filter(Boolean).map((part) => this.escapeRegExp(part));
-    if (parts.length === 0) return null;
+  buildPhraseBoundaryPattern(phrase) {
+    const tokens = this.getPhraseBoundaryTokens(phrase).map((part) => this.escapeRegExp(part));
+    if (tokens.length === 0) return null;
 
-    return new RegExp(`(^|[^a-z0-9])${parts.join('\\s+')}(?=$|[^a-z0-9])`, 'i');
+    const separator = `[\\s\\-\\u2010-\\u2015_./,:;!?()[\\]{}"'“”‘’]+`;
+    return `(^|[^a-z0-9])(${tokens.join(separator)})(?=$|[^a-z0-9])`;
+  }
+
+  buildPhraseBoundaryMatcher(phrase) {
+    const pattern = this.buildPhraseBoundaryPattern(phrase);
+    if (!pattern) return null;
+    return new RegExp(pattern, 'i');
   }
 
   buildPhraseBoundaryGlobalMatcher(phrase) {
-    const trimmed = typeof phrase === 'string' ? phrase.trim() : '';
-    if (!trimmed) return null;
+    const pattern = this.buildPhraseBoundaryPattern(phrase);
+    if (!pattern) return null;
+    return new RegExp(pattern, 'ig');
+  }
 
-    const parts = trimmed.split(/\s+/).filter(Boolean).map((part) => this.escapeRegExp(part));
-    if (parts.length === 0) return null;
+  buildRecordMentionMatchers(recordName) {
+    return this.getRecordMentionPhrases(recordName)
+      .map((phrase) => this.buildPhraseBoundaryMatcher(phrase))
+      .filter(Boolean);
+  }
 
-    return new RegExp(`(^|[^a-z0-9])(${parts.join('\\s+')})(?=$|[^a-z0-9])`, 'ig');
+  buildRecordMentionGlobalMatchers(recordName) {
+    return this.getRecordMentionPhrases(recordName)
+      .sort((a, b) => b.length - a.length)
+      .map((phrase) => this.buildPhraseBoundaryGlobalMatcher(phrase))
+      .filter(Boolean);
   }
 
   findUnlinkedLineByGuid(state, lineGuid) {
@@ -4137,8 +4252,8 @@ class Plugin extends AppPlugin {
   buildReplacedSegments(segments, recordName, recordGuid) {
     if (!Array.isArray(segments) || !recordGuid) return segments;
 
-    const matcher = this.buildPhraseBoundaryGlobalMatcher(recordName);
-    if (!matcher) return segments;
+    const matchers = this.buildRecordMentionGlobalMatchers(recordName);
+    if (matchers.length === 0) return segments;
 
     const result = [];
     let changed = false;
@@ -4150,26 +4265,41 @@ class Plugin extends AppPlugin {
       }
 
       const text = seg.text;
+      const matches = [];
+      for (const matcher of matchers) {
+        matcher.lastIndex = 0;
+        let match = null;
+        while ((match = matcher.exec(text)) !== null) {
+          const prefix = match[1] || '';
+          const matchedText = match[2] || '';
+          const start = match.index + prefix.length;
+          const end = start + matchedText.length;
+          matches.push({ start, end, matchedText });
+          matcher.lastIndex = end;
+        }
+      }
+
+      if (matches.length === 0) {
+        result.push(seg);
+        continue;
+      }
+
+      matches.sort((a, b) => (a.start - b.start) || (b.end - a.end));
+
       let lastIndex = 0;
       let matched = false;
-      let match = null;
-      matcher.lastIndex = 0;
 
-      while ((match = matcher.exec(text)) !== null) {
+      for (const match of matches) {
+        if (match.start < lastIndex) continue;
         matched = true;
         changed = true;
 
-        const prefix = match[1] || '';
-        const matchedText = match[2] || '';
-        const start = match.index + prefix.length;
-
-        if (start > lastIndex) {
-          result.push({ type: seg.type, text: text.slice(lastIndex, start) });
+        if (match.start > lastIndex) {
+          result.push({ type: seg.type, text: text.slice(lastIndex, match.start) });
         }
 
-        result.push({ type: 'ref', text: { guid: recordGuid, title: matchedText } });
-        lastIndex = start + matchedText.length;
-        matcher.lastIndex = lastIndex;
+        result.push({ type: 'ref', text: { guid: recordGuid, title: match.matchedText } });
+        lastIndex = match.end;
       }
 
       if (!matched) {
@@ -4664,6 +4794,106 @@ class Plugin extends AppPlugin {
     };
   }
 
+  buildPropertyGroupsSignature(groups) {
+    return (groups || []).map((group) => {
+      const propertyName = (group?.propertyName || '').trim();
+      const records = (group?.records || []).map((record) => {
+        const guid = (record?.guid || '').trim();
+        return `${guid}@${this.getRecordUpdatedTimestamp(record)}:${record?.getName?.() || ''}`;
+      }).join(',');
+      return `${propertyName}[${records}]`;
+    }).join('||');
+  }
+
+  buildLineGroupsSignature(groups) {
+    return (groups || []).map((group) => {
+      const record = group?.record || null;
+      const recordGuid = (record?.guid || '').trim();
+      const recordName = record?.getName?.() || '';
+      const lines = (group?.lines || []).map((line) => {
+        const guid = (line?.guid || '').trim();
+        return `${guid}@${this.getLineActivityTimestamp(line)}:${this.getLineContentText(line)}`;
+      }).join(',');
+      return `${recordGuid}:${recordName}[${lines}]`;
+    }).join('||');
+  }
+
+  buildReferenceStatusRenderKey(viewState) {
+    return [
+      viewState.searchMode,
+      viewState.incompleteQueryDraft === true ? 'draft' : 'ready',
+      viewState.queryFilterState?.error || '',
+      viewState.queryFilterState?.loading === true ? 'loading' : 'idle',
+      viewState.canApplyScopedQuery === true ? 'scoped' : 'unscoped'
+    ].join('|');
+  }
+
+  buildPropertySectionRenderKey(state, viewState) {
+    return [
+      viewState.propertySectionCollapsed === true ? 'collapsed' : 'open',
+      viewState.propertyError || '',
+      viewState.showScopedCounts === true ? 'scoped' : 'plain',
+      viewState.hasScopedView === true ? 'filtered' : 'all',
+      viewState.highlightQuery || '',
+      viewState.filteredPropRefCount,
+      viewState.totalPropRefCount,
+      this.buildPropertyGroupsSignature(viewState.props),
+      state?.liveRenderVersion || 0
+    ].join('|');
+  }
+
+  buildLinkedSectionRenderKey(state, viewState) {
+    return [
+      viewState.linkedSectionCollapsed === true ? 'collapsed' : 'open',
+      viewState.linkedError || '',
+      viewState.showScopedCounts === true ? 'scoped' : 'plain',
+      viewState.hasScopedView === true ? 'filtered' : 'all',
+      viewState.highlightQuery || '',
+      viewState.filteredLinkedRefCount,
+      viewState.totalLinkedRefCount,
+      viewState.maxResults || 0,
+      this.buildLineGroupsSignature(viewState.linked),
+      state?.liveRenderVersion || 0,
+      state?.linkedContextRenderVersion || 0
+    ].join('|');
+  }
+
+  buildUnlinkedSectionRenderKey(state, viewState) {
+    return [
+      viewState.unlinkedSectionCollapsed === true ? 'collapsed' : 'open',
+      viewState.unlinkedError || '',
+      viewState.unlinkedDeferred === true ? 'deferred' : 'ready',
+      viewState.unlinkedLoading === true ? 'loading' : 'idle',
+      viewState.showScopedCounts === true ? 'scoped' : 'plain',
+      viewState.showUnlinkedCounts === true ? 'show' : 'hide',
+      viewState.hasScopedView === true ? 'filtered' : 'all',
+      viewState.highlightQuery || '',
+      viewState.filteredUnlinkedRefCount,
+      viewState.totalUnlinkedRefCount,
+      viewState.maxResults || 0,
+      this.buildLineGroupsSignature(viewState.unlinked),
+      state?.liveRenderVersion || 0,
+      state?.linkedContextRenderVersion || 0
+    ].join('|');
+  }
+
+  buildReferenceRenderPlan(state, viewState) {
+    const currentKeys = state?.renderSectionKeys || {};
+    const nextKeys = {
+      status: this.buildReferenceStatusRenderKey(viewState),
+      property: this.buildPropertySectionRenderKey(state, viewState),
+      linked: this.buildLinkedSectionRenderKey(state, viewState),
+      unlinked: this.buildUnlinkedSectionRenderKey(state, viewState)
+    };
+    return {
+      nextKeys,
+      statusChanged: currentKeys.status !== nextKeys.status,
+      propertyChanged: currentKeys.property !== nextKeys.property,
+      linkedChanged: currentKeys.linked !== nextKeys.linked,
+      unlinkedChanged: currentKeys.unlinked !== nextKeys.unlinked
+    };
+  }
+
   appendReferenceStatus(body, viewState) {
     if (viewState.searchMode === 'query' && viewState.incompleteQueryDraft) {
       this.appendNote(body, 'Finish the query to filter the current backreferences.');
@@ -4793,9 +5023,7 @@ class Plugin extends AppPlugin {
     maxResults
   }) {
     if (!state?.bodyEl || !state?.countEl) return;
-
-    const body = state.bodyEl;
-    body.innerHTML = '';
+    if (!state?.statusSlotEl || !state?.propertySlotEl || !state?.linkedSlotEl || !state?.unlinkedSlotEl) return;
 
     const viewState = this.buildReferenceViewState(state, {
       propertyGroups,
@@ -4812,12 +5040,26 @@ class Plugin extends AppPlugin {
     this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, viewState.collapseMetrics));
 
     state.countEl.textContent = viewState.summaryText;
-    this.appendReferenceStatus(body, viewState);
-    this.renderPropertyReferenceSection(body, state, viewState);
-    this.appendReferenceDivider(body);
-    this.renderLinkedReferenceSection(body, state, viewState);
-    this.appendReferenceDivider(body);
-    this.renderUnlinkedReferenceSection(body, state, viewState);
+    const plan = this.buildReferenceRenderPlan(state, viewState);
+
+    if (plan.statusChanged) {
+      state.statusSlotEl.innerHTML = '';
+      this.appendReferenceStatus(state.statusSlotEl, viewState);
+    }
+    if (plan.propertyChanged) {
+      state.propertySlotEl.innerHTML = '';
+      this.renderPropertyReferenceSection(state.propertySlotEl, state, viewState);
+    }
+    if (plan.linkedChanged) {
+      state.linkedSlotEl.innerHTML = '';
+      this.renderLinkedReferenceSection(state.linkedSlotEl, state, viewState);
+    }
+    if (plan.unlinkedChanged) {
+      state.unlinkedSlotEl.innerHTML = '';
+      this.renderUnlinkedReferenceSection(state.unlinkedSlotEl, state, viewState);
+    }
+
+    state.renderSectionKeys = plan.nextKeys;
   }
 
   buildChevronIcon(collapsed, extraClass) {

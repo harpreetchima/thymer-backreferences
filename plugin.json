@@ -1,6 +1,6 @@
 {
   "ver": 1,
-  "version": "0.4.42",
+  "version": "0.4.43",
   "name": "Backreferences",
   "icon": "ti-link",
   "description": "Backreferences footer (linked + property references)",

@@ -64,10 +64,56 @@ function makeLine({ guid, record, segments = [], type = 'text', createdAt, updat
   };
 }
 
+function makePanel({ id, record }) {
+  let activeRecord = record || null;
+  const navigateCalls = [];
+
+  const panel = {
+    getId() {
+      return id;
+    },
+    getElement() {
+      return {};
+    },
+    getType() {
+      return 'edit_panel';
+    },
+    getNavigation() {
+      return { type: 'edit_panel' };
+    },
+    getActiveRecord() {
+      return activeRecord;
+    },
+    setActiveRecord(nextRecord) {
+      activeRecord = nextRecord;
+    },
+    navigateTo(payload) {
+      navigateCalls.push(payload);
+      if (payload?.rootId) {
+        activeRecord = makeRecord({
+          guid: payload.rootId,
+          name: `Record ${payload.rootId}`
+        });
+      }
+      return true;
+    }
+  };
+
+  return {
+    panel,
+    navigateCalls,
+    getActiveRecord() {
+      return activeRecord;
+    }
+  };
+}
+
 function makePlugin() {
   const Plugin = loadPluginClass();
   const plugin = new Plugin();
 
+  plugin._panelStates = new Map();
+  plugin._eventHandlerIds = [];
   plugin._defaultSortBy = 'page_last_edited';
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
@@ -76,8 +122,6 @@ function makePlugin() {
   plugin._maxStoredSortByRecords = 400;
   plugin._maxStoredPropGroupStates = 160;
   plugin._maxStoredRecordGroupStates = 600;
-  plugin._legacyIgnoreCleanupYieldEveryRecords = 8;
-  plugin._legacyIgnoreCleanupYieldEveryLines = 250;
   plugin._queryBuiltInKeys = [
     'created_at', 'modified_at', 'created_by', 'modified_by', 'text', 'type', 'date',
     'due', 'time', 'mention', 'scheduled', 'hashtag', 'link', 'collection', 'guid',
@@ -100,6 +144,12 @@ function makePlugin() {
     },
     getActiveUsers() {
       return users;
+    }
+  };
+
+  plugin.ui = {
+    createIcon() {
+      return { classList: { add() {} } };
     }
   };
 
@@ -360,6 +410,36 @@ test('unlinked searches quote record titles as literal phrases', async () => {
   assert.equal(seenQuery, '"@task \\"Acme\\""');
 });
 
+test('mention matching handles punctuation normalization and conservative aliases', () => {
+  const plugin = makePlugin();
+  const title = 'Thymer / Backreferences (TBR)';
+
+  assert.equal(
+    plugin.lineHasTextMentionOfRecord(
+      { segments: [{ type: 'text', text: 'Thymer-Backreferences is live.' }] },
+      title
+    ),
+    true
+  );
+
+  assert.equal(
+    plugin.lineHasTextMentionOfRecord(
+      { segments: [{ type: 'text', text: 'TBR is live.' }] },
+      title
+    ),
+    true
+  );
+
+  const replaced = plugin.buildReplacedSegments(
+    [{ type: 'text', text: 'TBR is live.' }],
+    title,
+    'target-guid'
+  );
+
+  assert.equal(replaced.filter((seg) => seg.type === 'ref').length, 1);
+  assert.equal(plugin.segmentsToPlainText(replaced), 'TBR is live.');
+});
+
 test('query-mode helpers distinguish plain text from Thymer query drafts', () => {
   const plugin = makePlugin();
   assert.equal(plugin.getSearchMode('plain text'), 'text');
@@ -551,6 +631,220 @@ test('stored preferences prune oldest entries by recency', () => {
   } finally {
     global.localStorage = previousLocalStorage;
   }
+});
+
+test('panel lifecycle reuses state and only forces refresh on record changes', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+
+  const mounted = [];
+  const refreshes = [];
+  plugin.findMountContainer = () => ({});
+  plugin.mountFooter = (_panel, state) => {
+    mounted.push(state.panelId);
+  };
+  plugin.scheduleRefreshForPanel = (_panel, args) => {
+    refreshes.push(args);
+  };
+  plugin.getPageViewPreference = () => ({
+    footerCollapsed: false,
+    sections: plugin.createDefaultSectionCollapsedState(),
+    touchedAt: 0
+  });
+
+  plugin.handlePanelChanged(panel, 'panel.navigated');
+  plugin.handlePanelChanged(panel, 'panel.focused');
+
+  assert.deepEqual(mounted, ['panel-1', 'panel-1']);
+  assert.equal(refreshes[0].force, true);
+  assert.equal(refreshes[1].force, false);
+});
+
+test('ctrl-click line navigation opens a new panel then highlights the line', async () => {
+  const plugin = makePlugin();
+  const current = makePanel({
+    id: 'panel-current',
+    record: makeRecord({ guid: 'source-guid', name: 'Source' })
+  });
+  const created = makePanel({
+    id: 'panel-created',
+    record: makeRecord({ guid: 'target-guid', name: 'Target' })
+  });
+  const focusedPanels = [];
+
+  plugin.getWorkspaceGuid = () => 'workspace-guid';
+  plugin.ui = {
+    createPanel: async ({ afterPanel }) => {
+      assert.equal(afterPanel, current.panel);
+      return created.panel;
+    },
+    setActivePanel(panel) {
+      focusedPanels.push(panel.getId());
+    }
+  };
+  plugin.waitForPanelNavigationFrame = async () => {};
+  plugin.waitForPanelRecord = async () => true;
+
+  await plugin.openRecord(current.panel, 'target-guid', 'line-guid', { metaKey: true });
+
+  assert.deepEqual(focusedPanels, ['panel-created']);
+  assert.deepEqual(created.navigateCalls, [
+    {
+      type: 'edit_panel',
+      rootId: 'target-guid',
+      subId: null,
+      workspaceGuid: 'workspace-guid'
+    },
+    {
+      itemGuid: 'line-guid',
+      highlight: true
+    }
+  ]);
+  assert.equal(current.navigateCalls.length, 0);
+});
+
+test('deferred unlinked loading hydrates cached state for the current panel only', async () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source Note' });
+  const line = makeLine({
+    guid: 'line-unlinked',
+    record: source,
+    segments: [{ type: 'text', text: 'Target Note appears here.' }]
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  state.refreshSeq = 1;
+  state.lastResults = {
+    linkedGroups: [],
+    unlinkedDeferred: true,
+    unlinkedLoading: false,
+    unlinkedError: '',
+    unlinkedGroups: []
+  };
+  plugin._panelStates.set('panel-1', state);
+
+  let renderCount = 0;
+  let scopedSync = null;
+  plugin.getRefreshConfig = () => ({ maxResults: 200, showSelf: false });
+  plugin.renderFromCache = () => {
+    renderCount += 1;
+  };
+  plugin.syncScopedQueryWithCurrentInput = (_state, args) => {
+    scopedSync = args;
+  };
+  plugin.loadUnlinkedReferenceGroups = async () => ({
+    unlinkedGroups: [{ record: source, lines: [line] }],
+    unlinkedError: ''
+  });
+
+  await plugin.ensureDeferredUnlinkedLoaded(state);
+
+  assert.equal(state.lastResults.unlinkedDeferred, false);
+  assert.equal(state.lastResults.unlinkedLoading, false);
+  assert.equal(state.lastResults.unlinkedGroups.length, 1);
+  assert.equal(renderCount, 2);
+  assert.deepEqual(scopedSync, { immediate: true, reason: 'deferred-unlinked-loaded' });
+});
+
+test('targeted invalidation refreshes only panels affected by record and line events', () => {
+  const plugin = makePlugin();
+  const targetA = makeRecord({ guid: 'target-a', name: 'Thymer / Backreferences (TBR)' });
+  const targetB = makeRecord({ guid: 'target-b', name: 'Something Else' });
+  const source = makeRecord({
+    guid: 'source-guid',
+    name: 'Source',
+    properties: [makeProperty('Entity', ['record', targetA.guid])]
+  });
+  plugin.__recordsByGuid.set(source.guid, source);
+
+  const panelA = makePanel({ id: 'panel-a', record: targetA });
+  const panelB = makePanel({ id: 'panel-b', record: targetB });
+  const stateA = plugin.createPanelState('panel-a', panelA.panel);
+  const stateB = plugin.createPanelState('panel-b', panelB.panel);
+  stateA.recordGuid = targetA.guid;
+  stateB.recordGuid = targetB.guid;
+  plugin._panelStates.set('panel-a', stateA);
+  plugin._panelStates.set('panel-b', stateB);
+
+  const refreshes = [];
+  plugin.scheduleRefreshForPanel = (panel, args) => {
+    refreshes.push({ id: panel.getId(), reason: args.reason });
+  };
+
+  plugin.handleRecordUpdated({
+    recordGuid: source.guid,
+    properties: true,
+    source: { isLocal: false },
+    getSourceUser() {
+      return {
+        getDisplayName() {
+          return 'Remote User';
+        }
+      };
+    }
+  });
+
+  plugin.handleLineItemCreated({
+    recordGuid: 'line-source-guid',
+    segments: [{ type: 'text', text: 'TBR just shipped.' }],
+    source: { isLocal: false },
+    getSourceUser() {
+      return {
+        getDisplayName() {
+          return 'Remote User';
+        }
+      };
+    }
+  });
+
+  assert.deepEqual(refreshes, [
+    { id: 'panel-a', reason: 'record.updated' },
+    { id: 'panel-a', reason: 'lineitem.created' }
+  ]);
+  assert.equal(stateA.pendingRemoteSync, true);
+  assert.equal(stateB.pendingRemoteSync, false);
+});
+
+test('reference render plan skips unchanged sections and isolates linked-context rerenders', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Record' });
+  const linkedGroups = [{
+    record: linkedRecord,
+    lines: [makeLine({ guid: 'line-1', record: linkedRecord, segments: [{ type: 'text', text: 'linked' }] })]
+  }];
+
+  const viewState = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: [],
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  const firstPlan = plugin.buildReferenceRenderPlan(state, viewState);
+  assert.equal(firstPlan.propertyChanged, true);
+  assert.equal(firstPlan.linkedChanged, true);
+  assert.equal(firstPlan.unlinkedChanged, true);
+
+  state.renderSectionKeys = firstPlan.nextKeys;
+  const secondPlan = plugin.buildReferenceRenderPlan(state, viewState);
+  assert.equal(secondPlan.propertyChanged, false);
+  assert.equal(secondPlan.linkedChanged, false);
+  assert.equal(secondPlan.unlinkedChanged, false);
+
+  state.linkedContextRenderVersion = 1;
+  const thirdPlan = plugin.buildReferenceRenderPlan(state, viewState);
+  assert.equal(thirdPlan.propertyChanged, false);
+  assert.equal(thirdPlan.linkedChanged, true);
+  assert.equal(thirdPlan.unlinkedChanged, true);
 });
 
 (async () => {
