@@ -55,6 +55,9 @@ function makeLine({ guid, record, segments = [], type = 'text', createdAt, updat
     segments,
     type,
     parent_guid: parentGuid,
+    getRecord() {
+      return record || null;
+    },
     getCreatedAt() {
       return createdAt || null;
     },
@@ -316,6 +319,97 @@ test('segment helpers keep plain text, mentions, refs, and datetimes readable', 
   ]);
 
   assert.equal(text, 'Hello @Harpreet meet Linked Record on 2026-03-11');
+});
+
+test('datetime formatter preserves time-only and date-time values', () => {
+  const plugin = makePlugin();
+
+  assert.equal(plugin.formatDateTimeSegment({ t: '0930' }), '09:30');
+  assert.equal(plugin.formatDateTimeSegment({ d: '', t: { t: '1700', tz: 4 } }), '17:00');
+  assert.equal(plugin.formatDateTimeSegment({ d: '20260311', t: '0930' }), '2026-03-11 09:30');
+  assert.equal(
+    plugin.formatDateTimeSegment({
+      start: { d: '20260311', t: '0930' },
+      end: { t: '1130' }
+    }),
+    '2026-03-11 09:30 to 11:30'
+  );
+});
+
+test('descendant context depth follows parent_guid from tree context', async () => {
+  const plugin = makePlugin();
+  const record = makeRecord({ guid: 'record-guid', name: 'Suffering' });
+  const root = makeLine({ guid: 'root-line', record });
+  const easy = makeLine({ guid: 'easy-line', record, parentGuid: root.guid });
+  const shame = makeLine({ guid: 'shame-line', record, parentGuid: easy.guid });
+  const hard = makeLine({ guid: 'hard-line', record, parentGuid: root.guid });
+  const compassion = makeLine({ guid: 'compassion-line', record, parentGuid: hard.guid });
+
+  root.getTreeContext = async () => ({
+    descendants: [easy, shame, hard, compassion]
+  });
+
+  // Deliberately misleading child arrays: if collectDescendantContext walked getChildren()
+  // recursively, "hard-line" would end up nested too deeply.
+  easy.getChildren = async () => [shame, hard];
+  hard.getChildren = async () => [compassion];
+
+  const ctx = await plugin.collectDescendantContext(root);
+  assert.deepEqual(ctx.descendants.map((item) => item.guid), ['easy-line', 'shame-line', 'hard-line', 'compassion-line']);
+  assert.equal(ctx.depthByGuid['easy-line'], 1);
+  assert.equal(ctx.depthByGuid['shame-line'], 2);
+  assert.equal(ctx.depthByGuid['hard-line'], 1);
+  assert.equal(ctx.depthByGuid['compassion-line'], 2);
+});
+
+test('descendant context filters out lines from parallel branches', async () => {
+  const plugin = makePlugin();
+  const record = makeRecord({ guid: 'record-guid', name: 'Scoped Note' });
+  const matched = makeLine({ guid: 'matched-line', record });
+  const child = makeLine({ guid: 'child-line', record, parentGuid: matched.guid });
+  const parallel = makeLine({ guid: 'parallel-line', record, parentGuid: 'other-root' });
+  const parallelChild = makeLine({ guid: 'parallel-child', record, parentGuid: parallel.guid });
+
+  matched.getTreeContext = async () => ({
+    descendants: [child, parallel, parallelChild]
+  });
+
+  const ctx = await plugin.collectDescendantContext(matched);
+  assert.deepEqual(ctx.descendants.map((item) => item.guid), ['child-line']);
+  assert.deepEqual(ctx.depthByGuid, { 'child-line': 1 });
+});
+
+test('baseline scoping excludes parallel top-level branches from linked context', async () => {
+  const plugin = makePlugin();
+  plugin.renderFromCache = () => {};
+  plugin.bumpLinkedContextRenderVersion = () => {};
+
+  const record = makeRecord({ guid: 'record-guid', name: 'Backref Scope' });
+  const branchA = makeLine({ guid: 'branch-a', record, parentGuid: record.guid });
+  const matched = makeLine({ guid: 'matched-line', record, parentGuid: branchA.guid });
+  const matchedChild = makeLine({ guid: 'matched-child', record, parentGuid: matched.guid });
+  const branchSibling = makeLine({ guid: 'branch-sibling', record, parentGuid: branchA.guid });
+  const branchB = makeLine({ guid: 'branch-b', record, parentGuid: record.guid });
+  const branchBChild = makeLine({ guid: 'branch-b-child', record, parentGuid: branchB.guid });
+  matched.getTreeContext = async () => ({
+    ancestors: [branchA],
+    descendants: [matchedChild]
+  });
+  branchA.getTreeContext = async () => ({
+    ancestors: [],
+    descendants: [matched, matchedChild, branchSibling]
+  });
+  branchB.getTreeContext = async () => ({
+    ancestors: [],
+    descendants: [branchBChild]
+  });
+
+  const state = { linkedContextByLine: new Map() };
+  const ctx = await plugin.ensureLinkedContextLoaded(state, matched);
+
+  assert.deepEqual(ctx.aboveItems.map((item) => item.guid), ['branch-a']);
+  assert.deepEqual(ctx.descendants.map((item) => item.guid), ['matched-child']);
+  assert.deepEqual(ctx.belowItems.map((item) => item.guid), ['branch-sibling']);
 });
 
 test('segment helpers handle ref segments with string seg.text (plain guid format from API)', () => {

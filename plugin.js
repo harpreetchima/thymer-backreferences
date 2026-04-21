@@ -3687,40 +3687,63 @@ class Plugin extends AppPlugin {
     return null;
   }
 
-  async collectDescendantContext(line) {
-    const descendants = [];
-    const depthByGuid = {};
-    const seen = new Set();
+  async collectDescendantContext(line, treeContext = null) {
     const rootGuid = line?.guid || null;
-    if (rootGuid) seen.add(rootGuid);
+    const tree = treeContext || (typeof line?.getTreeContext === 'function'
+      ? await line.getTreeContext().catch(() => null)
+      : null);
+    const descendants = Array.isArray(tree?.descendants) ? tree.descendants.filter(Boolean) : [];
+    const depthByGuid = {};
 
-    const walk = async (items, depth) => {
-      for (const item of items || []) {
-        const guid = item?.guid || null;
-        if (!guid) continue;
-        if (seen.has(guid)) continue;
-        seen.add(guid);
-        descendants.push(item);
-        depthByGuid[guid] = depth;
-        let children = [];
-        try {
-          children = (await item.getChildren()) || [];
-        } catch (e) {
-          children = Array.isArray(item?.children) ? item.children : [];
-        }
-        await walk(children, depth + 1);
-      }
-    };
-
-    let rootChildren = [];
-    try {
-      rootChildren = (await line.getChildren()) || [];
-    } catch (e) {
-      rootChildren = Array.isArray(line?.children) ? line.children : [];
+    if (!rootGuid || descendants.length === 0) {
+      return { descendants, depthByGuid };
     }
 
-    await walk(rootChildren, 1);
-    return { descendants, depthByGuid };
+    const parentByGuid = this.buildParentGuidMap(null, descendants);
+    const scopedDescendants = [];
+
+    for (const item of descendants) {
+      const guid = item?.guid || null;
+      if (!guid) continue;
+      const depth = this.getLineDepthFromAncestor(guid, rootGuid, parentByGuid);
+      if (depth === null) continue;
+      depthByGuid[guid] = depth;
+      scopedDescendants.push(item);
+    }
+
+    return { descendants: scopedDescendants, depthByGuid };
+  }
+
+  async collectBaselineContextItems(line, treeContext = null) {
+    if (!line) return { baselineRootGuid: null, items: [] };
+
+    const tree = treeContext || (typeof line?.getTreeContext === 'function'
+      ? await line.getTreeContext().catch(() => null)
+      : null);
+    const ancestors = Array.isArray(tree?.ancestors) ? tree.ancestors.filter(Boolean) : [];
+    const baselineRoot = ancestors.length > 0
+      ? ancestors[ancestors.length - 1]
+      : line;
+    const baselineRootGuid = baselineRoot?.guid || line?.guid || null;
+
+    const baselineTree = baselineRootGuid === (line?.guid || null)
+      ? tree
+      : (typeof baselineRoot?.getTreeContext === 'function'
+        ? await baselineRoot.getTreeContext().catch(() => null)
+        : null);
+    const descendants = Array.isArray(baselineTree?.descendants)
+      ? baselineTree.descendants.filter(Boolean)
+      : [];
+    const items = [];
+
+    if (baselineRoot?.guid) items.push(baselineRoot);
+    for (const item of descendants) {
+      const guid = item?.guid || null;
+      if (!guid || guid === baselineRootGuid) continue;
+      items.push(item);
+    }
+
+    return { baselineRootGuid, items };
   }
 
   buildRecordDocumentOrder(record, items) {
@@ -3768,6 +3791,80 @@ class Plugin extends AppPlugin {
     return ordered;
   }
 
+  buildParentGuidMap(record, items) {
+    const recordGuid = record?.guid || null;
+    const map = new Map();
+
+    for (const item of Array.isArray(items) ? items : []) {
+      const guid = item?.guid || null;
+      if (!guid) continue;
+      const parentGuid = typeof item?.parent_guid === 'string' && item.parent_guid
+        ? item.parent_guid
+        : recordGuid;
+      map.set(guid, parentGuid || null);
+    }
+
+    return map;
+  }
+
+  getLineDepthFromAncestor(lineGuid, ancestorGuid, parentByGuid) {
+    const guid = lineGuid || null;
+    const ancestor = ancestorGuid || null;
+    if (!guid || !ancestor || !(parentByGuid instanceof Map) || guid === ancestor) return null;
+
+    let depth = 0;
+    let currentGuid = guid;
+    const seen = new Set();
+
+    while (currentGuid && !seen.has(currentGuid)) {
+      seen.add(currentGuid);
+      const parentGuid = parentByGuid.get(currentGuid) || null;
+      if (!parentGuid) return null;
+      depth += 1;
+      if (parentGuid === ancestor) return depth;
+      currentGuid = parentGuid;
+    }
+
+    return null;
+  }
+
+  isLineWithinSubtree(lineGuid, subtreeRootGuid, parentByGuid) {
+    if (!lineGuid || !subtreeRootGuid) return false;
+    if (lineGuid === subtreeRootGuid) return true;
+    return this.getLineDepthFromAncestor(lineGuid, subtreeRootGuid, parentByGuid) !== null;
+  }
+
+  findBaselineContextRootGuid(record, matchedGuid, parentByGuid) {
+    const recordGuid = record?.guid || null;
+    let currentGuid = matchedGuid || null;
+    if (!recordGuid || !currentGuid || !(parentByGuid instanceof Map)) return currentGuid;
+
+    const seen = new Set();
+    while (currentGuid && !seen.has(currentGuid)) {
+      seen.add(currentGuid);
+      const parentGuid = parentByGuid.get(currentGuid) || null;
+      if (!parentGuid || parentGuid === recordGuid) return currentGuid;
+      currentGuid = parentGuid;
+    }
+
+    return matchedGuid || null;
+  }
+
+  scopeContextItemsToBaseline(record, items, matchedGuid) {
+    const list = Array.isArray(items) ? items.filter(Boolean) : [];
+    const parentByGuid = this.buildParentGuidMap(record, list);
+    const baselineRootGuid = this.findBaselineContextRootGuid(record, matchedGuid, parentByGuid);
+    const scopedItems = baselineRootGuid
+      ? list.filter((item) => this.isLineWithinSubtree(item?.guid || null, baselineRootGuid, parentByGuid))
+      : list;
+
+    return {
+      baselineRootGuid,
+      items: scopedItems,
+      parentByGuid
+    };
+  }
+
   async ensureLinkedContextLoaded(state, line) {
     const ctx = this.getLinkedContextState(state, line?.guid || null);
     if (!ctx || !line) return null;
@@ -3779,17 +3876,18 @@ class Plugin extends AppPlugin {
     this.renderFromCache(state);
 
     ctx.loadPromise = (async () => {
-      await line.getTreeContext();
-      const descendantContext = await this.collectDescendantContext(line);
-
-      const record = line.getRecord?.() || null;
-      const allItems = record && typeof record.getLineItems === 'function'
-        ? ((await record.getLineItems(false)) || [])
-        : [];
-      const orderedItems = this.buildRecordDocumentOrder(record, allItems);
-      const contextItems = orderedItems.length > 0 ? orderedItems : allItems;
+      const treeContext = await line.getTreeContext();
+      const descendantContext = await this.collectDescendantContext(line, treeContext);
       const matchedGuid = line?.guid || '';
-      const matchedIndex = contextItems.findIndex((item) => (item?.guid || '') === matchedGuid);
+      const baselineContext = await this.collectBaselineContextItems(line, treeContext);
+      const baselineItems = baselineContext.items.length > 0
+        ? baselineContext.items
+        : [
+          line,
+          ...(Array.isArray(descendantContext.descendants) ? descendantContext.descendants : [])
+        ];
+      const scopedItems = baselineItems.filter(Boolean);
+      const matchedIndex = scopedItems.findIndex((item) => (item?.guid || '') === matchedGuid);
       const aboveItems = [];
       const belowItems = [];
 
@@ -3801,14 +3899,14 @@ class Plugin extends AppPlugin {
             .filter(Boolean)
         );
 
-        for (let i = matchedIndex + 1; i < contextItems.length; i += 1) {
-          const guid = contextItems[i]?.guid || '';
+        for (let i = matchedIndex + 1; i < scopedItems.length; i += 1) {
+          const guid = scopedItems[i]?.guid || '';
           if (!guid || !descendantGuids.has(guid)) continue;
           subtreeEndIndex = i;
         }
 
-        aboveItems.push(...contextItems.slice(0, matchedIndex));
-        belowItems.push(...contextItems.slice(subtreeEndIndex + 1));
+        aboveItems.push(...scopedItems.slice(0, matchedIndex));
+        belowItems.push(...scopedItems.slice(subtreeEndIndex + 1));
       }
 
       ctx.descendants = descendantContext.descendants;
@@ -5766,12 +5864,162 @@ class Plugin extends AppPlugin {
     return name ? `@${name}` : '@user';
   }
 
+  padDateTimeNumber(value, width = 2) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    return String(Math.trunc(n)).padStart(width, '0');
+  }
+
+  formatDateTimeDate(value) {
+    if (typeof value === 'string') {
+      const compact = value.trim().match(/^(\d{4})(\d{2})(\d{2})$/);
+      if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+      const dashed = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (dashed) return `${dashed[1]}-${dashed[2]}-${dashed[3]}`;
+      return '';
+    }
+
+    if (value && typeof value === 'object') {
+      const year = Number(value.year);
+      const month = Number(value.month);
+      const day = Number(value.day);
+      if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+        const normalizedMonth = month >= 1 ? month : (month + 1);
+        return `${this.padDateTimeNumber(year, 4)}-${this.padDateTimeNumber(normalizedMonth, 2)}-${this.padDateTimeNumber(day, 2)}`;
+      }
+    }
+
+    return '';
+  }
+
+  formatDateTimeTime(value, fallbackParts = null) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return `${this.padDateTimeNumber(value, 2)}:00`;
+    }
+
+    if (value && typeof value === 'object') {
+      const nested = value.value && typeof value.value === 'object'
+        ? value.value
+        : value.t && typeof value.t === 'string'
+          ? value.t
+          : value.time && (typeof value.time === 'string' || typeof value.time === 'number' || typeof value.time === 'object')
+            ? value.time
+            : null;
+      if (nested && nested !== value) {
+        const nestedText = this.formatDateTimeTime(nested, value);
+        if (nestedText) return nestedText;
+      }
+    }
+
+    if (typeof value === 'string') {
+      const raw = value.trim();
+      if (!raw) return '';
+
+      const colon = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+      if (colon) {
+        const hours = this.padDateTimeNumber(colon[1], 2);
+        const minutes = this.padDateTimeNumber(colon[2], 2);
+        const seconds = colon[3] ? this.padDateTimeNumber(colon[3], 2) : '';
+        return seconds ? `${hours}:${minutes}:${seconds}` : `${hours}:${minutes}`;
+      }
+
+      const digits = raw.replace(/\D+/g, '');
+      if (digits.length === 1 || digits.length === 2) {
+        return `${digits.padStart(2, '0')}:00`;
+      }
+      if (digits.length === 3) {
+        return `${digits.slice(0, 1).padStart(2, '0')}:${digits.slice(1, 3)}`;
+      }
+      if (digits.length === 4) {
+        return `${digits.slice(0, 2)}:${digits.slice(2, 4)}`;
+      }
+      if (digits.length === 6) {
+        return `${digits.slice(0, 2)}:${digits.slice(2, 4)}:${digits.slice(4, 6)}`;
+      }
+    }
+
+    if (fallbackParts && typeof fallbackParts === 'object') {
+      const hours = Number(fallbackParts.hours ?? fallbackParts.hour ?? fallbackParts.h);
+      const minutes = Number(fallbackParts.minutes ?? fallbackParts.minute ?? fallbackParts.m ?? 0);
+      const seconds = Number(fallbackParts.seconds ?? fallbackParts.second ?? fallbackParts.s ?? 0);
+      if (Number.isFinite(hours)) {
+        const hh = this.padDateTimeNumber(hours, 2);
+        const mm = this.padDateTimeNumber(minutes, 2);
+        const ss = Number.isFinite(seconds) && seconds > 0
+          ? this.padDateTimeNumber(seconds, 2)
+          : '';
+        return ss ? `${hh}:${mm}:${ss}` : `${hh}:${mm}`;
+      }
+    }
+
+    return '';
+  }
+
+  extractDateTimeDisplayParts(value) {
+    if (!value || typeof value !== 'object') return null;
+
+    const source = value.value && typeof value.value === 'object'
+      ? value.value
+      : value;
+
+    const date = this.formatDateTimeDate(
+      typeof source.d === 'string' ? source.d
+        : typeof source.date === 'string' ? source.date
+          : source
+    );
+    const time = this.formatDateTimeTime(
+      source.t != null ? source.t
+        : source.time != null ? source.time
+          : null,
+      source
+    );
+
+    if (!date && !time) return null;
+    return { date, time };
+  }
+
+  formatDateTimeDisplayParts(parts) {
+    if (!parts) return '';
+    const date = typeof parts.date === 'string' ? parts.date : '';
+    const time = typeof parts.time === 'string' ? parts.time : '';
+    if (date && time) return `${date} ${time}`;
+    return date || time || '';
+  }
+
   formatDateTimeSegment(v) {
     if (typeof v === 'string') return v;
-    const d = v?.d || null;
-    if (typeof d !== 'string' || d.length !== 8) return '';
-    // d = YYYYMMDD
-    return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
+    if (!v || typeof v !== 'object') return '';
+
+    const raw = typeof v.raw === 'string' ? v.raw.trim() : '';
+    if (raw) return raw;
+
+    const startSource = v.start && typeof v.start === 'object'
+      ? v.start
+      : v.from && typeof v.from === 'object'
+        ? v.from
+        : v;
+    const endSource = v.end && typeof v.end === 'object'
+      ? v.end
+      : v.to && typeof v.to === 'object'
+        ? v.to
+        : (v.ed || v.et || v.endDate || v.endTime)
+          ? {
+              d: v.ed || v.endDate || null,
+              t: v.et || v.endTime || null
+            }
+          : null;
+
+    const start = this.extractDateTimeDisplayParts(startSource);
+    const end = this.extractDateTimeDisplayParts(endSource);
+
+    const startText = this.formatDateTimeDisplayParts(start);
+    let endText = this.formatDateTimeDisplayParts(end);
+    if (start?.date && !end?.date && end?.time) {
+      endText = end.time;
+    }
+
+    if (startText && endText) return `${startText} to ${endText}`;
+    return startText || endText || '';
   }
 
   coercePositiveInt(val, fallback) {
