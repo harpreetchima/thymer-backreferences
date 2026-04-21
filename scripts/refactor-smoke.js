@@ -412,6 +412,79 @@ test('baseline scoping excludes parallel top-level branches from linked context'
   assert.deepEqual(ctx.belowItems.map((item) => item.guid), ['branch-sibling']);
 });
 
+test('baseline tree fills in deeper descendants missing from matched tree context', async () => {
+  const plugin = makePlugin();
+  plugin.renderFromCache = () => {};
+  plugin.bumpLinkedContextRenderVersion = () => {};
+
+  const record = makeRecord({ guid: 'record-guid', name: 'Depth Note' });
+  const branchRoot = makeLine({ guid: 'branch-root', record, parentGuid: record.guid });
+  const matched = makeLine({ guid: 'matched-line', record, parentGuid: branchRoot.guid });
+  const feeling = makeLine({ guid: 'feeling-line', record, parentGuid: matched.guid });
+  const behaviour = makeLine({ guid: 'behaviour-line', record, parentGuid: feeling.guid });
+  const pros = makeLine({ guid: 'pros-line', record, parentGuid: matched.guid });
+  const cons = makeLine({ guid: 'cons-line', record, parentGuid: matched.guid });
+  const letsGoBackIn = makeLine({ guid: 'lets-go-back-in', record, parentGuid: cons.guid });
+  const furtherIn = makeLine({ guid: 'further-in', record, parentGuid: letsGoBackIn.guid });
+
+  matched.getTreeContext = async () => ({
+    ancestors: [branchRoot],
+    descendants: [feeling, behaviour, pros, cons]
+  });
+  branchRoot.getTreeContext = async () => ({
+    ancestors: [],
+    descendants: [matched, feeling, behaviour, pros, cons, letsGoBackIn, furtherIn]
+  });
+
+  const state = { linkedContextByLine: new Map() };
+  const ctx = await plugin.ensureLinkedContextLoaded(state, matched);
+
+  assert.deepEqual(ctx.descendants.map((item) => item.guid), [
+    'feeling-line',
+    'behaviour-line',
+    'pros-line',
+    'cons-line',
+    'lets-go-back-in',
+    'further-in'
+  ]);
+  assert.equal(ctx.depthByGuid['cons-line'], 1);
+  assert.equal(ctx.depthByGuid['lets-go-back-in'], 2);
+  assert.equal(ctx.depthByGuid['further-in'], 3);
+  assert.deepEqual(ctx.belowItems.map((item) => item.guid), []);
+});
+
+test('below context preserves nested depth for sibling branches', async () => {
+  const plugin = makePlugin();
+  plugin.renderFromCache = () => {};
+  plugin.bumpLinkedContextRenderVersion = () => {};
+
+  const record = makeRecord({ guid: 'record-guid', name: 'Sibling Depth Note' });
+  const branchRoot = makeLine({ guid: 'branch-root', record, parentGuid: record.guid });
+  const matched = makeLine({ guid: 'matched-line', record, parentGuid: branchRoot.guid });
+  const feeling = makeLine({ guid: 'feeling-line', record, parentGuid: matched.guid });
+  const cons = makeLine({ guid: 'cons-line', record, parentGuid: branchRoot.guid });
+  const letsGoBackIn = makeLine({ guid: 'lets-go-back-in', record, parentGuid: cons.guid });
+  const furtherIn = makeLine({ guid: 'further-in', record, parentGuid: letsGoBackIn.guid });
+
+  matched.getTreeContext = async () => ({
+    ancestors: [branchRoot],
+    descendants: [feeling]
+  });
+  branchRoot.getTreeContext = async () => ({
+    ancestors: [],
+    descendants: [matched, feeling, cons, letsGoBackIn, furtherIn]
+  });
+
+  const state = { linkedContextByLine: new Map() };
+  const ctx = await plugin.ensureLinkedContextLoaded(state, matched);
+
+  assert.deepEqual(ctx.descendants.map((item) => item.guid), ['feeling-line']);
+  assert.deepEqual(ctx.belowItems.map((item) => item.guid), ['cons-line', 'lets-go-back-in', 'further-in']);
+  assert.equal(ctx.relativeDepthByGuid['cons-line'], 0);
+  assert.equal(ctx.relativeDepthByGuid['lets-go-back-in'], 1);
+  assert.equal(ctx.relativeDepthByGuid['further-in'], 2);
+});
+
 test('segment helpers handle ref segments with string seg.text (plain guid format from API)', () => {
   const plugin = makePlugin();
   const linkedRecord = makeRecord({ guid: 'linked-guid', name: '@John Doe' });

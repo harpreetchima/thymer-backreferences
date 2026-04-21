@@ -2800,6 +2800,7 @@ class Plugin extends AppPlugin {
       ctx.error = '';
       ctx.descendants = [];
       ctx.depthByGuid = {};
+      ctx.relativeDepthByGuid = {};
       ctx.aboveItems = [];
       ctx.belowItems = [];
     }
@@ -3588,6 +3589,7 @@ class Plugin extends AppPlugin {
       error: '',
       descendants: [],
       depthByGuid: {},
+      relativeDepthByGuid: {},
       aboveItems: [],
       belowItems: []
     };
@@ -3879,6 +3881,7 @@ class Plugin extends AppPlugin {
       const treeContext = await line.getTreeContext();
       const descendantContext = await this.collectDescendantContext(line, treeContext);
       const matchedGuid = line?.guid || '';
+      const record = typeof line?.getRecord === 'function' ? line.getRecord() : (line?.record || null);
       const baselineContext = await this.collectBaselineContextItems(line, treeContext);
       const baselineItems = baselineContext.items.length > 0
         ? baselineContext.items
@@ -3886,7 +3889,56 @@ class Plugin extends AppPlugin {
           line,
           ...(Array.isArray(descendantContext.descendants) ? descendantContext.descendants : [])
         ];
-      const scopedItems = baselineItems.filter(Boolean);
+      const scopedBaseline = this.scopeContextItemsToBaseline(record, baselineItems, matchedGuid);
+      const scopedItems = this.buildRecordDocumentOrder(
+        record,
+        Array.isArray(scopedBaseline?.items) && scopedBaseline.items.length > 0
+          ? scopedBaseline.items
+          : baselineItems.filter(Boolean)
+      );
+      const baselineParentByGuid = scopedBaseline?.parentByGuid instanceof Map
+        ? scopedBaseline.parentByGuid
+        : this.buildParentGuidMap(record, scopedItems);
+      const descendants = [];
+      const depthByGuid = {};
+      const relativeDepthByGuid = {};
+      const baselineRootGuid = scopedBaseline?.baselineRootGuid || baselineContext?.baselineRootGuid || null;
+      const matchedRootDepth = baselineRootGuid && matchedGuid && baselineRootGuid !== matchedGuid
+        ? this.getLineDepthFromAncestor(matchedGuid, baselineRootGuid, baselineParentByGuid)
+        : 0;
+      const matchedAbsoluteDepth = Number.isFinite(matchedRootDepth) ? matchedRootDepth : 0;
+
+      for (const item of scopedItems) {
+        const guid = item?.guid || '';
+        if (!guid) continue;
+        const absoluteDepth = !baselineRootGuid || guid === baselineRootGuid
+          ? 0
+          : this.getLineDepthFromAncestor(guid, baselineRootGuid, baselineParentByGuid);
+        if (absoluteDepth === null) continue;
+        relativeDepthByGuid[guid] = Math.max(0, absoluteDepth - matchedAbsoluteDepth);
+      }
+
+      for (const item of scopedItems) {
+        const guid = item?.guid || '';
+        if (!guid || guid === matchedGuid) continue;
+        const depth = this.getLineDepthFromAncestor(guid, matchedGuid, baselineParentByGuid);
+        if (depth === null) continue;
+        descendants.push(item);
+        depthByGuid[guid] = depth;
+      }
+
+      if (descendants.length === 0) {
+        for (const item of descendantContext.descendants || []) {
+          const guid = item?.guid || '';
+          if (!guid || guid === matchedGuid || depthByGuid[guid] != null) continue;
+          descendants.push(item);
+          depthByGuid[guid] = Number(descendantContext.depthByGuid?.[guid] || 1);
+          if (relativeDepthByGuid[guid] == null) {
+            relativeDepthByGuid[guid] = Number(descendantContext.depthByGuid?.[guid] || 1);
+          }
+        }
+      }
+
       const matchedIndex = scopedItems.findIndex((item) => (item?.guid || '') === matchedGuid);
       const aboveItems = [];
       const belowItems = [];
@@ -3894,7 +3946,7 @@ class Plugin extends AppPlugin {
       if (matchedIndex >= 0) {
         let subtreeEndIndex = matchedIndex;
         const descendantGuids = new Set(
-          (descendantContext.descendants || [])
+          descendants
             .map((item) => item?.guid || '')
             .filter(Boolean)
         );
@@ -3909,8 +3961,9 @@ class Plugin extends AppPlugin {
         belowItems.push(...scopedItems.slice(subtreeEndIndex + 1));
       }
 
-      ctx.descendants = descendantContext.descendants;
-      ctx.depthByGuid = descendantContext.depthByGuid;
+      ctx.descendants = descendants;
+      ctx.depthByGuid = depthByGuid;
+      ctx.relativeDepthByGuid = relativeDepthByGuid;
       ctx.aboveItems = aboveItems;
       ctx.belowItems = belowItems;
       ctx.loaded = true;
@@ -5594,20 +5647,26 @@ class Plugin extends AppPlugin {
     const items = [];
     if (position === 'top') {
       for (const line of this.getVisibleAboveContextItems(ctx)) {
-        items.push({ line, indent: 0 });
+        items.push({
+          line,
+          indent: Number(ctx.relativeDepthByGuid?.[line?.guid] || 0)
+        });
       }
     } else {
       if (ctx.showMoreContext === true) {
         for (const line of ctx.descendants || []) {
           items.push({
             line,
-            indent: Number(ctx.depthByGuid?.[line?.guid] || 1)
+            indent: Number(ctx.relativeDepthByGuid?.[line?.guid] || ctx.depthByGuid?.[line?.guid] || 1)
           });
         }
       }
 
       for (const line of this.getVisibleBelowContextItems(ctx)) {
-        items.push({ line, indent: 0 });
+        items.push({
+          line,
+          indent: Number(ctx.relativeDepthByGuid?.[line?.guid] || 0)
+        });
       }
     }
 
@@ -6801,8 +6860,10 @@ class Plugin extends AppPlugin {
 
       .tlr-context-line {
         display: block;
-        width: 100%;
-        padding: 5px 10px 5px calc(12px + var(--tlr-context-indent, 0px));
+        box-sizing: border-box;
+        width: calc(100% - var(--tlr-context-indent, 0px));
+        margin-left: var(--tlr-context-indent, 0px);
+        padding: 5px 10px 5px 12px;
         text-align: left;
         color: var(--tlr-text-default);
         line-height: 1.35;
