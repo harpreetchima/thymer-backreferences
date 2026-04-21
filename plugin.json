@@ -1,11 +1,25 @@
 {
   "ver": 1,
-  "version": "0.4.43",
   "name": "Backreferences",
   "icon": "ti-link",
+  "item_name": "Note",
   "description": "Backreferences footer (linked + property references)",
+  "show_sidebar_items": true,
+  "show_cmdpal_items": true,
+  "views": [],
+  "fields": [],
+  "page_field_ids": [],
+  "sidebar_record_sort_field_id": "updated_at",
+  "sidebar_record_sort_dir": "desc",
+  "managed": {
+    "fields": false,
+    "views": false,
+    "sidebar": false
+  },
   "custom": {
     "maxResults": 200,
     "showSelf": false
-  }
+  },
+  "home": false,
+  "version": "0.4.45"
 }
