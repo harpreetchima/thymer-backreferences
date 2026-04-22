@@ -5078,16 +5078,17 @@ class Plugin extends AppPlugin {
         }
       }
 
-      .tlr-prop-record-wrap {
+      /* Scoped under .tlr-footer: tlr-expand-line / tlr-preview-row match Thymer editor line classes. */
+      .tlr-footer .tlr-prop-record-wrap {
         display: flex;
         flex-direction: column;
       }
-      .tlr-prop-record-wrap .tlr-record-preview {
+      .tlr-footer .tlr-prop-record-wrap .tlr-record-preview {
         margin-left: 10px;
       }
 
       /* ---- Inline record preview ---- */
-      .tlr-expand-record-btn {
+      .tlr-footer .tlr-expand-record-btn {
         display: inline-flex;
         align-items: center;
         gap: 4px;
@@ -5104,13 +5105,13 @@ class Plugin extends AppPlugin {
         min-width: auto;
         line-height: 1;
       }
-      .tlr-expand-record-btn:hover {
+      .tlr-footer .tlr-expand-record-btn:hover {
         color: var(--text-default, inherit);
       }
-      .tlr-expand-record-btn.is-expanded {
+      .tlr-footer .tlr-expand-record-btn.is-expanded {
         color: var(--color-primary-400, var(--ed-link-color, var(--link-color, var(--accent, inherit))));
       }
-      .tlr-expand-glyph {
+      .tlr-footer .tlr-expand-glyph {
         display: inline-block;
         width: 0;
         height: 0;
@@ -5121,17 +5122,17 @@ class Plugin extends AppPlugin {
         flex-shrink: 0;
         margin-top: 1px;
       }
-      .tlr-expand-record-btn.is-expanded .tlr-expand-glyph {
+      .tlr-footer .tlr-expand-record-btn.is-expanded .tlr-expand-glyph {
         transform: rotate(0deg);
       }
-      .tlr-expand-record-btn:not(.is-expanded) .tlr-expand-glyph {
+      .tlr-footer .tlr-expand-record-btn:not(.is-expanded) .tlr-expand-glyph {
         transform: rotate(-90deg);
       }
-      .tlr-expand-label {
+      .tlr-footer .tlr-expand-label {
         line-height: 1;
         letter-spacing: 0.01em;
       }
-      .tlr-record-preview {
+      .tlr-footer .tlr-record-preview {
         display: none;
         flex-direction: column;
         margin: 4px 0 6px 10px;
@@ -5145,10 +5146,10 @@ class Plugin extends AppPlugin {
         line-height: 1.45;
         color: var(--color-text-100, #e8e0d0);
       }
-      .tlr-record-expanded .tlr-record-preview {
+      .tlr-footer .tlr-record-expanded .tlr-record-preview {
         display: flex;
       }
-      .tlr-expand-line {
+      .tlr-footer .tlr-expand-line {
         display: block;
         width: 100%;
         padding: 4px 6px;
@@ -5160,20 +5161,20 @@ class Plugin extends AppPlugin {
         cursor: pointer;
         transition: background 0.1s, color 0.1s;
       }
-      .tlr-expand-line:hover {
+      .tlr-footer .tlr-expand-line:hover {
         background: rgba(0, 0, 0, 0.05);
         color: var(--text-default, inherit);
       }
-      .tlr-expand-empty {
+      .tlr-footer .tlr-expand-empty {
         padding: 6px 8px;
         font-size: 12px;
         color: var(--text-muted, rgba(0,0,0,0.5));
         font-style: italic;
       }
-      .tlr-expand-loading {
+      .tlr-footer .tlr-expand-loading {
         padding: 6px 8px;
       }
-      .tlr-expand-more {
+      .tlr-footer .tlr-expand-more {
         display: block;
         padding: 4px 8px;
         font-size: 11px;
@@ -5181,22 +5182,22 @@ class Plugin extends AppPlugin {
         text-align: left;
         margin-top: 2px;
       }
-      .tlr-expand-more:hover {
+      .tlr-footer .tlr-expand-more:hover {
         text-decoration: underline;
       }
 
       /* ---- Tree node rendering ---- */
-      .tlr-preview-node {
+      .tlr-footer .tlr-preview-node {
         display: flex;
         flex-direction: column;
       }
-      .tlr-preview-row {
+      .tlr-footer .tlr-preview-row {
         display: flex;
         align-items: center;
         gap: 2px;
         padding-left: calc(var(--tlr-depth, 0) * 16px);
       }
-      .tlr-preview-toggle {
+      .tlr-footer .tlr-preview-toggle {
         width: 14px;
         min-width: 14px;
         height: 16px;
@@ -5211,10 +5212,10 @@ class Plugin extends AppPlugin {
         font-size: 8px;
         transition: color 0.1s;
       }
-      .tlr-preview-toggle:hover {
+      .tlr-footer .tlr-preview-toggle:hover {
         color: var(--text-default, inherit);
       }
-      .tlr-preview-arrow {
+      .tlr-footer .tlr-preview-arrow {
         display: block;
         width: 0;
         height: 0;
@@ -5223,17 +5224,17 @@ class Plugin extends AppPlugin {
         border-top: 5px solid currentColor;
         transition: transform 0.12s ease;
       }
-      .tlr-preview-arrow.is-collapsed {
+      .tlr-footer .tlr-preview-arrow.is-collapsed {
         transform: rotate(-90deg);
       }
-      .tlr-preview-children {
+      .tlr-footer .tlr-preview-children {
         display: flex;
         flex-direction: column;
       }
-      .tlr-preview-children.is-hidden {
+      .tlr-footer .tlr-preview-children.is-hidden {
         display: none;
       }
-      .tlr-preview-row .tlr-expand-line {
+      .tlr-footer .tlr-preview-row .tlr-expand-line {
         flex: 1;
         min-width: 0;
       }
