@@ -5107,6 +5107,7 @@ class Plugin extends AppPlugin {
   }
 
   buildReferenceSectionMeta(visibleCount, totalCount, showScopedCounts) {
+    if (showScopedCounts !== true && Number(visibleCount) === 0) return '';
     return this.formatCountLabel(visibleCount, 'ref', {
       totalCount: showScopedCounts ? totalCount : null,
       scoped: showScopedCounts,
@@ -6848,6 +6849,12 @@ class Plugin extends AppPlugin {
         color: var(--tlr-text-muted);
         padding: 6px 0;
         font-size: 12px;
+      }
+
+      .tlr-section-body > .tlr-empty,
+      .tlr-section-body > .tlr-note,
+      .tlr-section-body > .tlr-error {
+        margin-left: 28px;
       }
 
       .tlr-section-header {
