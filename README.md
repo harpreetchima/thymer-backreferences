@@ -11,7 +11,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 
 ## Screenshot
 
-![Backreferences footer screenshot](screenshots/screenshot-2026-03-09_17-20-23.png)
+![Backreferences footer screenshot](screenshots/screenshot-2026-04-24_02-14-38.png)
 
 ## Credits
 
