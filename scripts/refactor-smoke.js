@@ -149,6 +149,15 @@ function makePlugin() {
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
   plugin._defaultQueryFilterMaxResults = 1000;
+  plugin._propertyIndexStatus = 'idle';
+  plugin._propertyIndexByTargetGuid = new Map();
+  plugin._propertyIndexSourceEntriesByRecordGuid = new Map();
+  plugin._propertyIndexStats = plugin.createEmptyPropertyIndexStats();
+  plugin._propertyIndexError = '';
+  plugin._propertyIndexPromise = null;
+  plugin._propertyIndexBuildSeq = 0;
+  plugin._propertyIndexRebuildTimer = null;
+  plugin._propertyIndexNeedsRebuild = false;
   plugin._maxStoredPageViewRecords = 400;
   plugin._maxStoredSortByRecords = 400;
   plugin._maxStoredPropGroupStates = 160;
@@ -210,7 +219,7 @@ test('property candidate parsing supports record tuples and nested objects', () 
   assert.equal(plugin.propertyReferencesGuid(prop, 'missing-guid'), false);
 });
 
-test('property references prefer SDK linked records over raw text-like values', () => {
+test('property references accept raw GUID values and SDK linked records', () => {
   const plugin = makePlugin();
   const target = makeRecord({ guid: 'target-guid', name: 'Target' });
   const other = makeRecord({ guid: 'other-guid', name: 'Other' });
@@ -228,8 +237,38 @@ test('property references prefer SDK linked records over raw text-like values', 
     }
   };
 
-  assert.equal(plugin.propertyReferencesGuid(prop, target.guid), false);
+  assert.equal(plugin.propertyReferencesGuid(prop, target.guid), true);
   assert.equal(plugin.propertyReferencesGuid(prop, other.guid), true);
+});
+
+test('property references use SDK linked records when raw values are absent', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const prop = {
+    name: 'Entity',
+    linkedRecords() {
+      return [target];
+    }
+  };
+
+  assert.equal(plugin.propertyReferencesGuid(prop, target.guid), true);
+});
+
+test('property references use SDK linked records when raw values are display text', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const prop = {
+    name: 'Entity',
+    value: 'Target',
+    linkedRecords() {
+      return [target];
+    },
+    text() {
+      return 'Target';
+    }
+  };
+
+  assert.equal(plugin.propertyReferencesGuid(prop, target.guid), true);
 });
 
 test('property references fall back to raw values when SDK linked records are empty', () => {
@@ -245,6 +284,33 @@ test('property references fall back to raw values when SDK linked records are em
     },
     choice() {
       return null;
+    }
+  };
+
+  assert.equal(plugin.propertyReferencesGuid(prop, 'target-guid'), true);
+});
+
+test('property references read raw SDK values arrays', () => {
+  const plugin = makePlugin();
+  const prop = {
+    name: 'Entity',
+    linkedRecords() {
+      return [];
+    },
+    values() {
+      return [['record', 'target-guid']];
+    }
+  };
+
+  assert.equal(plugin.propertyReferencesGuid(prop, 'target-guid'), true);
+});
+
+test('property references recurse through nested raw SDK value objects', () => {
+  const plugin = makePlugin();
+  const prop = {
+    name: 'Entity',
+    values() {
+      return [{ record: { guid: 'target-guid' } }];
     }
   };
 
@@ -275,31 +341,121 @@ test('property backlink grouping dedupes records and sorts groups by property na
   assert.deepEqual(groups[1].records.map((record) => record.guid), ['record-beta', 'record-alpha']);
 });
 
-test('property backlink loading unions indexed candidates and SDK backreference records', async () => {
+test('graph property index serves target pages without per-page discovery', async () => {
+  const plugin = makePlugin();
+  const henrik = makeRecord({ guid: 'henrik-guid', name: 'Henrik Karlsson' });
+  const flatland = makeRecord({ guid: 'flatland-guid', name: 'Escaping Flatland' });
+  const datePage = makeRecord({ guid: 'date-guid', name: 'April 24, 2026' });
+  const note = makeRecord({
+    guid: 'note-source',
+    name: 'Note Source',
+    updatedAt: makeDate('2026-03-11T14:00:00Z'),
+    properties: [
+      makeProperty('Entity', ['record', henrik.guid]),
+      makeProperty('Date', ['record', datePage.guid])
+    ]
+  });
+  const publication = makeRecord({
+    guid: 'publication-source',
+    name: 'Publication Source',
+    updatedAt: makeDate('2026-03-11T16:00:00Z'),
+    properties: [makeProperty('Publication', ['record', flatland.guid])]
+  });
+
+  plugin.data.getAllCollections = async () => [{
+    getAllRecords: async () => [note, publication]
+  }];
+
+  await plugin.rebuildPropertyIndex({ reason: 'test' });
+  assert.equal(plugin._propertyIndexStatus, 'ready');
+
+  let perPageDiscoveryCalled = false;
+  henrik.getBackReferenceRecords = async () => {
+    perPageDiscoveryCalled = true;
+    return [];
+  };
+  plugin.data.getAllCollections = async () => {
+    throw new Error('per-page scan should not run');
+  };
+
+  const henrikGroups = await plugin.getPropertyBacklinkGroups(henrik, henrik.guid, { showSelf: false });
+  const flatlandGroups = await plugin.getPropertyBacklinkGroups(flatland, flatland.guid, { showSelf: false });
+  const dateGroups = await plugin.getPropertyBacklinkGroups(datePage, datePage.guid, { showSelf: false });
+
+  assert.equal(perPageDiscoveryCalled, false);
+  assert.deepEqual(henrikGroups.map((group) => group.propertyName), ['Entity']);
+  assert.deepEqual(henrikGroups[0].records.map((record) => record.guid), ['note-source']);
+  assert.deepEqual(flatlandGroups.map((group) => group.propertyName), ['Publication']);
+  assert.deepEqual(flatlandGroups[0].records.map((record) => record.guid), ['publication-source']);
+  assert.deepEqual(dateGroups.map((group) => group.propertyName), ['Date']);
+});
+
+test('record property updates move index entries between old and new targets', async () => {
+  const plugin = makePlugin();
+  const oldTarget = makeRecord({ guid: 'old-target', name: 'Old Target' });
+  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
+  const properties = [makeProperty('Entity', ['record', oldTarget.guid])];
+  const source = makeRecord({
+    guid: 'source-record',
+    name: 'Source Record',
+    updatedAt: makeDate('2026-04-24T09:00:00Z'),
+    properties
+  });
+
+  plugin.data.getAllCollections = async () => [{
+    getAllRecords: async () => [source]
+  }];
+  plugin.__recordsByGuid.set(source.guid, source);
+  await plugin.rebuildPropertyIndex({ reason: 'test' });
+
+  assert.deepEqual(
+    plugin.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
+
+  properties.splice(0, properties.length, makeProperty('Entity', ['record', newTarget.guid]));
+  plugin.updatePropertyIndexForRecord(source.guid, source);
+
+  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false }), []);
+  assert.deepEqual(
+    plugin.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
+
+  properties.splice(0, properties.length);
+  plugin.updatePropertyIndexForRecord(source.guid, source);
+
+  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false }), []);
+});
+
+test('graph property index dedupes duplicate record objects', async () => {
   const plugin = makePlugin();
   const targetGuid = 'target-guid';
-  const indexed = makeRecord({
-    guid: 'indexed-source',
-    name: 'Indexed Source',
-    updatedAt: makeDate('2026-03-11T14:00:00Z'),
-    properties: [makeProperty('Project', ['record', targetGuid])]
+  const staleTargetGuid = 'stale-target-guid';
+  const source = makeRecord({
+    guid: 'source-record',
+    name: 'Source Record',
+    properties: [makeProperty('Entity', ['record', targetGuid])]
   });
-  const sdk = makeRecord({
-    guid: 'sdk-source',
-    name: 'SDK Source',
-    updatedAt: makeDate('2026-03-11T16:00:00Z'),
-    properties: [makeProperty('Project', ['record', targetGuid])]
-  });
-  const target = makeRecord({ guid: targetGuid, name: 'Target' });
-  target.getBackReferenceRecords = async () => [sdk, indexed];
-
-  const groups = await plugin.getPropertyBacklinkGroups(target, targetGuid, {
-    showSelf: false,
-    candidateRecords: [indexed]
+  const duplicateSource = makeRecord({
+    guid: source.guid,
+    name: 'Duplicate Source Object',
+    properties: [
+      makeProperty('Entity', ['record', targetGuid]),
+      makeProperty('Entity', ['record', staleTargetGuid])
+    ]
   });
 
-  assert.deepEqual(groups.map((group) => group.propertyName), ['Project']);
-  assert.deepEqual(groups[0].records.map((record) => record.guid), ['sdk-source', 'indexed-source']);
+  plugin.data.getAllCollections = async () => [{
+    getAllRecords: async () => [source, duplicateSource, source]
+  }];
+  await plugin.rebuildPropertyIndex({ reason: 'test' });
+
+  const groups = plugin.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf: false });
+  assert.deepEqual(groups.map((group) => group.propertyName), ['Entity']);
+  assert.equal(groups[0].records.length, 1);
+  assert.equal(groups[0].records[0].guid, source.guid);
+  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(staleTargetGuid, { showSelf: false }), []);
 });
 
 test('linked and unlinked grouping preserves source grouping rules', () => {
@@ -377,7 +533,7 @@ test('linked reference search includes datetime tags for journal pages', async (
   };
 
   const settled = await plugin.runLinkedReferenceSearch(journal.guid, 200, { targetRecord: journal });
-  const { linkedError, linkedGroups, propertyCandidateRecords } = plugin.resolveLinkedReferenceSearch(
+  const { linkedError, linkedGroups } = plugin.resolveLinkedReferenceSearch(
     settled,
     journal.guid,
     { showSelf: false }
@@ -385,7 +541,6 @@ test('linked reference search includes datetime tags for journal pages', async (
 
   assert.equal(linkedError, '');
   assert.deepEqual(queries, ['@linkto = "journal-guid"', '@date = "2026-04-23"']);
-  assert.deepEqual(propertyCandidateRecords.map((record) => record.guid), ['source-guid']);
   assert.deepEqual(linkedGroups.map((group) => group.record.guid), ['source-guid']);
   assert.deepEqual(linkedGroups[0].lines.map((line) => line.guid), ['linked-line', 'date-line']);
 });
@@ -1011,6 +1166,72 @@ test('fully empty pages open direct empty states for loaded sections', () => {
   assert.equal(plugin.getDefaultSectionCollapsed('unlinked', loadedEmpty), false);
 });
 
+test('property index loading and error states keep the footer recoverable', () => {
+  const plugin = makePlugin();
+  const state = {
+    searchQuery: '',
+    sortBy: 'page_last_edited',
+    sortDir: 'desc',
+    sectionCollapsed: {},
+    lastResults: null
+  };
+  const indexingStats = {
+    ...plugin.createEmptyPropertyIndexStats(),
+    scannedRecords: 1240
+  };
+
+  const indexingView = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    propertyIndexStatus: 'indexing',
+    propertyIndexStats: indexingStats,
+    propertyIndexError: '',
+    linkedGroups: [],
+    linkedError: '',
+    unlinkedGroups: [],
+    unlinkedError: '',
+    unlinkedDeferred: true,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+  const errorView = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    propertyIndexStatus: 'error',
+    propertyIndexStats: plugin.createEmptyPropertyIndexStats(),
+    propertyIndexError: 'Index failed',
+    linkedGroups: [],
+    linkedError: '',
+    unlinkedGroups: [],
+    unlinkedError: '',
+    unlinkedDeferred: true,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  assert.equal(indexingView.propertyIndexMessage, 'Indexing backreferences... 1,240 records scanned');
+  assert.equal(plugin.getDefaultFooterCollapsed(indexingView.collapseMetrics), false);
+  assert.equal(indexingView.propertySectionCollapsed, false);
+  assert.equal(errorView.propertyIndexError, 'Index failed');
+  assert.equal(plugin.getDefaultFooterCollapsed(errorView.collapseMetrics), false);
+  assert.equal(errorView.propertySectionCollapsed, false);
+
+  const previousDocument = global.document;
+  global.document = {
+    createElement: makeDomElement
+  };
+
+  try {
+    const container = makeDomElement('div');
+    plugin.appendPropertyIndexError(container, 'Index failed');
+    assert.equal(container.children[0].textContent, 'Index failed');
+    assert.equal(container.children[1].dataset.action, 'rebuild-property-index');
+    assert.equal(container.children[1].textContent, 'Rebuild graph index');
+  } finally {
+    global.document = previousDocument;
+  }
+});
+
 test('page view preferences round-trip footer and section state through storage helpers', () => {
   const plugin = makePlugin();
   const previousLocalStorage = global.localStorage;
@@ -1219,16 +1440,23 @@ test('deferred unlinked loading hydrates cached state for the current panel only
   assert.deepEqual(scopedSync, { immediate: true, reason: 'deferred-unlinked-loaded' });
 });
 
-test('targeted invalidation refreshes only panels affected by record and line events', () => {
+test('property invalidation updates graph index while line events stay targeted', () => {
   const plugin = makePlugin();
   const targetA = makeRecord({ guid: 'target-a', name: 'Thymer / Backreferences (TBR)' });
   const targetB = makeRecord({ guid: 'target-b', name: 'Something Else' });
+  const sourceProperties = [makeProperty('Entity', ['record', targetA.guid])];
   const source = makeRecord({
     guid: 'source-guid',
     name: 'Source',
-    properties: [makeProperty('Entity', ['record', targetA.guid])]
+    properties: sourceProperties
   });
   plugin.__recordsByGuid.set(source.guid, source);
+  plugin._propertyIndexStatus = 'ready';
+  plugin.indexSourceRecordPropertyRefs(
+    source,
+    plugin._propertyIndexByTargetGuid,
+    plugin._propertyIndexSourceEntriesByRecordGuid
+  );
 
   const panelA = makePanel({ id: 'panel-a', record: targetA });
   const panelB = makePanel({ id: 'panel-b', record: targetB });
@@ -1244,6 +1472,7 @@ test('targeted invalidation refreshes only panels affected by record and line ev
     refreshes.push({ id: panel.getId(), reason: args.reason });
   };
 
+  sourceProperties.splice(0, sourceProperties.length, makeProperty('Entity', ['record', targetB.guid]));
   plugin.handleRecordUpdated({
     recordGuid: source.guid,
     properties: true,
@@ -1256,6 +1485,12 @@ test('targeted invalidation refreshes only panels affected by record and line ev
       };
     }
   });
+
+  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(targetA.guid, { showSelf: false }), []);
+  assert.deepEqual(
+    plugin.getPropertyBacklinkGroupsFromIndex(targetB.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
 
   plugin.handleLineItemCreated({
     recordGuid: 'line-source-guid',
@@ -1271,7 +1506,6 @@ test('targeted invalidation refreshes only panels affected by record and line ev
   });
 
   assert.deepEqual(refreshes, [
-    { id: 'panel-a', reason: 'record.updated' },
     { id: 'panel-a', reason: 'lineitem.created' }
   ]);
   assert.equal(stateA.pendingRemoteSync, true);

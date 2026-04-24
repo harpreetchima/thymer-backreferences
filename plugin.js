@@ -29,6 +29,15 @@ class Plugin extends AppPlugin {
     this._refreshDebounceMs = 350;
     this._queryFilterDebounceMs = 180;
     this._defaultQueryFilterMaxResults = 1000;
+    this._propertyIndexStatus = 'idle';
+    this._propertyIndexByTargetGuid = new Map();
+    this._propertyIndexSourceEntriesByRecordGuid = new Map();
+    this._propertyIndexStats = this.createEmptyPropertyIndexStats();
+    this._propertyIndexError = '';
+    this._propertyIndexPromise = null;
+    this._propertyIndexBuildSeq = 0;
+    this._propertyIndexRebuildTimer = null;
+    this._propertyIndexNeedsRebuild = false;
     this._queryAutocompleteCatalog = null;
     this._queryAutocompleteCatalogPromise = null;
     this._queryStandaloneFilters = [
@@ -52,6 +61,16 @@ class Plugin extends AppPlugin {
       onSelected: () => {
         const panel = this.ui.getActivePanel();
         if (panel) this.scheduleRefreshForPanel(panel, { force: true, reason: 'cmdpal' });
+      }
+    });
+
+    this._cmdRebuildIndex = this.ui.addCommandPaletteCommand({
+      label: 'Backreferences: Rebuild Graph Index',
+      icon: 'refresh',
+      onSelected: () => {
+        this.rebuildPropertyIndex({ reason: 'cmdpal-rebuild-index' }).catch(() => {
+          // The error state is rendered in the footer.
+        });
       }
     });
 
@@ -80,6 +99,9 @@ class Plugin extends AppPlugin {
 
     const panel = this.ui.getActivePanel();
     if (panel) this.handlePanelChanged(panel, 'initial');
+    this.rebuildPropertyIndex({ reason: 'initial' }).catch(() => {
+      // The error state is rendered in the footer.
+    });
     setTimeout(() => {
       const p = this.ui.getActivePanel();
       if (p) this.handlePanelChanged(p, 'initial-delayed');
@@ -97,6 +119,12 @@ class Plugin extends AppPlugin {
     this._eventHandlerIds = [];
 
     this._cmdRefresh?.remove?.();
+    this._cmdRebuildIndex?.remove?.();
+
+    if (this._propertyIndexRebuildTimer) {
+      clearTimeout(this._propertyIndexRebuildTimer);
+      this._propertyIndexRebuildTimer = null;
+    }
 
     for (const panelId of Array.from(this._panelStates?.keys?.() || [])) {
       this.disposePanelState(panelId);
@@ -788,6 +816,13 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (action === 'rebuild-property-index') {
+      this.rebuildPropertyIndex({ reason: 'footer-rebuild-index' }).catch(() => {
+        // The error state is rendered in the footer.
+      });
+      return;
+    }
+
     if (action === 'set-sort-by') {
       if (!state) return;
       const nextSortBy = this.normalizeSortBy(actionEl.dataset.sortBy);
@@ -997,6 +1032,8 @@ class Plugin extends AppPlugin {
         propertyError: false,
         linkedError: false,
         unlinkedError: false,
+        propertyIndexPending: false,
+        propertyIndexError: false,
         unlinkedDeferred: false
       };
     }
@@ -1013,13 +1050,15 @@ class Plugin extends AppPlugin {
       propertyError: Boolean(results.propertyError),
       linkedError: Boolean(results.linkedError),
       unlinkedError: Boolean(results.unlinkedError),
+      propertyIndexPending: results.propertyIndexStatus === 'idle' || results.propertyIndexStatus === 'indexing',
+      propertyIndexError: results.propertyIndexStatus === 'error',
       unlinkedDeferred: results.unlinkedDeferred === true
     };
   }
 
   getDefaultFooterCollapsed(metrics) {
     if (!metrics?.ready) return false;
-    if (metrics.propertyError || metrics.linkedError) return false;
+    if (metrics.propertyError || metrics.linkedError || metrics.propertyIndexPending || metrics.propertyIndexError) return false;
     return (metrics.propertyCount + metrics.linkedCount) === 0;
   }
 
@@ -1059,6 +1098,8 @@ class Plugin extends AppPlugin {
     const isTrulyEmpty = !metrics.propertyError
       && !metrics.linkedError
       && !metrics.unlinkedError
+      && !metrics.propertyIndexPending
+      && !metrics.propertyIndexError
       && metrics.propertyCount === 0
       && metrics.linkedCount === 0
       && metrics.unlinkedCount === 0;
@@ -1067,7 +1108,9 @@ class Plugin extends AppPlugin {
       return false;
     }
     if (id === 'unlinked') return true;
-    if (id === 'property') return metrics.propertyError ? false : metrics.propertyCount === 0;
+    if (id === 'property') return (metrics.propertyError || metrics.propertyIndexPending || metrics.propertyIndexError)
+      ? false
+      : metrics.propertyCount === 0;
     if (id === 'linked') return metrics.linkedError ? false : metrics.linkedCount === 0;
     return false;
   }
@@ -2373,6 +2416,7 @@ class Plugin extends AppPlugin {
     if (!state) return;
     const cached = state.lastResults || null;
     if (!cached) return;
+    this.syncPropertyIndexResultForState(state);
 
     const panel = state.panel || null;
     if (panel && (!state.rootEl || !state.rootEl.isConnected)) {
@@ -3022,6 +3066,365 @@ class Plugin extends AppPlugin {
     this.refreshAllPanels({ force: false, reason: reason || 'workspace-invalidated' });
   }
 
+  createEmptyPropertyIndexStats() {
+    return {
+      scannedRecords: 0,
+      indexedReferences: 0,
+      indexedTargets: 0,
+      startedAt: null,
+      finishedAt: null
+    };
+  }
+
+  getPropertyIndexSnapshot() {
+    return {
+      status: this._propertyIndexStatus || 'idle',
+      stats: { ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()) },
+      error: this._propertyIndexError || ''
+    };
+  }
+
+  getPropertyIndexDisplayMessage(snapshot) {
+    const state = snapshot || this.getPropertyIndexSnapshot();
+    const scanned = this.coerceNonNegativeInt(state?.stats?.scannedRecords, 0);
+    if (state.status === 'indexing') {
+      return `Indexing backreferences... ${scanned.toLocaleString()} records scanned`;
+    }
+    if (state.status === 'idle') {
+      return 'Property reference index has not been built yet.';
+    }
+    if (state.status === 'error') {
+      return state.error || 'Error indexing property references.';
+    }
+    return '';
+  }
+
+  notifyPropertyIndexChanged(reason) {
+    for (const state of this._panelStates?.values?.() || []) {
+      if (!state?.lastResults) continue;
+      this.syncPropertyIndexResultForState(state);
+      this.renderFromCache(state);
+    }
+  }
+
+  syncPropertyIndexResultForState(state) {
+    const results = state?.lastResults || null;
+    if (!state || !results) return false;
+    const { showSelf } = this.getRefreshConfig();
+    const next = this.getPropertyBacklinkResult(state.recordGuid, { showSelf });
+    results.propertyGroups = next.propertyGroups;
+    results.propertyError = next.propertyError;
+    results.propertyIndexStatus = next.propertyIndexStatus;
+    results.propertyIndexStats = next.propertyIndexStats;
+    results.propertyIndexError = next.propertyIndexError;
+    this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
+    return true;
+  }
+
+  async rebuildPropertyIndex({ reason } = {}) {
+    if (this._propertyIndexStatus === 'indexing' && this._propertyIndexPromise) {
+      this._propertyIndexNeedsRebuild = true;
+      return this._propertyIndexPromise;
+    }
+
+    const seq = (this._propertyIndexBuildSeq || 0) + 1;
+    this._propertyIndexBuildSeq = seq;
+    this._propertyIndexStatus = 'indexing';
+    this._propertyIndexError = '';
+    this._propertyIndexStats = {
+      ...this.createEmptyPropertyIndexStats(),
+      startedAt: new Date()
+    };
+    this.notifyPropertyIndexChanged(reason || 'property-index-started');
+
+    const promise = this.buildPropertyIndex(seq, reason)
+      .finally(() => {
+        if (this._propertyIndexPromise === promise) {
+          this._propertyIndexPromise = null;
+        }
+      });
+    this._propertyIndexPromise = promise;
+    return promise;
+  }
+
+  async buildPropertyIndex(seq, reason) {
+    const byTargetGuid = new Map();
+    const sourceEntriesByRecordGuid = new Map();
+
+    try {
+      if (typeof this.data?.getAllCollections !== 'function') {
+        throw new Error('Thymer graph collections are unavailable.');
+      }
+
+      const collections = await this.data.getAllCollections();
+      if (!Array.isArray(collections)) {
+        throw new Error('Thymer graph collections could not be read.');
+      }
+
+      let lastNotifyAt = Date.now();
+      for (const collection of collections) {
+        if (!collection || typeof collection.getAllRecords !== 'function') continue;
+        let records = [];
+        try {
+          records = await collection.getAllRecords();
+        } catch (e) {
+          continue;
+        }
+        if (!Array.isArray(records)) continue;
+
+        for (const record of records) {
+          if (this._propertyIndexBuildSeq !== seq) return;
+          this.indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid);
+          this._propertyIndexStats.scannedRecords += 1;
+
+          const now = Date.now();
+          if (
+            this._propertyIndexStats.scannedRecords % 250 === 0 ||
+            now - lastNotifyAt > 300
+          ) {
+            lastNotifyAt = now;
+            this.notifyPropertyIndexChanged(reason || 'property-index-progress');
+            await this.waitForIndexYield();
+          }
+        }
+      }
+
+      if (this._propertyIndexBuildSeq !== seq) return;
+
+      this._propertyIndexByTargetGuid = byTargetGuid;
+      this._propertyIndexSourceEntriesByRecordGuid = sourceEntriesByRecordGuid;
+      this._propertyIndexStats = {
+        ...this._propertyIndexStats,
+        indexedReferences: this.countPropertyIndexReferences(byTargetGuid),
+        indexedTargets: byTargetGuid.size,
+        finishedAt: new Date()
+      };
+      this._propertyIndexStatus = 'ready';
+      this._propertyIndexError = '';
+      this.notifyPropertyIndexChanged(reason || 'property-index-ready');
+    } catch (e) {
+      if (this._propertyIndexBuildSeq !== seq) return;
+      this._propertyIndexStatus = 'error';
+      this._propertyIndexError = e?.message || 'Error indexing property references.';
+      this._propertyIndexStats = {
+        ...this._propertyIndexStats,
+        finishedAt: new Date()
+      };
+      this.notifyPropertyIndexChanged(reason || 'property-index-error');
+    } finally {
+      if (this._propertyIndexBuildSeq === seq && this._propertyIndexNeedsRebuild) {
+        this._propertyIndexNeedsRebuild = false;
+        this.schedulePropertyIndexRebuild('queued-property-index-rebuild', 0);
+      }
+    }
+  }
+
+  waitForIndexYield() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  schedulePropertyIndexRebuild(reason, delayMs = 600) {
+    if (this._propertyIndexStatus === 'indexing') {
+      this._propertyIndexNeedsRebuild = true;
+      return;
+    }
+    if (this._propertyIndexRebuildTimer) {
+      clearTimeout(this._propertyIndexRebuildTimer);
+      this._propertyIndexRebuildTimer = null;
+    }
+    this._propertyIndexRebuildTimer = setTimeout(() => {
+      this._propertyIndexRebuildTimer = null;
+      this.rebuildPropertyIndex({ reason: reason || 'scheduled-property-index-rebuild' }).catch(() => {
+        // The error state is rendered in the footer.
+      });
+    }, Math.max(0, Number(delayMs) || 0));
+  }
+
+  countPropertyIndexReferences(byTargetGuid = this._propertyIndexByTargetGuid) {
+    let total = 0;
+    for (const byProp of byTargetGuid?.values?.() || []) {
+      for (const records of byProp?.values?.() || []) {
+        total += records?.size || 0;
+      }
+    }
+    return total;
+  }
+
+  getPropertyReferenceGuids(prop) {
+    const out = new Set();
+    const linkedRecordGuids = this.getPropertyLinkedRecordGuids(prop);
+    for (const guid of linkedRecordGuids || []) {
+      const t = (guid || '').trim();
+      if (t) out.add(t);
+    }
+    for (const value of this.getPropertyCandidateValues(prop)) {
+      const t = (value || '').trim();
+      if (t) out.add(t);
+    }
+    return out;
+  }
+
+  indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid) {
+    const sourceGuid = (record?.guid || '').trim();
+    if (!sourceGuid) return 0;
+    this.removeSourceRecordFromPropertyIndexMaps(sourceGuid, byTargetGuid, sourceEntriesByRecordGuid);
+
+    let props = [];
+    try {
+      props = record.getAllProperties?.() || [];
+    } catch (e) {
+      props = [];
+    }
+    if (!Array.isArray(props)) props = [];
+
+    const entries = [];
+    const seenEntries = new Set();
+    for (const prop of props) {
+      const propertyName = (prop?.name || '').trim();
+      if (!propertyName) continue;
+
+      for (const targetGuid of this.getPropertyReferenceGuids(prop)) {
+        const guid = (targetGuid || '').trim();
+        if (!guid) continue;
+        const entryKey = `${guid}\u0000${propertyName}`;
+        if (seenEntries.has(entryKey)) continue;
+        seenEntries.add(entryKey);
+
+        let byProp = byTargetGuid.get(guid) || null;
+        if (!byProp) {
+          byProp = new Map();
+          byTargetGuid.set(guid, byProp);
+        }
+        let bySource = byProp.get(propertyName) || null;
+        if (!bySource) {
+          bySource = new Map();
+          byProp.set(propertyName, bySource);
+        }
+        bySource.set(sourceGuid, record);
+        entries.push({ targetGuid: guid, propertyName });
+      }
+    }
+
+    if (entries.length > 0) {
+      sourceEntriesByRecordGuid.set(sourceGuid, entries);
+    } else {
+      sourceEntriesByRecordGuid.delete(sourceGuid);
+    }
+
+    return entries.length;
+  }
+
+  removeSourceRecordFromPropertyIndexMaps(sourceRecordGuid, byTargetGuid, sourceEntriesByRecordGuid) {
+    const sourceGuid = (sourceRecordGuid || '').trim();
+    if (!sourceGuid) return false;
+    const entries = sourceEntriesByRecordGuid?.get?.(sourceGuid) || [];
+    for (const entry of entries) {
+      const byProp = byTargetGuid?.get?.(entry.targetGuid);
+      if (!byProp) continue;
+      const bySource = byProp.get(entry.propertyName);
+      if (!bySource) continue;
+      bySource.delete(sourceGuid);
+      if (bySource.size === 0) byProp.delete(entry.propertyName);
+      if (byProp.size === 0) byTargetGuid.delete(entry.targetGuid);
+    }
+    sourceEntriesByRecordGuid?.delete?.(sourceGuid);
+    return entries.length > 0;
+  }
+
+  removeSourceRecordFromPropertyIndex(sourceRecordGuid) {
+    return this.removeSourceRecordFromPropertyIndexMaps(
+      sourceRecordGuid,
+      this._propertyIndexByTargetGuid,
+      this._propertyIndexSourceEntriesByRecordGuid
+    );
+  }
+
+  updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord) {
+    const sourceGuid = ((sourceRecordGuid || sourceRecord?.guid || '') + '').trim();
+    if (!sourceGuid) return false;
+    if (this._propertyIndexStatus !== 'ready') {
+      this.schedulePropertyIndexRebuild('record-updated-during-index-build');
+      return false;
+    }
+
+    const record = sourceRecord || this.data.getRecord?.(sourceGuid) || null;
+    if (!record) {
+      this.schedulePropertyIndexRebuild('record-updated-without-record');
+      return false;
+    }
+
+    this.removeSourceRecordFromPropertyIndex(sourceGuid);
+    this.indexSourceRecordPropertyRefs(
+      record,
+      this._propertyIndexByTargetGuid,
+      this._propertyIndexSourceEntriesByRecordGuid
+    );
+    this._propertyIndexStats = {
+      ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()),
+      indexedReferences: this.countPropertyIndexReferences(),
+      indexedTargets: this._propertyIndexByTargetGuid.size
+    };
+    this.notifyPropertyIndexChanged('record-property-index-updated');
+    return true;
+  }
+
+  getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf } = {}) {
+    const guid = (targetGuid || '').trim();
+    if (!guid || this._propertyIndexStatus !== 'ready') return [];
+
+    const byProp = this._propertyIndexByTargetGuid?.get?.(guid) || null;
+    if (!byProp) return [];
+
+    const groups = Array.from(byProp.entries()).map(([propertyName, recordMap]) => {
+      const records = [];
+      const seen = new Set();
+      for (const record of recordMap?.values?.() || []) {
+        const sourceGuid = (record?.guid || '').trim();
+        if (!sourceGuid || seen.has(sourceGuid)) continue;
+        if (!showSelf && sourceGuid === guid) continue;
+        seen.add(sourceGuid);
+        records.push(record);
+      }
+      return { propertyName, records };
+    }).filter((group) => group.records.length > 0);
+
+    groups.sort((a, b) => {
+      const an = (a.propertyName || '').toLowerCase();
+      const bn = (b.propertyName || '').toLowerCase();
+      return an < bn ? -1 : an > bn ? 1 : 0;
+    });
+
+    for (const g of groups) {
+      g.records.sort((a, b) => {
+        const ad = a?.getUpdatedAt?.() || null;
+        const bd = b?.getUpdatedAt?.() || null;
+        const at = ad ? ad.getTime() : 0;
+        const bt = bd ? bd.getTime() : 0;
+        if (bt !== at) return bt - at;
+        const an = (a?.getName?.() || '').toLowerCase();
+        const bn = (b?.getName?.() || '').toLowerCase();
+        return an < bn ? -1 : an > bn ? 1 : 0;
+      });
+    }
+
+    return groups;
+  }
+
+  getPropertyBacklinkResult(targetGuid, { showSelf } = {}) {
+    const snapshot = this.getPropertyIndexSnapshot();
+    return {
+      propertyGroups: snapshot.status === 'ready'
+        ? this.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf })
+        : [],
+      propertyError: '',
+      propertyIndexStatus: snapshot.status,
+      propertyIndexStats: snapshot.stats,
+      propertyIndexError: snapshot.status === 'error'
+        ? (snapshot.error || 'Error indexing property references.')
+        : ''
+    };
+  }
+
   snapshotIncludesSourceRecord(state, recordGuid) {
     const guid = (recordGuid || '').trim();
     if (!guid) return false;
@@ -3030,7 +3433,7 @@ class Plugin extends AppPlugin {
 
   // ---------- Refresh orchestration ----------
 
-  scheduleRefreshForPanel(panel, { force, reason }) {
+  scheduleRefreshForPanel(panel, { force, reason } = {}) {
     const panelId = panel?.getId?.() || null;
     if (!panelId) return;
     let state = this._panelStates.get(panelId) || null;
@@ -3219,7 +3622,6 @@ class Plugin extends AppPlugin {
   resolveLinkedReferenceSearch(searchSettled, recordGuid, { showSelf }) {
     let linkedError = '';
     let linkedGroups = [];
-    let propertyCandidateRecords = null;
 
     if (searchSettled?.status === 'fulfilled') {
       const searches = Array.isArray(searchSettled.value?.searches)
@@ -3233,14 +3635,13 @@ class Plugin extends AppPlugin {
         linkedError = primaryResult.error;
       } else {
         const lines = this.mergeLinkedReferenceSearchLines(searches);
-        propertyCandidateRecords = Array.isArray(primaryResult?.records) ? primaryResult.records : null;
         linkedGroups = this.groupBacklinkLines(lines, recordGuid, { showSelf });
       }
     } else {
       linkedError = 'Error loading linked references.';
     }
 
-    return { linkedError, linkedGroups, propertyCandidateRecords };
+    return { linkedError, linkedGroups };
   }
 
   buildLiteralPhraseSearchQuery(value) {
@@ -3359,15 +3760,12 @@ class Plugin extends AppPlugin {
     recordName,
     maxResults,
     showSelf,
-    propertyCandidateRecords,
     linkedGroups
   }) {
     const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
+    const propertyResult = this.getPropertyBacklinkResult(recordGuid, { showSelf });
     const followupPromises = [
-      this.getPropertyBacklinkGroups(record, recordGuid, {
-        showSelf,
-        candidateRecords: propertyCandidateRecords
-      })
+      Promise.resolve(propertyResult)
     ];
 
     if (shouldLoadUnlinked) {
@@ -3385,7 +3783,10 @@ class Plugin extends AppPlugin {
     let propertyError = '';
     let propertyGroups = [];
     if (propertySettled.status === 'fulfilled') {
-      propertyGroups = Array.isArray(propertySettled.value) ? propertySettled.value : [];
+      propertyError = propertySettled.value?.propertyError || '';
+      propertyGroups = Array.isArray(propertySettled.value?.propertyGroups)
+        ? propertySettled.value.propertyGroups
+        : [];
     } else {
       propertyError = 'Error loading property references.';
     }
@@ -3407,6 +3808,15 @@ class Plugin extends AppPlugin {
     return {
       propertyError,
       propertyGroups,
+      propertyIndexStatus: propertySettled.status === 'fulfilled'
+        ? propertySettled.value?.propertyIndexStatus || 'idle'
+        : 'error',
+      propertyIndexStats: propertySettled.status === 'fulfilled'
+        ? propertySettled.value?.propertyIndexStats || this.createEmptyPropertyIndexStats()
+        : this.createEmptyPropertyIndexStats(),
+      propertyIndexError: propertySettled.status === 'fulfilled'
+        ? propertySettled.value?.propertyIndexError || ''
+        : 'Error loading property references.',
       unlinkedError,
       unlinkedGroups,
       unlinkedDeferred,
@@ -3481,7 +3891,7 @@ class Plugin extends AppPlugin {
     }
   }
 
-  async refreshPanel(panelId, { reason }) {
+  async refreshPanel(panelId, { reason } = {}) {
     const state = this._panelStates.get(panelId) || null;
     const panel = state?.panel || null;
     if (!state || !panel) return;
@@ -3512,7 +3922,7 @@ class Plugin extends AppPlugin {
 
       if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
-      const { linkedError, linkedGroups, propertyCandidateRecords } = this.resolveLinkedReferenceSearch(
+      const { linkedError, linkedGroups } = this.resolveLinkedReferenceSearch(
         searchSettled,
         recordGuid,
         { showSelf }
@@ -3523,7 +3933,6 @@ class Plugin extends AppPlugin {
         recordName,
         maxResults,
         showSelf,
-        propertyCandidateRecords,
         linkedGroups
       });
 
@@ -3677,22 +4086,24 @@ class Plugin extends AppPlugin {
 
   handleRecordUpdated(ev) {
     // Property-based references (record-link fields) do not emit lineitem events.
-    // Refresh footers when key-value properties change so property backlinks stay fresh.
     if (!ev) return;
     if (!ev.properties) return;
+
     const sourceRecordGuid = this.getEventRecordGuid(ev);
     const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
-    const refreshed = this.refreshMatchingStates(ev, 'record.updated', (state) =>
-      this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
-    );
-    if (refreshed === 0 && !sourceRecordGuid) {
-      this.handleWorkspaceInvalidation(ev, 'record.updated');
+    if (!this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord)) {
+      this.schedulePropertyIndexRebuild('record.updated-property-index-rebuild');
     }
   }
 
   handleRecordCreated(ev) {
     const sourceRecordGuid = this.getEventRecordGuid(ev);
     const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+    if (sourceRecordGuid && sourceRecord) {
+      this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
+    } else {
+      this.schedulePropertyIndexRebuild('record.created-property-index-rebuild');
+    }
     const refreshed = this.refreshMatchingStates(ev, 'record.created', (state) =>
       this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
     );
@@ -4259,27 +4670,8 @@ class Plugin extends AppPlugin {
 
   // ---------- Grouping + rendering ----------
 
-  async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf, candidateRecords }) {
-    if (!targetGuid) return [];
-
-    const sourceRecords = [];
-    const appendRecords = (records) => {
-      if (!Array.isArray(records)) return;
-      for (const record of records) {
-        if (record?.guid) sourceRecords.push(record);
-      }
-    };
-
-    appendRecords(candidateRecords);
-
-    try {
-      const backrefRecords = await targetRecord?.getBackReferenceRecords?.();
-      appendRecords(backrefRecords);
-    } catch (e) {
-      // ignore and use any indexed candidates we already have
-    }
-
-    return this.buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf });
+  async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf } = {}) {
+    return this.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf });
   }
 
   buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf }) {
@@ -4338,16 +4730,13 @@ class Plugin extends AppPlugin {
   propertyReferencesGuid(prop, targetGuid) {
     if (!prop || !targetGuid) return false;
 
-    const linkedRecordGuids = this.getPropertyLinkedRecordGuids(prop);
-    if (linkedRecordGuids && linkedRecordGuids.size > 0) {
-      return linkedRecordGuids.has(targetGuid);
-    }
-
     const values = this.getPropertyCandidateValues(prop);
     for (const v of values) {
       if (v === targetGuid) return true;
     }
-    return false;
+
+    const linkedRecordGuids = this.getPropertyLinkedRecordGuids(prop);
+    return linkedRecordGuids?.has?.(targetGuid) === true;
   }
 
   getPropertyLinkedRecordGuids(prop) {
@@ -4398,6 +4787,12 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
+    try {
+      const values = prop.values?.();
+      if (Array.isArray(values)) raw.push(values);
+    } catch (e) {
+      // ignore
+    }
 
     for (const r of raw) {
       this.collectPropertyCandidateValues(r, push);
@@ -4444,12 +4839,8 @@ class Plugin extends AppPlugin {
         if (typeof value === 'string') push(value);
       }
 
-      if ('value' in raw) {
-        this.collectPropertyCandidateValues(raw.value, push);
-      }
-
-      if (Array.isArray(raw.records)) {
-        this.collectPropertyCandidateValues(raw.records, push);
+      for (const key of ['value', 'record', 'records', 'linkedRecord', 'linkedRecords', 'target', 'targets', 'item', 'items', 'node', 'nodes', 'ref', 'refs']) {
+        if (key in raw) this.collectPropertyCandidateValues(raw[key], push);
       }
     }
   }
@@ -5122,6 +5513,9 @@ class Plugin extends AppPlugin {
   buildReferenceViewState(state, {
     propertyGroups,
     propertyError,
+    propertyIndexStatus,
+    propertyIndexStats,
+    propertyIndexError,
     linkedGroups,
     linkedError,
     unlinkedGroups,
@@ -5140,6 +5534,9 @@ class Plugin extends AppPlugin {
       ? this.shouldIncludeUnlinkedInQueryScope(state, state.lastResults || {})
       : true;
     const highlightQuery = searchMode === 'text' ? query : '';
+    const normalizedPropertyIndexStatus = propertyIndexStatus || 'ready';
+    const normalizedPropertyIndexStats = propertyIndexStats || this.createEmptyPropertyIndexStats();
+    const normalizedPropertyIndexError = propertyIndexError || '';
 
     const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
     const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
@@ -5156,6 +5553,8 @@ class Plugin extends AppPlugin {
       propertyError: Boolean(propertyError),
       linkedError: Boolean(linkedError),
       unlinkedError: Boolean(unlinkedError),
+      propertyIndexPending: normalizedPropertyIndexStatus === 'idle' || normalizedPropertyIndexStatus === 'indexing',
+      propertyIndexError: normalizedPropertyIndexStatus === 'error',
       unlinkedDeferred: unlinkedDeferred === true
     };
     const totalUniquePages = this.collectUniquePageGuids(propsAll, linkedAll, []);
@@ -5201,6 +5600,14 @@ class Plugin extends AppPlugin {
       linked,
       unlinked,
       propertyError,
+      propertyIndexStatus: normalizedPropertyIndexStatus,
+      propertyIndexStats: normalizedPropertyIndexStats,
+      propertyIndexError: normalizedPropertyIndexError,
+      propertyIndexMessage: this.getPropertyIndexDisplayMessage({
+        status: normalizedPropertyIndexStatus,
+        stats: normalizedPropertyIndexStats,
+        error: normalizedPropertyIndexError
+      }),
       linkedError,
       unlinkedError,
       unlinkedDeferred,
@@ -5267,7 +5674,10 @@ class Plugin extends AppPlugin {
       viewState.incompleteQueryDraft === true ? 'draft' : 'ready',
       viewState.queryFilterState?.error || '',
       viewState.queryFilterState?.loading === true ? 'loading' : 'idle',
-      viewState.canApplyScopedQuery === true ? 'scoped' : 'unscoped'
+      viewState.canApplyScopedQuery === true ? 'scoped' : 'unscoped',
+      viewState.propertyIndexStatus || 'idle',
+      viewState.propertyIndexStats?.scannedRecords || 0,
+      viewState.propertyIndexError || ''
     ].join('|');
   }
 
@@ -5275,6 +5685,9 @@ class Plugin extends AppPlugin {
     return [
       viewState.propertySectionCollapsed === true ? 'collapsed' : 'open',
       viewState.propertyError || '',
+      viewState.propertyIndexStatus || 'idle',
+      viewState.propertyIndexStats?.scannedRecords || 0,
+      viewState.propertyIndexError || '',
       viewState.showScopedCounts === true ? 'scoped' : 'plain',
       viewState.hasScopedView === true ? 'filtered' : 'all',
       viewState.highlightQuery || '',
@@ -5349,6 +5762,10 @@ class Plugin extends AppPlugin {
           ? 'Refreshing query results...'
           : 'Applying query to current backreferences...'
       );
+    } else if (viewState.propertyIndexStatus === 'indexing') {
+      this.appendNote(body, viewState.propertyIndexMessage);
+    } else if (viewState.propertyIndexStatus === 'idle') {
+      this.appendNote(body, viewState.propertyIndexMessage);
     }
   }
 
@@ -5357,15 +5774,21 @@ class Plugin extends AppPlugin {
       sectionId: 'property',
       title: 'Property References',
       collapsed: viewState.propertySectionCollapsed,
-      meta: this.buildReferenceSectionMeta(
-        viewState.showScopedCounts ? viewState.filteredPropRefCount : viewState.totalPropRefCount,
-        viewState.totalPropRefCount,
-        viewState.showScopedCounts
-      )
+      meta: viewState.propertyIndexStatus !== 'ready'
+        ? this.buildUnknownReferenceSectionMeta()
+        : this.buildReferenceSectionMeta(
+            viewState.showScopedCounts ? viewState.filteredPropRefCount : viewState.totalPropRefCount,
+            viewState.totalPropRefCount,
+            viewState.showScopedCounts
+          )
     });
 
     if (viewState.propertyError) {
       this.appendError(section.bodyEl, viewState.propertyError);
+    } else if (viewState.propertyIndexStatus === 'indexing' || viewState.propertyIndexStatus === 'idle') {
+      this.appendNote(section.bodyEl, viewState.propertyIndexMessage);
+    } else if (viewState.propertyIndexStatus === 'error') {
+      this.appendPropertyIndexError(section.bodyEl, viewState.propertyIndexError);
     } else if (viewState.props.length === 0) {
       this.appendEmpty(
         section.bodyEl,
@@ -5457,6 +5880,9 @@ class Plugin extends AppPlugin {
   renderReferences(state, {
     propertyGroups,
     propertyError,
+    propertyIndexStatus,
+    propertyIndexStats,
+    propertyIndexError,
     linkedGroups,
     linkedError,
     unlinkedGroups,
@@ -5471,6 +5897,9 @@ class Plugin extends AppPlugin {
     const viewState = this.buildReferenceViewState(state, {
       propertyGroups,
       propertyError,
+      propertyIndexStatus,
+      propertyIndexStats,
+      propertyIndexError,
       linkedGroups,
       linkedError,
       unlinkedGroups,
@@ -5570,6 +5999,18 @@ class Plugin extends AppPlugin {
     el.className = 'tlr-error';
     el.textContent = message || 'Error loading references.';
     container.appendChild(el);
+  }
+
+  appendPropertyIndexError(container, message) {
+    if (!container) return;
+    this.appendError(container, message || 'Error indexing property references.');
+
+    const action = document.createElement('button');
+    action.className = 'tlr-btn button-none button-small button-minimal-hover';
+    action.type = 'button';
+    action.dataset.action = 'rebuild-property-index';
+    action.textContent = 'Rebuild graph index';
+    container.appendChild(action);
   }
 
   appendEmpty(container, message) {
@@ -6399,6 +6840,14 @@ class Plugin extends AppPlugin {
     if (!Number.isFinite(n)) return fallback;
     const i = Math.floor(n);
     if (i <= 0) return fallback;
+    return i;
+  }
+
+  coerceNonNegativeInt(val, fallback) {
+    const n = Number(val);
+    if (!Number.isFinite(n)) return fallback;
+    const i = Math.floor(n);
+    if (i < 0) return fallback;
     return i;
   }
 

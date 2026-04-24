@@ -73,6 +73,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 ## Command
 
 - `Backreferences: Refresh (Active Page)`
+- `Backreferences: Rebuild Graph Index`
 
 ## Setup
 
