@@ -55,15 +55,6 @@ class Plugin extends AppPlugin {
 
     this.injectCss();
 
-    this._cmdRefresh = this.ui.addCommandPaletteCommand({
-      label: 'Backreferences: Refresh (Active Page)',
-      icon: 'refresh',
-      onSelected: () => {
-        const panel = this.ui.getActivePanel();
-        if (panel) this.scheduleRefreshForPanel(panel, { force: true, reason: 'cmdpal' });
-      }
-    });
-
     this._cmdRebuildIndex = this.ui.addCommandPaletteCommand({
       label: 'Backreferences: Rebuild Graph Index',
       icon: 'refresh',
@@ -118,7 +109,6 @@ class Plugin extends AppPlugin {
     }
     this._eventHandlerIds = [];
 
-    this._cmdRefresh?.remove?.();
     this._cmdRebuildIndex?.remove?.();
 
     if (this._propertyIndexRebuildTimer) {
