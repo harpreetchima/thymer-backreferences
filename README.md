@@ -70,9 +70,16 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - `New` marks references that appeared since the page was opened.
   - `Changed` marks references updated remotely after the footer had already loaded.
 
-## Command
+- **Toggle visibility**
+  - Use `Backreferences: Toggle Globally` to show or hide the footer for all collections on this device.
+  - Use `Backreferences: Toggle in Current Collection` to override the current collection on this device.
+  - Visibility toggles only affect the local view; they do not save plugin configuration or sync across workspaces.
+
+## Commands
 
 - `Backreferences: Rebuild Graph Index`
+- `Backreferences: Toggle Globally`
+- `Backreferences: Toggle in Current Collection`
 
 ## Setup
 
@@ -91,6 +98,7 @@ Edit `custom` in `plugin.json`:
 - `maxResults` (number): cap for search results.
 - `queryFilterMaxResults` (number): cap for the global query run used to scope Thymer query filters back to the current page's references.
 - `showSelf` (boolean): include references originating from the active note.
+- `defaultVisible` (boolean): install-time fallback for local visibility before this device has a saved visibility preference.
 
 ## Local Checks
 
@@ -129,3 +137,6 @@ Edit `custom` in `plugin.json`:
 27. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
 28. Click a linked, unlinked, or context line row and verify Thymer scrolls to and highlights the exact source line.
 29. Ctrl/Cmd-click a linked, unlinked, or context line row and verify the new panel opens with the exact source line highlighted.
+30. Run `Backreferences: Toggle in Current Collection` and confirm the footer disappears only in the active collection.
+31. Run `Backreferences: Toggle in Current Collection` again and confirm the footer returns without reloading the plugin.
+32. Run `Backreferences: Toggle Globally` and confirm the footer hides everywhere, then run it again and confirm collection overrides are cleared.
