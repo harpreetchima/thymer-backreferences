@@ -48,6 +48,17 @@ function makeRecord({ guid, name, updatedAt, createdAt, properties = [], journal
   };
 }
 
+function makeCollection({ guid, name }) {
+  return {
+    getGuid() {
+      return guid;
+    },
+    getName() {
+      return name;
+    }
+  };
+}
+
 function makeLine({ guid, record, segments = [], type = 'text', createdAt, updatedAt, parentGuid = null }) {
   return {
     guid,
@@ -67,8 +78,9 @@ function makeLine({ guid, record, segments = [], type = 'text', createdAt, updat
   };
 }
 
-function makePanel({ id, record }) {
+function makePanel({ id, record, collection = null, element = null, type = 'edit_panel', navType = 'edit_panel' }) {
   let activeRecord = record || null;
+  let activeCollection = collection || null;
   const navigateCalls = [];
 
   const panel = {
@@ -76,19 +88,25 @@ function makePanel({ id, record }) {
       return id;
     },
     getElement() {
-      return {};
+      return element || {};
     },
     getType() {
-      return 'edit_panel';
+      return type;
     },
     getNavigation() {
-      return { type: 'edit_panel' };
+      return { type: navType };
     },
     getActiveRecord() {
       return activeRecord;
     },
+    getActiveCollection() {
+      return activeCollection;
+    },
     setActiveRecord(nextRecord) {
       activeRecord = nextRecord;
+    },
+    setActiveCollection(nextCollection) {
+      activeCollection = nextCollection;
     },
     navigateTo(payload) {
       navigateCalls.push(payload);
@@ -109,6 +127,39 @@ function makePanel({ id, record }) {
       return activeRecord;
     }
   };
+}
+
+function makePanelElement() {
+  return {
+    matches(selector) {
+      return selector === '.page-content';
+    },
+    closest() {
+      return null;
+    },
+    querySelector() {
+      return null;
+    }
+  };
+}
+
+function installLocalStorage(initial = {}) {
+  const store = new Map(Object.entries(initial).map(([key, value]) => [key, String(value)]));
+  global.localStorage = {
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      store.set(key, String(value));
+    },
+    removeItem(key) {
+      store.delete(key);
+    },
+    clear() {
+      store.clear();
+    }
+  };
+  return store;
 }
 
 function makeDomElement(tagName) {
@@ -162,6 +213,8 @@ function makePlugin() {
   plugin._maxStoredSortByRecords = 400;
   plugin._maxStoredPropGroupStates = 160;
   plugin._maxStoredRecordGroupStates = 600;
+  plugin._storageKeyVisibility = 'thymer_backreferences_visibility_v1';
+  plugin._visibilityConfig = plugin.normalizeVisibilityConfig(null, true);
   plugin._queryBuiltInKeys = [
     'created_at', 'modified_at', 'created_by', 'modified_by', 'text', 'type', 'date',
     'due', 'time', 'mention', 'scheduled', 'hashtag', 'link', 'collection', 'guid',
@@ -184,16 +237,39 @@ function makePlugin() {
     },
     getActiveUsers() {
       return users;
+    },
+    getPluginByGuid() {
+      throw new Error('visibility tests must not save plugin configuration');
     }
   };
 
+  const toasters = [];
+  let activePanel = null;
+  let panels = [];
   plugin.ui = {
     createIcon() {
       return { classList: { add() {} } };
+    },
+    addToaster(options) {
+      toasters.push(options);
+      return { remove() {} };
+    },
+    getActivePanel() {
+      return activePanel;
+    },
+    getPanels() {
+      return panels;
     }
   };
 
   plugin.__recordsByGuid = recordsByGuid;
+  plugin.__toasters = toasters;
+  plugin.__setActivePanel = (panel) => {
+    activePanel = panel;
+  };
+  plugin.__setPanels = (nextPanels) => {
+    panels = Array.isArray(nextPanels) ? nextPanels : [];
+  };
   return plugin;
 }
 
@@ -202,6 +278,204 @@ const tests = [];
 function test(name, fn) {
   tests.push({ name, fn });
 }
+
+test('visibility config normalizes local values and falls back visible', () => {
+  const plugin = makePlugin();
+  installLocalStorage();
+
+  assert.deepEqual(plugin.normalizeVisibilityConfig(null, true), {
+    version: 1,
+    defaultVisible: true,
+    collections: {},
+    updatedAt: 0
+  });
+
+  const normalized = plugin.normalizeVisibilityConfig({
+    version: 9,
+    defaultVisible: false,
+    collections: {
+      'collection-a': true,
+      'collection-b': false,
+      '': true,
+      'collection-c': 'yes'
+    },
+    updatedAt: 42.9
+  }, true);
+
+  assert.equal(normalized.version, 1);
+  assert.equal(normalized.defaultVisible, false);
+  assert.deepEqual(normalized.collections, { 'collection-a': true });
+  assert.equal(normalized.updatedAt, 42);
+});
+
+test('global visibility toggle flips default, clears collection overrides, and stays local', () => {
+  const plugin = makePlugin();
+  const store = installLocalStorage();
+  plugin._visibilityConfig = plugin.normalizeVisibilityConfig({
+    defaultVisible: true,
+    collections: { 'collection-a': false }
+  }, true);
+  plugin.reconcileAllPanelsVisibility = (args) => {
+    plugin.__reconciled = args;
+  };
+
+  plugin.toggleDefaultVisibility();
+
+  assert.equal(plugin._visibilityConfig.defaultVisible, false);
+  assert.deepEqual(plugin._visibilityConfig.collections, {});
+  assert.equal(plugin.__reconciled.refreshVisible, false);
+  assert.equal(plugin.__reconciled.reason, 'toggle-global-visibility');
+  assert.match(plugin.__toasters.at(-1).title, /hidden globally/);
+  assert.equal(JSON.parse(store.get(plugin._storageKeyVisibility)).defaultVisible, false);
+});
+
+test('collection visibility toggle flips active collection and prunes default-equal overrides', () => {
+  const plugin = makePlugin();
+  installLocalStorage();
+  const collection = makeCollection({ guid: 'collection-a', name: 'Journal' });
+  const record = makeRecord({ guid: 'record-a', name: 'Today' });
+  const { panel } = makePanel({ id: 'panel-a', record, collection });
+  plugin.__setActivePanel(panel);
+  plugin.reconcileAllPanelsVisibility = (args) => {
+    plugin.__reconciled = args;
+  };
+
+  plugin._visibilityConfig = plugin.normalizeVisibilityConfig({
+    defaultVisible: true,
+    collections: {}
+  }, true);
+  plugin.toggleVisibilityForActiveCollection();
+
+  assert.deepEqual(plugin._visibilityConfig.collections, { 'collection-a': false });
+  assert.equal(plugin.__reconciled.collectionGuid, 'collection-a');
+  assert.equal(plugin.__reconciled.refreshVisible, false);
+  assert.match(plugin.__toasters.at(-1).title, /hidden for Journal/);
+
+  plugin.toggleVisibilityForActiveCollection();
+
+  assert.deepEqual(plugin._visibilityConfig.collections, {});
+  assert.equal(plugin.__reconciled.refreshVisible, true);
+  assert.match(plugin.__toasters.at(-1).title, /shown for Journal/);
+});
+
+test('collection visibility toggle without active collection toasts and does not save', () => {
+  const plugin = makePlugin();
+  const store = installLocalStorage();
+  plugin.__setActivePanel(null);
+
+  plugin.toggleVisibilityForActiveCollection();
+
+  assert.equal(store.has(plugin._storageKeyVisibility), false);
+  assert.match(plugin.__toasters.at(-1).title, /No active collection/);
+});
+
+test('hidden visible-eligible panel keeps state warm and skips mounting and refresh scheduling', () => {
+  const plugin = makePlugin();
+  installLocalStorage();
+  const collection = makeCollection({ guid: 'collection-a', name: 'Hidden' });
+  const record = makeRecord({ guid: 'record-a', name: 'Hidden Page' });
+  const { panel } = makePanel({
+    id: 'panel-a',
+    record,
+    collection,
+    element: makePanelElement()
+  });
+  plugin._visibilityConfig = plugin.normalizeVisibilityConfig({
+    defaultVisible: true,
+    collections: { 'collection-a': false }
+  }, true);
+
+  let mounted = false;
+  let refreshed = false;
+  plugin.mountFooter = () => {
+    mounted = true;
+  };
+  plugin.scheduleRefreshForPanel = () => {
+    refreshed = true;
+  };
+
+  plugin.handlePanelChanged(panel, 'test-hidden');
+
+  assert.equal(plugin._panelStates.has('panel-a'), true);
+  assert.equal(plugin._panelStates.get('panel-a').recordGuid, 'record-a');
+  assert.equal(mounted, false);
+  assert.equal(refreshed, false);
+});
+
+test('hidden panels cancel pending footer timers without deleting state', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-a', null);
+  plugin._panelStates.set('panel-a', state);
+  state.refreshTimer = setTimeout(() => {}, 1000);
+  state.queryFilterTimer = setTimeout(() => {}, 1000);
+  state.contextPreloadTimer = setTimeout(() => {}, 1000);
+
+  plugin.unmountFooterForHiddenPanel(state);
+
+  assert.equal(plugin._panelStates.has('panel-a'), true);
+  assert.equal(state.refreshTimer, null);
+  assert.equal(state.queryFilterTimer, null);
+  assert.equal(state.contextPreloadTimer, null);
+  assert.equal(state.contextPreloadSeq, 1);
+});
+
+test('showing a hidden collection remounts from existing state and schedules refresh', () => {
+  const plugin = makePlugin();
+  installLocalStorage();
+  const collection = makeCollection({ guid: 'collection-a', name: 'Shown' });
+  const record = makeRecord({ guid: 'record-a', name: 'Shown Page' });
+  const { panel } = makePanel({
+    id: 'panel-a',
+    record,
+    collection,
+    element: makePanelElement()
+  });
+  const state = plugin.createPanelState('panel-a', panel);
+  state.recordGuid = 'record-a';
+  state.lastResults = { propertyGroups: [], linkedGroups: [], unlinkedGroups: [] };
+  plugin._panelStates.set('panel-a', state);
+  plugin.__setPanels([panel]);
+  plugin._visibilityConfig = plugin.normalizeVisibilityConfig({
+    defaultVisible: true,
+    collections: { 'collection-a': false }
+  }, true);
+
+  const mounts = [];
+  const refreshes = [];
+  plugin.mountFooter = (nextPanel, nextState) => {
+    mounts.push({ panelId: nextPanel.getId(), sameState: nextState === state });
+  };
+  plugin.scheduleRefreshForPanel = (nextPanel, args) => {
+    refreshes.push({ panelId: nextPanel.getId(), force: args.force, reason: args.reason });
+  };
+
+  plugin._visibilityConfig = plugin.normalizeVisibilityConfig({
+    defaultVisible: true,
+    collections: {}
+  }, true);
+  plugin.reconcileAllPanelsVisibility({ refreshVisible: true, reason: 'toggle-collection-visibility', collectionGuid: 'collection-a' });
+
+  assert.deepEqual(mounts, [{ panelId: 'panel-a', sameState: true }]);
+  assert.deepEqual(refreshes, [
+    { panelId: 'panel-a', force: false, reason: 'toggle-collection-visibility' }
+  ]);
+});
+
+test('search and custom panels remain suppressed and dispose state', () => {
+  const plugin = makePlugin();
+  const record = makeRecord({ guid: 'record-a', name: 'Search Page' });
+  const { panel } = makePanel({
+    id: 'panel-a',
+    record,
+    collection: makeCollection({ guid: 'collection-a', name: 'Search' }),
+    navType: 'custom'
+  });
+  plugin._panelStates.set('panel-a', plugin.createPanelState('panel-a', panel));
+
+  plugin.handlePanelChanged(panel, 'custom-panel');
+
+  assert.equal(plugin._panelStates.has('panel-a'), false);
+});
 
 test('property candidate parsing supports record tuples and nested objects', () => {
   const plugin = makePlugin();

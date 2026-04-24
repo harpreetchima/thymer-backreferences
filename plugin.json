@@ -17,10 +17,11 @@
     "sidebar": false
   },
   "custom": {
+    "defaultVisible": true,
     "maxResults": 200,
     "queryFilterMaxResults": 1000,
     "showSelf": false
   },
   "home": false,
-  "version": "0.4.48"
+  "version": "0.4.49"
 }

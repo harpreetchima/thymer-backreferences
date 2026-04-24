@@ -8,6 +8,9 @@ class Plugin extends AppPlugin {
     this._maxStoredPropGroupStates = 160;
     this._maxStoredRecordGroupStates = 600;
 
+    this._storageKeyVisibility = 'thymer_backreferences_visibility_v1';
+    this._visibilityConfig = this.loadVisibilityConfig();
+
     this._storageKeyPageViewByRecord = 'thymer_backreferences_page_view_by_record_v1';
     this._pageViewByRecord = this.loadPageViewByRecordSetting();
 
@@ -64,6 +67,16 @@ class Plugin extends AppPlugin {
         });
       }
     });
+    this._cmdToggleDefaultVisibility = this.ui.addCommandPaletteCommand({
+      label: 'Backreferences: Toggle Globally',
+      icon: 'eye',
+      onSelected: () => this.toggleDefaultVisibility()
+    });
+    this._cmdToggleCollectionVisibility = this.ui.addCommandPaletteCommand({
+      label: 'Backreferences: Toggle in Current Collection',
+      icon: 'eye',
+      onSelected: () => this.toggleVisibilityForActiveCollection()
+    });
 
     this._eventHandlerIds.push(
       this.events.on('panel.navigated', (ev) => this.handlePanelChanged(ev.panel, 'panel.navigated'))
@@ -110,6 +123,8 @@ class Plugin extends AppPlugin {
     this._eventHandlerIds = [];
 
     this._cmdRebuildIndex?.remove?.();
+    this._cmdToggleDefaultVisibility?.remove?.();
+    this._cmdToggleCollectionVisibility?.remove?.();
 
     if (this._propertyIndexRebuildTimer) {
       clearTimeout(this._propertyIndexRebuildTimer);
@@ -187,7 +202,12 @@ class Plugin extends AppPlugin {
       state.searchOpen = Boolean((state.searchQuery || '').trim());
     }
 
-    this.mountFooter(panel, state);
+    if (this.isPanelVisible(panel)) {
+      this.mountFooter(panel, state);
+    } else {
+      this.unmountFooterForHiddenPanel(state);
+      return;
+    }
 
     // Always refresh on navigation; on focus we debounce unless already loaded.
     this.scheduleRefreshForPanel(panel, {
@@ -210,6 +230,187 @@ class Plugin extends AppPlugin {
     if (panelEl?.matches?.('.search-panel') || panelEl?.closest?.('.search-panel')) return true;
 
     return false;
+  }
+
+  getVisibilityInstallDefault() {
+    const cfg = this.getConfiguration?.() || {};
+    if (typeof cfg?.custom?.defaultVisible === 'boolean') {
+      return cfg.custom.defaultVisible;
+    }
+    return true;
+  }
+
+  normalizeVisibilityConfig(value, fallbackDefaultVisible) {
+    const fallback = fallbackDefaultVisible === false ? false : true;
+    const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const defaultVisible = typeof source.defaultVisible === 'boolean'
+      ? source.defaultVisible
+      : fallback;
+    const collections = {};
+    const rawCollections = source.collections && typeof source.collections === 'object' && !Array.isArray(source.collections)
+      ? source.collections
+      : {};
+
+    for (const [guid, visible] of Object.entries(rawCollections)) {
+      const key = typeof guid === 'string' ? guid.trim() : '';
+      if (!key || typeof visible !== 'boolean') continue;
+      if (visible === defaultVisible) continue;
+      collections[key] = visible;
+    }
+
+    const updatedAt = Number.isFinite(Number(source.updatedAt)) && Number(source.updatedAt) > 0
+      ? Math.floor(Number(source.updatedAt))
+      : 0;
+
+    return {
+      version: 1,
+      defaultVisible,
+      collections,
+      updatedAt
+    };
+  }
+
+  loadVisibilityConfig() {
+    const fallback = this.getVisibilityInstallDefault();
+    return this.normalizeVisibilityConfig(this.readJsonStorage(this._storageKeyVisibility), fallback);
+  }
+
+  saveVisibilityConfig(config) {
+    const next = this.normalizeVisibilityConfig(config, this.getVisibilityInstallDefault());
+    next.updatedAt = Date.now();
+    this._visibilityConfig = next;
+    this.writeJsonStorage(this._storageKeyVisibility, next);
+    return next;
+  }
+
+  getPanelCollection(panel) {
+    try {
+      return panel?.getActiveCollection?.() || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  getCollectionGuid(collection) {
+    const guid = typeof collection?.getGuid === 'function'
+      ? collection.getGuid()
+      : (collection?.guid || collection?.id || '');
+    return typeof guid === 'string' ? guid.trim() : '';
+  }
+
+  getCollectionName(collection) {
+    const name = typeof collection?.getName === 'function'
+      ? collection.getName()
+      : (collection?.name || '');
+    return (typeof name === 'string' && name.trim()) ? name.trim() : 'current collection';
+  }
+
+  isCollectionVisible(collection) {
+    const cfg = this._visibilityConfig || this.loadVisibilityConfig();
+    const guid = this.getCollectionGuid(collection);
+    if (guid && Object.prototype.hasOwnProperty.call(cfg.collections || {}, guid)) {
+      return cfg.collections[guid] !== false;
+    }
+    return cfg.defaultVisible !== false;
+  }
+
+  isPanelVisible(panel) {
+    return this.isCollectionVisible(this.getPanelCollection(panel));
+  }
+
+  showToast(title) {
+    const text = typeof title === 'string' ? title.trim() : '';
+    if (!text) return;
+    try {
+      this.ui?.addToaster?.({
+        title: text,
+        dismissible: true,
+        autoDestroyTime: 1800
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  toggleDefaultVisibility() {
+    const current = this._visibilityConfig || this.loadVisibilityConfig();
+    const nextVisible = current.defaultVisible === false;
+    this.saveVisibilityConfig({
+      version: 1,
+      defaultVisible: nextVisible,
+      collections: {},
+      updatedAt: Date.now()
+    });
+    this.showToast(`Backreferences ${nextVisible ? 'shown' : 'hidden'} globally`);
+    this.reconcileAllPanelsVisibility({ refreshVisible: nextVisible, reason: 'toggle-global-visibility' });
+  }
+
+  toggleVisibilityForActiveCollection() {
+    const panel = this.ui?.getActivePanel?.() || null;
+    const collection = this.getPanelCollection(panel);
+    const guid = this.getCollectionGuid(collection);
+    if (!guid) {
+      this.showToast('No active collection for Backreferences');
+      return;
+    }
+
+    const current = this._visibilityConfig || this.loadVisibilityConfig();
+    const currentVisible = this.isCollectionVisible(collection);
+    const nextVisible = !currentVisible;
+    const collections = { ...(current.collections || {}) };
+    if (nextVisible === current.defaultVisible) {
+      delete collections[guid];
+    } else {
+      collections[guid] = nextVisible;
+    }
+
+    this.saveVisibilityConfig({
+      ...current,
+      collections,
+      updatedAt: Date.now()
+    });
+
+    const name = this.getCollectionName(collection);
+    this.showToast(`Backreferences ${nextVisible ? 'shown' : 'hidden'} for ${name}`);
+    this.reconcileAllPanelsVisibility({
+      refreshVisible: nextVisible,
+      reason: 'toggle-collection-visibility',
+      collectionGuid: guid
+    });
+  }
+
+  getKnownPanels() {
+    const panels = [];
+    const seen = new Set();
+    const addPanel = (panel) => {
+      const id = panel?.getId?.() || null;
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      panels.push(panel);
+    };
+
+    try {
+      const openPanels = this.ui?.getPanels?.() || [];
+      for (const panel of openPanels) addPanel(panel);
+    } catch (e) {
+      // ignore
+    }
+
+    for (const state of this._panelStates?.values?.() || []) {
+      addPanel(state?.panel || null);
+    }
+
+    return panels;
+  }
+
+  reconcileAllPanelsVisibility({ refreshVisible, reason, collectionGuid } = {}) {
+    for (const panel of this.getKnownPanels()) {
+      if (collectionGuid) {
+        const guid = this.getCollectionGuid(this.getPanelCollection(panel));
+        if (guid !== collectionGuid) continue;
+      }
+      this.handlePanelChanged(panel, reason || 'visibility-changed');
+    }
   }
 
   handlePanelClosed(panel) {
@@ -336,9 +537,71 @@ class Plugin extends AppPlugin {
     this._panelStates.delete(panelId);
   }
 
+  unmountFooterForHiddenPanel(state) {
+    if (!state) return;
+
+    if (state.refreshTimer) {
+      clearTimeout(state.refreshTimer);
+      state.refreshTimer = null;
+    }
+
+    if (state.queryFilterTimer) {
+      clearTimeout(state.queryFilterTimer);
+      state.queryFilterTimer = null;
+    }
+
+    if (state.contextPreloadTimer) {
+      clearTimeout(state.contextPreloadTimer);
+      state.contextPreloadTimer = null;
+    }
+    state.contextPreloadSeq = (state.contextPreloadSeq || 0) + 1;
+
+    try {
+      state.observer?.disconnect?.();
+    } catch (e) {
+      // ignore
+    }
+    state.observer = null;
+
+    this.setSortMenuOpen(state, false);
+    this.setSearchAutocompleteOpen(state, false);
+
+    try {
+      state.rootEl?.remove?.();
+    } catch (e) {
+      // ignore
+    }
+
+    state.mountedIn = null;
+    state.rootEl = null;
+    state.bodyEl = null;
+    state.statusSlotEl = null;
+    state.propertySlotEl = null;
+    state.linkedSlotEl = null;
+    state.unlinkedSlotEl = null;
+    state.countEl = null;
+    state.footerToggleEl = null;
+    state.sortToggleEl = null;
+    state.sortMenuEl = null;
+    state.searchToggleEl = null;
+    state.searchRowEl = null;
+    state.searchWrapEl = null;
+    state.searchInputEl = null;
+    state.searchHighlightTextEl = null;
+    state.searchClearEl = null;
+    state.searchRefreshEl = null;
+    state.searchAutocompleteEl = null;
+    state.renderSectionKeys = null;
+  }
+
   // ---------- Mounting ----------
 
   mountFooter(panel, state) {
+    if (!this.isPanelVisible(panel)) {
+      this.unmountFooterForHiddenPanel(state);
+      return;
+    }
+
     const panelEl = panel?.getElement?.() || null;
     if (!panelEl) return;
 
@@ -2409,6 +2672,11 @@ class Plugin extends AppPlugin {
     this.syncPropertyIndexResultForState(state);
 
     const panel = state.panel || null;
+    if (panel && !this.isPanelVisible(panel)) {
+      this.unmountFooterForHiddenPanel(state);
+      return;
+    }
+
     if (panel && (!state.rootEl || !state.rootEl.isConnected)) {
       this.mountFooter(panel, state);
     }
@@ -3426,6 +3694,11 @@ class Plugin extends AppPlugin {
   scheduleRefreshForPanel(panel, { force, reason } = {}) {
     const panelId = panel?.getId?.() || null;
     if (!panelId) return;
+    if (!this.isPanelVisible(panel)) {
+      const hiddenState = this._panelStates.get(panelId) || null;
+      if (hiddenState) this.unmountFooterForHiddenPanel(hiddenState);
+      return;
+    }
     let state = this._panelStates.get(panelId) || null;
     if (!state) state = this.getOrCreatePanelState(panel);
     if (!state) return;
@@ -3817,6 +4090,10 @@ class Plugin extends AppPlugin {
 
   applyRefreshedResults(state, results, { reason } = {}) {
     state.lastResults = results;
+    if (!this.isPanelVisible(state?.panel || null)) {
+      this.unmountFooterForHiddenPanel(state);
+      return;
+    }
     this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: reason || 'refresh' });
     this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
     this.invalidateLinkedContextCache(state);
@@ -3831,6 +4108,7 @@ class Plugin extends AppPlugin {
 
   scheduleContextAvailabilityPreload(state, results, { reason } = {}) {
     if (!state || !results) return;
+    if (!this.isPanelVisible(state.panel || null)) return;
     if (state.contextPreloadTimer) {
       clearTimeout(state.contextPreloadTimer);
       state.contextPreloadTimer = null;
@@ -3892,6 +4170,11 @@ class Plugin extends AppPlugin {
 
     // Keep state in sync in case of churn.
     state.recordGuid = recordGuid;
+
+    if (!this.isPanelVisible(panel)) {
+      this.unmountFooterForHiddenPanel(state);
+      return;
+    }
 
     if (!state.rootEl || !state.rootEl.isConnected) {
       this.mountFooter(panel, state);
