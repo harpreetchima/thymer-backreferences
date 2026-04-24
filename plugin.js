@@ -1,25 +1,77 @@
-// @generated BEGIN thymer-ext-path-b (source: plugins/plugin-settings/ThymerExtPathBRuntime.js — edit that file, then npm run embed-path-b)
+// @generated BEGIN thymer-plugin-settings (source: plugins/plugin-settings/ThymerPluginSettingsRuntime.js — run: npm run embed-plugin-settings)
 /**
- * ThymerExtPathB — shared path-B storage (Plugin Settings collection + localStorage mirror).
- * Edit this file in the repo, then run `npm run embed-path-b` to refresh embedded copies inside each Path B plugin.
+ * ThymerPluginSettings — workspace “Plugin Settings” collection + optional localStorage mirror
+ * for global plugins that do not own a collection.
  *
- * API: ThymerExtPathB.init({ plugin, pluginId, modeKey, mirrorKeys, label, data, ui })
- *      ThymerExtPathB.scheduleFlush(plugin, mirrorKeys)
- *      ThymerExtPathB.openStorageDialog(plugin, { pluginId, modeKey, mirrorKeys, label, data, ui })
+ * Edit this file, then from repo root: npm run embed-plugin-settings
+ *
+ * API: ThymerPluginSettings.init({ plugin, pluginId, modeKey, mirrorKeys, label, data, ui })
+ *      ThymerPluginSettings.scheduleFlush(plugin, mirrorKeys)
+ *      ThymerPluginSettings.openStorageDialog({ plugin, pluginId, modeKey, mirrorKeys, label, data, ui })
  */
-(function pathBRuntime(g) {
-  if (g.ThymerExtPathB) return;
+(function pluginSettingsRuntime(g) {
+  if (g.ThymerPluginSettings) return;
 
   const COL_NAME = 'Plugin Settings';
   const q = [];
   let busy = false;
+
+  /** Serialized ensures so concurrent plugin loads do not double-create the collection. */
+  let _ensureChain = Promise.resolve();
+
+  const PLUGIN_SETTINGS_SHAPE = {
+    ver: 1,
+    name: COL_NAME,
+    icon: 'ti-adjustments',
+    item_name: 'Setting',
+    description:
+      'Workspace storage for plugin preferences (cross-device when you choose synced settings). One row per plugin.',
+    show_sidebar_items: true,
+    show_cmdpal_items: false,
+    views: [],
+    fields: [
+      {
+        icon: 'ti-id',
+        id: 'plugin_id',
+        label: 'Plugin ID',
+        type: 'text',
+        read_only: false,
+        active: true,
+        many: false,
+      },
+      {
+        icon: 'ti-code',
+        id: 'settings_json',
+        label: 'Settings JSON',
+        type: 'text',
+        read_only: false,
+        active: true,
+        many: false,
+      },
+    ],
+    page_field_ids: ['plugin_id', 'settings_json'],
+    sidebar_record_sort_field_id: 'updated_at',
+    sidebar_record_sort_dir: 'desc',
+    managed: { fields: false, views: false, sidebar: false },
+    custom: {},
+    home: false,
+    color: null,
+  };
+
+  function cloneShape() {
+    try {
+      return structuredClone(PLUGIN_SETTINGS_SHAPE);
+    } catch (_) {
+      return JSON.parse(JSON.stringify(PLUGIN_SETTINGS_SHAPE));
+    }
+  }
 
   function drain() {
     if (busy || !q.length) return;
     busy = true;
     const job = q.shift();
     Promise.resolve(typeof job === 'function' ? job() : job)
-      .catch((e) => console.error('[ThymerExtPathB]', e))
+      .catch((e) => console.error('[ThymerPluginSettings]', e))
       .finally(() => {
         busy = false;
         if (q.length) setTimeout(drain, 450);
@@ -38,6 +90,34 @@
     } catch (_) {
       return null;
     }
+  }
+
+  function ensurePluginSettingsCollection(data) {
+    if (!data || typeof data.getAllCollections !== 'function' || typeof data.createCollection !== 'function') {
+      return Promise.resolve();
+    }
+    const work = async () => {
+      try {
+        const existing = await findColl(data);
+        if (existing) return;
+        const coll = await data.createCollection();
+        if (!coll || typeof coll.getConfiguration !== 'function' || typeof coll.saveConfiguration !== 'function') {
+          return;
+        }
+        const again = await findColl(data);
+        if (again) return;
+        const conf = cloneShape();
+        const base = coll.getConfiguration();
+        if (base && typeof base.ver === 'number') conf.ver = base.ver;
+        const ok = await coll.saveConfiguration(conf);
+        if (ok === false) return;
+        await new Promise((r) => setTimeout(r, 350));
+      } catch (e) {
+        console.error('[ThymerPluginSettings] ensure collection', e);
+      }
+    };
+    _ensureChain = _ensureChain.catch(() => {}).then(work);
+    return _ensureChain;
   }
 
   async function readDoc(data, pluginId) {
@@ -102,7 +182,7 @@
   }
 
   function showFirstRunDialog(ui, label, preferred, onPick) {
-    const id = 'thymerext-pathb-first-' + Math.random().toString(36).slice(2);
+    const id = 'thymerext-ps-first-' + Math.random().toString(36).slice(2);
     const box = document.createElement('div');
     box.id = id;
     box.style.cssText =
@@ -136,7 +216,11 @@
       return b;
     };
     const bLoc = mk('This device only', 'Browser localStorage only.', preferred === 'local');
-    const bSyn = mk('Sync via Plugin Settings', 'Workspace collection “' + COL_NAME + '”.', preferred === 'synced');
+    const bSyn = mk(
+      'Sync across devices',
+      'Store in the workspace “' + COL_NAME + '” collection (same account on any browser).',
+      preferred === 'synced'
+    );
     const fin = (m) => {
       try {
         box.remove();
@@ -153,11 +237,12 @@
     document.body.appendChild(box);
   }
 
-  g.ThymerExtPathB = {
+  g.ThymerPluginSettings = {
     COL_NAME,
     enqueue,
     async init(opts) {
       const { plugin, pluginId, modeKey, mirrorKeys, label, data, ui } = opts;
+
       let mode = null;
       try {
         mode = localStorage.getItem(modeKey);
@@ -190,11 +275,11 @@
         } catch (_) {}
       }
 
-      plugin._pathBMode = mode === 'synced' ? 'synced' : 'local';
-      plugin._pathBPluginId = pluginId;
+      plugin._pluginSettingsSyncMode = mode === 'synced' ? 'synced' : 'local';
+      plugin._pluginSettingsPluginId = pluginId;
       const keys = typeof mirrorKeys === 'function' ? mirrorKeys() : mirrorKeys;
 
-      if (plugin._pathBMode === 'synced' && remote && remote.payload && typeof remote.payload === 'object') {
+      if (plugin._pluginSettingsSyncMode === 'synced' && remote && remote.payload && typeof remote.payload === 'object') {
         for (const k of keys) {
           const v = remote.payload[k];
           if (typeof v === 'string') {
@@ -205,27 +290,28 @@
         }
       }
 
-      if (plugin._pathBMode === 'synced') {
+      if (plugin._pluginSettingsSyncMode === 'synced') {
         try {
-          await g.ThymerExtPathB.flushNow(data, pluginId, keys);
+          await g.ThymerPluginSettings.flushNow(data, pluginId, keys);
         } catch (_) {}
       }
     },
 
     scheduleFlush(plugin, mirrorKeys) {
-      if (plugin._pathBMode !== 'synced') return;
+      if (plugin._pluginSettingsSyncMode !== 'synced') return;
       const keys = typeof mirrorKeys === 'function' ? mirrorKeys() : mirrorKeys;
-      if (plugin._pathBFlushTimer) clearTimeout(plugin._pathBFlushTimer);
-      plugin._pathBFlushTimer = setTimeout(() => {
-        plugin._pathBFlushTimer = null;
-        const data = plugin.data;
-        const pid = plugin._pathBPluginId;
-        if (!pid || !data) return;
-        g.ThymerExtPathB.flushNow(data, pid, keys).catch((e) => console.error('[ThymerExtPathB] flush', e));
+      if (plugin._pluginSettingsFlushTimer) clearTimeout(plugin._pluginSettingsFlushTimer);
+      plugin._pluginSettingsFlushTimer = setTimeout(() => {
+        plugin._pluginSettingsFlushTimer = null;
+        const pdata = plugin.data;
+        const pid = plugin._pluginSettingsPluginId;
+        if (!pid || !pdata) return;
+        g.ThymerPluginSettings.flushNow(pdata, pid, keys).catch((e) => console.error('[ThymerPluginSettings] flush', e));
       }, 500);
     },
 
     async flushNow(data, pluginId, mirrorKeys) {
+      await ensurePluginSettingsCollection(data);
       const keys = typeof mirrorKeys === 'function' ? mirrorKeys() : mirrorKeys;
       const payload = {};
       for (const k of keys) {
@@ -245,7 +331,7 @@
 
     async openStorageDialog(opts) {
       const { plugin, pluginId, modeKey, mirrorKeys, label, data, ui } = opts;
-      const cur = plugin._pathBMode === 'synced' ? 'synced' : 'local';
+      const cur = plugin._pluginSettingsSyncMode === 'synced' ? 'synced' : 'local';
       const pick = await new Promise((resolve) => {
         const close = (v) => {
           try {
@@ -271,7 +357,7 @@
         b1.textContent = 'This device only';
         const b2 = document.createElement('button');
         b2.type = 'button';
-        b2.textContent = 'Sync via Plugin Settings';
+        b2.textContent = 'Sync across devices';
         [b1, b2].forEach((b) => {
           b.style.cssText =
             'display:block;width:100%;padding:10px 12px;margin-bottom:8px;border-radius:8px;cursor:pointer;border:1px solid var(--border-default,#3f3f46);background:transparent;color:inherit;text-align:left;';
@@ -295,20 +381,19 @@
       try {
         localStorage.setItem(modeKey, pick);
       } catch (_) {}
-      plugin._pathBMode = pick === 'synced' ? 'synced' : 'local';
+      plugin._pluginSettingsSyncMode = pick === 'synced' ? 'synced' : 'local';
       const keys = typeof mirrorKeys === 'function' ? mirrorKeys() : mirrorKeys;
-      if (pick === 'synced') await g.ThymerExtPathB.flushNow(data, pluginId, keys);
+      if (pick === 'synced') await g.ThymerPluginSettings.flushNow(data, pluginId, keys);
       ui.addToaster?.({
         title: label,
-        message: 'Storage: ' + (pick === 'synced' ? 'synced' : 'local only'),
+        message: pick === 'synced' ? 'Settings will sync across devices.' : 'Settings stay on this device only.',
         dismissible: true,
         autoDestroyTime: 3500,
       });
     },
   };
-
 })(typeof globalThis !== 'undefined' ? globalThis : window);
-// @generated END thymer-ext-path-b
+// @generated END thymer-plugin-settings
 
 class Plugin extends AppPlugin {
   onLoad() {
@@ -317,7 +402,7 @@ class Plugin extends AppPlugin {
     this._version = '0.6.0';
     this._pluginName = 'Backreferences';
 
-    await (globalThis.ThymerExtPathB?.init?.({
+    await (globalThis.ThymerPluginSettings?.init?.({
         plugin: this,
         pluginId: 'backreferences',
         modeKey: 'thymerext_ps_mode_backreferences',
@@ -334,7 +419,7 @@ class Plugin extends AppPlugin {
         label: 'Backreferences',
         data: this.data,
         ui: this.ui,
-      }) ?? (console.warn('[Backreferences] ThymerExtPathB runtime missing (redeploy full plugin .js from repo).'), Promise.resolve()));
+      }) ?? (console.warn('[Backreferences] ThymerPluginSettings runtime missing (redeploy full plugin .js from repo).'), Promise.resolve()));
 
     this._panelStates = new Map();
     this._eventHandlerIds = [];
@@ -385,7 +470,7 @@ class Plugin extends AppPlugin {
       label: 'Backreferences: Storage location…',
       icon: 'ti-database',
       onSelected: () => {
-        globalThis.ThymerExtPathB?.openStorageDialog?.({
+        globalThis.ThymerPluginSettings?.openStorageDialog?.({
           plugin: this,
           pluginId: 'backreferences',
           modeKey: 'thymerext_ps_mode_backreferences',
@@ -1462,7 +1547,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   loadPropGroupCollapsedSetting() {
@@ -1522,7 +1607,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   isPropGroupCollapsed(propName) {
@@ -1599,7 +1684,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   setSortPreferenceForRecord(recordGuid, sortBy, sortDir) {
@@ -1637,7 +1722,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   clearIgnoreCleanupMigrationDone() {
@@ -1646,7 +1731,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   normalizeLegacyIgnoreValue(value) {
@@ -3646,7 +3731,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   loadBoolSetting(key, defaultValue) {
@@ -3666,7 +3751,7 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
-    globalThis.ThymerExtPathB?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
+    globalThis.ThymerPluginSettings?.scheduleFlush?.(this, () => [       'thymer_backreferences_collapsed_v2',       'thymer_backreferences_prop_group_collapsed_v2',       'thymer_backreferences_record_group_collapsed_v1',       'thymer_backreferences_property_refs_collapsed_v1',       'thymer_backreferences_linked_refs_collapsed_v1',       'thymer_backreferences_unlinked_collapsed_v1',       'thymer_backreferences_sort_by_record_v1',       'thymer_backreferences_ignore_cleanup_v1',     ]);
   }
 
   appendSectionTitle(container, text) {
