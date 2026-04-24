@@ -232,6 +232,25 @@ test('property references prefer SDK linked records over raw text-like values', 
   assert.equal(plugin.propertyReferencesGuid(prop, other.guid), true);
 });
 
+test('property references fall back to raw values when SDK linked records are empty', () => {
+  const plugin = makePlugin();
+  const prop = {
+    name: 'Entity',
+    value: ['record', 'target-guid'],
+    linkedRecords() {
+      return [];
+    },
+    text() {
+      return '';
+    },
+    choice() {
+      return null;
+    }
+  };
+
+  assert.equal(plugin.propertyReferencesGuid(prop, 'target-guid'), true);
+});
+
 test('property backlink grouping dedupes records and sorts groups by property name', () => {
   const plugin = makePlugin();
   const targetGuid = 'target-guid';

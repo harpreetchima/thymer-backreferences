@@ -4339,7 +4339,7 @@ class Plugin extends AppPlugin {
     if (!prop || !targetGuid) return false;
 
     const linkedRecordGuids = this.getPropertyLinkedRecordGuids(prop);
-    if (linkedRecordGuids) {
+    if (linkedRecordGuids && linkedRecordGuids.size > 0) {
       return linkedRecordGuids.has(targetGuid);
     }
 
