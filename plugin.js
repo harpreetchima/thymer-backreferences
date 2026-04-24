@@ -1,9 +1,6 @@
 class Plugin extends AppPlugin {
   onLoad() {
     // NOTE: Thymer strips top-level code outside the Plugin class.
-    this._version = '0.4.45';
-    this._pluginName = 'Backreferences';
-
     this._panelStates = new Map();
     this._eventHandlerIds = [];
     this._maxStoredPageViewRecords = 400;
@@ -31,7 +28,7 @@ class Plugin extends AppPlugin {
     this._defaultMaxResults = 200;
     this._refreshDebounceMs = 350;
     this._queryFilterDebounceMs = 180;
-    this._queryFilterMaxResults = 1000;
+    this._defaultQueryFilterMaxResults = 1000;
     this._queryAutocompleteCatalog = null;
     this._queryAutocompleteCatalogPromise = null;
     this._queryStandaloneFilters = [
@@ -272,6 +269,8 @@ class Plugin extends AppPlugin {
       queryFilterTimer: null,
       queryFilterSeq: 0,
       queryFilterState: null,
+      contextPreloadTimer: null,
+      contextPreloadSeq: 0,
       lastResults: null,
       observer: null,
       refreshTimer: null,
@@ -293,6 +292,12 @@ class Plugin extends AppPlugin {
       clearTimeout(state.queryFilterTimer);
       state.queryFilterTimer = null;
     }
+
+    if (state.contextPreloadTimer) {
+      clearTimeout(state.contextPreloadTimer);
+      state.contextPreloadTimer = null;
+    }
+    state.contextPreloadSeq = (state.contextPreloadSeq || 0) + 1;
 
     try {
       state.observer?.disconnect?.();
@@ -735,13 +740,14 @@ class Plugin extends AppPlugin {
     if (action === 'toggle-record-group') {
       const sectionId = this.normalizeRecordGroupSectionId(actionEl.dataset.groupSectionId);
       const recordGuid = (actionEl.dataset.recordGuid || '').trim();
-      if (!sectionId || !recordGuid) return;
+      const targetRecordGuid = (actionEl.dataset.targetRecordGuid || state?.recordGuid || '').trim();
+      if (!sectionId || !recordGuid || !targetRecordGuid) return;
 
       const groupEl = actionEl.closest?.('.tlr-group') || null;
-      const isCollapsed = groupEl ? groupEl.classList.contains('tlr-group-collapsed') : this.isRecordGroupCollapsed(sectionId, recordGuid);
+      const isCollapsed = groupEl ? groupEl.classList.contains('tlr-group-collapsed') : this.isRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid);
       const nextCollapsed = !isCollapsed;
 
-      this.setRecordGroupCollapsed(sectionId, recordGuid, nextCollapsed);
+      this.setRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid, nextCollapsed);
       if (groupEl) groupEl.classList.toggle('tlr-group-collapsed', nextCollapsed);
       actionEl.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
       actionEl.title = nextCollapsed ? 'Expand' : 'Collapse';
@@ -1853,6 +1859,7 @@ class Plugin extends AppPlugin {
   async refreshScopedQueryFilter(panelId, seq, { reason } = {}) {
     const state = this._panelStates.get(panelId) || null;
     if (!state) return;
+    if (state.queryFilterSeq !== seq) return;
 
     const results = state.lastResults || null;
     const query = (state.searchQuery || '').trim();
@@ -1878,13 +1885,15 @@ class Plugin extends AppPlugin {
     let result = null;
     let error = '';
     try {
-      result = await this.data.searchByQuery(query, this._queryFilterMaxResults);
+      const { queryFilterMaxResults } = this.getRefreshConfig();
+      result = await this.data.searchByQuery(query, queryFilterMaxResults);
       if (typeof result?.error === 'string' && result.error.trim()) error = result.error.trim();
     } catch (e) {
       error = 'Could not apply query filter.';
     }
 
     if (!this._panelStates.has(panelId)) return;
+    if (state.queryFilterSeq !== seq) return;
     if ((state.searchQuery || '').trim() !== query) return;
 
     const latestResults = state.lastResults || results;
@@ -2666,21 +2675,22 @@ class Plugin extends AppPlugin {
     return sectionId === 'linked' || sectionId === 'unlinked' ? sectionId : null;
   }
 
-  getRecordGroupCollapsedKey(sectionId, recordGuid) {
+  getRecordGroupCollapsedKey(sectionId, targetRecordGuid, recordGuid) {
     const normalizedSectionId = this.normalizeRecordGroupSectionId(sectionId);
+    const targetGuid = typeof targetRecordGuid === 'string' ? targetRecordGuid.trim() : '';
     const guid = typeof recordGuid === 'string' ? recordGuid.trim() : '';
-    if (!normalizedSectionId || !guid) return '';
-    return `${normalizedSectionId}:${guid}`;
+    if (!normalizedSectionId || !targetGuid || !guid) return '';
+    return `${normalizedSectionId}:${targetGuid}:${guid}`;
   }
 
-  isRecordGroupCollapsed(sectionId, recordGuid) {
-    const key = this.getRecordGroupCollapsedKey(sectionId, recordGuid);
+  isRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid) {
+    const key = this.getRecordGroupCollapsedKey(sectionId, targetRecordGuid, recordGuid);
     if (!key) return false;
     return this._recordGroupCollapsed?.has?.(key) === true;
   }
 
-  setRecordGroupCollapsed(sectionId, recordGuid, collapsed) {
-    const key = this.getRecordGroupCollapsedKey(sectionId, recordGuid);
+  setRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid, collapsed) {
+    const key = this.getRecordGroupCollapsedKey(sectionId, targetRecordGuid, recordGuid);
     if (!key) return;
     if (!this._recordGroupCollapsed) this._recordGroupCollapsed = new Set();
     if (collapsed === true) {
@@ -3051,8 +3061,13 @@ class Plugin extends AppPlugin {
 
   getRefreshConfig() {
     const cfg = this.getConfiguration?.() || {};
+    const maxResults = this.coercePositiveInt(cfg.custom?.maxResults, this._defaultMaxResults);
     return {
-      maxResults: this.coercePositiveInt(cfg.custom?.maxResults, this._defaultMaxResults),
+      maxResults,
+      queryFilterMaxResults: this.coercePositiveInt(
+        cfg.custom?.queryFilterMaxResults,
+        Math.max(this._defaultQueryFilterMaxResults, maxResults)
+      ),
       showSelf: cfg.custom?.showSelf === true
     };
   }
@@ -3063,18 +3078,142 @@ class Plugin extends AppPlugin {
     return state.refreshSeq === seq;
   }
 
-  async runLinkedReferenceSearch(recordGuid, maxResults) {
-    try {
-      return {
-        status: 'fulfilled',
-        value: await this.data.searchByQuery(`@linkto = "${recordGuid}"`, maxResults)
-      };
-    } catch (e) {
-      return {
-        status: 'rejected',
-        reason: e
-      };
+  normalizeDateToIso(value) {
+    if (!value) return '';
+
+    if (value instanceof Date && Number.isFinite(value.getTime())) {
+      return [
+        this.padDateTimeNumber(value.getFullYear(), 4),
+        this.padDateTimeNumber(value.getMonth() + 1, 2),
+        this.padDateTimeNumber(value.getDate(), 2)
+      ].join('-');
     }
+
+    if (typeof value === 'string') {
+      const compact = value.trim().match(/^(\d{4})(\d{2})(\d{2})$/);
+      if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+      const dashed = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (dashed) return `${dashed[1]}-${dashed[2]}-${dashed[3]}`;
+      return '';
+    }
+
+    if (value && typeof value === 'object') {
+      const source = value.value && typeof value.value === 'object'
+        ? value.value
+        : value;
+      return this.formatDateTimeDate(
+        typeof source.d === 'string' ? source.d
+          : typeof source.date === 'string' ? source.date
+            : source
+      );
+    }
+
+    return '';
+  }
+
+  parseDateIsoFromRecordTitle(recordName) {
+    const title = typeof recordName === 'string'
+      ? recordName.trim().replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, '$1')
+      : '';
+    if (!title) return '';
+
+    const direct = this.normalizeDateToIso(title);
+    if (direct) return direct;
+
+    const months = {
+      jan: 1, january: 1,
+      feb: 2, february: 2,
+      mar: 3, march: 3,
+      apr: 4, april: 4,
+      may: 5,
+      jun: 6, june: 6,
+      jul: 7, july: 7,
+      aug: 8, august: 8,
+      sep: 9, sept: 9, september: 9,
+      oct: 10, october: 10,
+      nov: 11, november: 11,
+      dec: 12, december: 12
+    };
+    const monthFirst = title.match(/^(?:[A-Za-z]{3,9}\s+)?([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})$/);
+    const dayFirst = title.match(/^(\d{1,2})\s+([A-Za-z]{3,9}),?\s+(\d{4})$/);
+    const match = monthFirst || dayFirst;
+    if (!match) return '';
+
+    const monthName = (monthFirst ? match[1] : match[2]).toLowerCase();
+    const month = months[monthName] || 0;
+    const day = Number(monthFirst ? match[2] : match[1]);
+    const year = Number(match[3]);
+    if (!Number.isFinite(year) || !Number.isFinite(day) || month <= 0 || day <= 0 || day > 31) return '';
+    const parsed = new Date(year, month - 1, day);
+    if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return '';
+    return `${this.padDateTimeNumber(year, 4)}-${this.padDateTimeNumber(month, 2)}-${this.padDateTimeNumber(day, 2)}`;
+  }
+
+  getRecordDateReferenceIso(record) {
+    if (!record) return '';
+
+    try {
+      const details = typeof record.getJournalDetails === 'function' ? record.getJournalDetails() : null;
+      const journalDate = this.normalizeDateToIso(details?.date || null);
+      if (journalDate) return journalDate;
+    } catch (e) {
+      // Fall back to parsing date-like page titles below.
+    }
+
+    return this.parseDateIsoFromRecordTitle(record.getName?.() || '');
+  }
+
+  getLinkedReferenceSearchSpecs(recordGuid, targetRecord) {
+    const guid = (recordGuid || '').trim();
+    if (!guid) return [];
+
+    const specs = [{ kind: 'linkto', query: `@linkto = "${guid}"` }];
+    const dateIso = this.getRecordDateReferenceIso(targetRecord);
+    if (dateIso) {
+      specs.push({ kind: 'datetime', query: `@date = "${dateIso}"`, dateIso });
+    }
+    return specs;
+  }
+
+  async runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord } = {}) {
+    const specs = this.getLinkedReferenceSearchSpecs(recordGuid, targetRecord);
+    const searches = await Promise.all(specs.map(async (spec) => {
+      try {
+        return {
+          ...spec,
+          status: 'fulfilled',
+          value: await this.data.searchByQuery(spec.query, maxResults)
+        };
+      } catch (e) {
+        return {
+          ...spec,
+          status: 'rejected',
+          reason: e
+        };
+      }
+    }));
+
+    return {
+      status: 'fulfilled',
+      value: { searches }
+    };
+  }
+
+  mergeLinkedReferenceSearchLines(searches) {
+    const lines = [];
+    const seenLineGuids = new Set();
+
+    for (const search of searches || []) {
+      if (search?.status !== 'fulfilled' || search?.value?.error) continue;
+      for (const line of search.value?.lines || []) {
+        const guid = line?.guid || '';
+        if (guid && seenLineGuids.has(guid)) continue;
+        if (guid) seenLineGuids.add(guid);
+        lines.push(line);
+      }
+    }
+
+    return lines;
   }
 
   resolveLinkedReferenceSearch(searchSettled, recordGuid, { showSelf }) {
@@ -3083,12 +3222,18 @@ class Plugin extends AppPlugin {
     let propertyCandidateRecords = null;
 
     if (searchSettled?.status === 'fulfilled') {
-      const result = searchSettled.value;
-      if (result?.error) {
-        linkedError = result.error;
+      const searches = Array.isArray(searchSettled.value?.searches)
+        ? searchSettled.value.searches
+        : [{ kind: 'linkto', status: 'fulfilled', value: searchSettled.value }];
+      const primarySearch = searches.find((search) => search?.kind === 'linkto') || searches[0] || null;
+      const primaryResult = primarySearch?.value || null;
+      if (primarySearch?.status === 'rejected') {
+        linkedError = 'Error loading linked references.';
+      } else if (primaryResult?.error) {
+        linkedError = primaryResult.error;
       } else {
-        const lines = Array.isArray(result?.lines) ? result.lines : [];
-        propertyCandidateRecords = Array.isArray(result?.records) ? result.records : null;
+        const lines = this.mergeLinkedReferenceSearchLines(searches);
+        propertyCandidateRecords = Array.isArray(primaryResult?.records) ? primaryResult.records : null;
         linkedGroups = this.groupBacklinkLines(lines, recordGuid, { showSelf });
       }
     } else {
@@ -3276,10 +3421,63 @@ class Plugin extends AppPlugin {
     this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
     this.invalidateLinkedContextCache(state);
     this.renderFromCache(state);
+    this.scheduleContextAvailabilityPreload(state, results, { reason: reason || 'refresh' });
     if (state.lastResults?.unlinkedDeferred === true && !this.isSectionCollapsed(state, 'unlinked')) {
       this.ensureDeferredUnlinkedLoaded(state).catch(() => {
         // ignore
       });
+    }
+  }
+
+  scheduleContextAvailabilityPreload(state, results, { reason } = {}) {
+    if (!state || !results) return;
+    if (state.contextPreloadTimer) {
+      clearTimeout(state.contextPreloadTimer);
+      state.contextPreloadTimer = null;
+    }
+
+    const seq = (state.contextPreloadSeq || 0) + 1;
+    state.contextPreloadSeq = seq;
+    state.contextPreloadTimer = setTimeout(() => {
+      state.contextPreloadTimer = null;
+      this.preloadContextAvailability(state.panelId, seq, results, { reason }).catch(() => {
+        // Context availability is opportunistic; failed preloads should not disrupt the panel.
+      });
+    }, 0);
+  }
+
+  collectContextPreloadLines(results) {
+    const out = [];
+    const seen = new Set();
+    const appendGroups = (groups) => {
+      for (const group of groups || []) {
+        for (const line of group?.lines || []) {
+          const guid = line?.guid || '';
+          if (!guid || seen.has(guid)) continue;
+          if (typeof line?.getTreeContext !== 'function') continue;
+          seen.add(guid);
+          out.push(line);
+        }
+      }
+    };
+
+    appendGroups(results?.linkedGroups || []);
+    if (results?.unlinkedDeferred !== true && results?.unlinkedLoading !== true) {
+      appendGroups(results?.unlinkedGroups || []);
+    }
+    return out;
+  }
+
+  async preloadContextAvailability(panelId, seq, results) {
+    const state = this._panelStates.get(panelId) || null;
+    if (!state || state.contextPreloadSeq !== seq || state.lastResults !== results) return;
+
+    for (const line of this.collectContextPreloadLines(results)) {
+      if (!this._panelStates.has(panelId)) return;
+      if (state.contextPreloadSeq !== seq || state.lastResults !== results) return;
+      const ctx = this.getLinkedContextState(state, line?.guid || null);
+      if (!ctx || ctx.loaded === true || ctx.loading === true) continue;
+      await this.ensureLinkedContextLoaded(state, line, { background: true });
     }
   }
 
@@ -3306,36 +3504,41 @@ class Plugin extends AppPlugin {
 
     this.setLoadingState(state, true);
 
-    const { maxResults, showSelf } = this.getRefreshConfig();
+    try {
+      const { maxResults, showSelf } = this.getRefreshConfig();
 
-    const recordName = (record?.getName?.() || '').trim();
-    const searchSettled = await this.runLinkedReferenceSearch(recordGuid, maxResults);
+      const recordName = (record?.getName?.() || '').trim();
+      const searchSettled = await this.runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord: record });
 
-    if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
+      if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
-    const { linkedError, linkedGroups, propertyCandidateRecords } = this.resolveLinkedReferenceSearch(
-      searchSettled,
-      recordGuid,
-      { showSelf }
-    );
+      const { linkedError, linkedGroups, propertyCandidateRecords } = this.resolveLinkedReferenceSearch(
+        searchSettled,
+        recordGuid,
+        { showSelf }
+      );
 
-    const followupResults = await this.loadFollowupReferenceResults(state, record, {
-      recordGuid,
-      recordName,
-      maxResults,
-      showSelf,
-      propertyCandidateRecords,
-      linkedGroups
-    });
+      const followupResults = await this.loadFollowupReferenceResults(state, record, {
+        recordGuid,
+        recordName,
+        maxResults,
+        showSelf,
+        propertyCandidateRecords,
+        linkedGroups
+      });
 
-    if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
+      if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
-    this.applyRefreshedResults(state, {
-      ...followupResults,
-      linkedGroups,
-      linkedError
-    }, { reason: reason || 'refresh' });
-    this.setLoadingState(state, false);
+      this.applyRefreshedResults(state, {
+        ...followupResults,
+        linkedGroups,
+        linkedError
+      }, { reason: reason || 'refresh' });
+    } finally {
+      if (this.isRefreshStateCurrent(panelId, state, seq)) {
+        this.setLoadingState(state, false);
+      }
+    }
   }
 
   async ensureDeferredUnlinkedLoaded(state) {
@@ -3377,6 +3580,7 @@ class Plugin extends AppPlugin {
     results.unlinkedLoading = false;
     this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
     this.renderFromCache(state);
+    this.scheduleContextAvailabilityPreload(state, results, { reason: 'deferred-unlinked-loaded' });
   }
 
   setLoadingState(state, isLoading) {
@@ -3406,6 +3610,13 @@ class Plugin extends AppPlugin {
 
   getStateRecordName(state) {
     return (state?.panel?.getActiveRecord?.()?.getName?.() || '').trim();
+  }
+
+  getStateRecordDateReferenceIso(state) {
+    const record = state?.panel?.getActiveRecord?.()
+      || this.data.getRecord?.(state?.recordGuid || '')
+      || null;
+    return this.getRecordDateReferenceIso(record);
   }
 
   recordReferencesGuid(record, targetGuid) {
@@ -3450,6 +3661,11 @@ class Plugin extends AppPlugin {
     if (sourceRecordGuid && sourceRecordGuid === targetGuid) return true;
     if (sourceRecordGuid && this.snapshotIncludesSourceRecord(state, sourceRecordGuid)) return true;
     if (referencedGuids instanceof Set && referencedGuids.has(targetGuid)) return true;
+
+    const targetDateIso = this.getStateRecordDateReferenceIso(state);
+    if (targetDateIso && Array.isArray(segments) && segments.length > 0) {
+      if (this.lineHasDateTimeForDate({ segments }, targetDateIso)) return true;
+    }
 
     const targetName = this.getStateRecordName(state);
     if (targetName && Array.isArray(segments) && segments.length > 0) {
@@ -3867,15 +4083,18 @@ class Plugin extends AppPlugin {
     };
   }
 
-  async ensureLinkedContextLoaded(state, line) {
+  async ensureLinkedContextLoaded(state, line, { background } = {}) {
     const ctx = this.getLinkedContextState(state, line?.guid || null);
     if (!ctx || !line) return null;
     if (ctx.loaded === true) return ctx;
     if (ctx.loading === true && ctx.loadPromise) return ctx.loadPromise;
 
     ctx.loading = true;
+    ctx.backgroundLoading = background === true;
     ctx.error = '';
-    this.renderFromCache(state);
+    if (background !== true) {
+      this.renderFromCache(state);
+    }
 
     ctx.loadPromise = (async () => {
       const treeContext = await line.getTreeContext();
@@ -3972,18 +4191,26 @@ class Plugin extends AppPlugin {
       const availableBelow = this.getAvailableBelowContextCount(ctx);
       ctx.siblingAboveCount = Math.max(0, Math.min(ctx.siblingAboveCount || 0, availableAbove || 0));
       ctx.siblingBelowCount = Math.max(0, Math.min(ctx.siblingBelowCount || 0, availableBelow || 0));
+      if (!this.hasAnyLinkedContext(ctx)) {
+        ctx.showMoreContext = false;
+        ctx.siblingAboveCount = 0;
+        ctx.siblingBelowCount = 0;
+      }
       return ctx;
     })()
       .catch(() => {
-        ctx.error = 'Could not load line context.';
+        ctx.error = background === true ? '' : 'Could not load line context.';
         ctx.loaded = false;
         return null;
       })
       .finally(() => {
         ctx.loading = false;
+        ctx.backgroundLoading = false;
         ctx.loadPromise = null;
-        this.bumpLinkedContextRenderVersion(state);
-        this.renderFromCache(state);
+        if (this._panelStates.get(state?.panelId) === state) {
+          this.bumpLinkedContextRenderVersion(state);
+          this.renderFromCache(state);
+        }
       });
 
     return ctx.loadPromise;
@@ -4035,25 +4262,24 @@ class Plugin extends AppPlugin {
   async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf, candidateRecords }) {
     if (!targetGuid) return [];
 
-    const indexedCandidates = Array.isArray(candidateRecords)
-      ? candidateRecords
-      : [];
-    if (indexedCandidates.length > 0) {
-      const groups = this.buildPropertyBacklinkGroupsFromRecords(indexedCandidates, targetGuid, { showSelf });
-      if (groups.length > 0) return groups;
-    }
+    const sourceRecords = [];
+    const appendRecords = (records) => {
+      if (!Array.isArray(records)) return;
+      for (const record of records) {
+        if (record?.guid) sourceRecords.push(record);
+      }
+    };
+
+    appendRecords(candidateRecords);
 
     try {
       const backrefRecords = await targetRecord?.getBackReferenceRecords?.();
-      if (Array.isArray(backrefRecords) && backrefRecords.length > 0) {
-        const groups = this.buildPropertyBacklinkGroupsFromRecords(backrefRecords, targetGuid, { showSelf });
-        if (groups.length > 0) return groups;
-      }
+      appendRecords(backrefRecords);
     } catch (e) {
-      // ignore and fall back to the indexed candidate path result
+      // ignore and use any indexed candidates we already have
     }
 
-    return [];
+    return this.buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf });
   }
 
   buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf }) {
@@ -4112,11 +4338,33 @@ class Plugin extends AppPlugin {
   propertyReferencesGuid(prop, targetGuid) {
     if (!prop || !targetGuid) return false;
 
+    const linkedRecordGuids = this.getPropertyLinkedRecordGuids(prop);
+    if (linkedRecordGuids) {
+      return linkedRecordGuids.has(targetGuid);
+    }
+
     const values = this.getPropertyCandidateValues(prop);
     for (const v of values) {
       if (v === targetGuid) return true;
     }
     return false;
+  }
+
+  getPropertyLinkedRecordGuids(prop) {
+    if (!prop || typeof prop.linkedRecords !== 'function') return null;
+
+    const out = new Set();
+    try {
+      const records = prop.linkedRecords() || [];
+      for (const record of records) {
+        const guid = typeof record?.guid === 'string' ? record.guid.trim() : '';
+        if (guid) out.add(guid);
+      }
+    } catch (e) {
+      return null;
+    }
+
+    return out;
   }
 
   getPropertyCandidateValues(prop) {
@@ -4321,6 +4569,49 @@ class Plugin extends AppPlugin {
       if (seg?.type !== 'ref') continue;
       const textObj = typeof seg?.text === 'string' ? { guid: seg.text } : (seg?.text || {});
       if ((textObj.guid || '') === targetGuid) return true;
+    }
+    return false;
+  }
+
+  dateTimeValueMatchesIso(value, targetIso) {
+    const iso = this.normalizeDateToIso(targetIso);
+    if (!iso) return false;
+
+    if (typeof value === 'string') {
+      return this.normalizeDateToIso(value) === iso;
+    }
+    if (!value || typeof value !== 'object') return false;
+
+    const startSource = value.start && typeof value.start === 'object'
+      ? value.start
+      : value.from && typeof value.from === 'object'
+        ? value.from
+        : value;
+    const endSource = value.end && typeof value.end === 'object'
+      ? value.end
+      : value.to && typeof value.to === 'object'
+        ? value.to
+        : (value.ed || value.et || value.endDate || value.endTime)
+          ? {
+              d: value.ed || value.endDate || null,
+              t: value.et || value.endTime || null
+            }
+          : null;
+
+    const startIso = this.normalizeDateToIso(startSource);
+    const endIso = this.normalizeDateToIso(endSource);
+    if (startIso === iso || endIso === iso) return true;
+    if (startIso && endIso) return startIso <= iso && iso <= endIso;
+    return false;
+  }
+
+  lineHasDateTimeForDate(line, targetIso) {
+    const iso = this.normalizeDateToIso(targetIso);
+    if (!iso) return false;
+
+    for (const seg of line?.segments || []) {
+      if (seg?.type !== 'datetime') continue;
+      if (this.dateTimeValueMatchesIso(seg.text, iso)) return true;
     }
     return false;
   }
@@ -5397,10 +5688,15 @@ class Plugin extends AppPlugin {
       const record = g.record || null;
       const recordGuid = record?.guid || null;
       if (!recordGuid) continue;
-      const groupCollapsed = this.isRecordGroupCollapsed(groupSectionId, recordGuid);
+      const lines = Array.isArray(g.lines) ? g.lines : [];
+      const singleRefGroup = lines.length === 1;
+      const targetRecordGuid = state?.recordGuid || '';
+      const groupCollapsed = this.isRecordGroupCollapsed(groupSectionId, targetRecordGuid, recordGuid);
 
       const groupEl = document.createElement('div');
       groupEl.className = 'tlr-group';
+      groupEl.classList.add(`tlr-group-${groupSectionId}`);
+      if (singleRefGroup) groupEl.classList.add('tlr-group-single');
       if (groupCollapsed) groupEl.classList.add('tlr-group-collapsed');
 
       const rowEl = document.createElement('div');
@@ -5411,6 +5707,7 @@ class Plugin extends AppPlugin {
       toggleBtn.className = 'tlr-btn tlr-group-toggle button-none button-small button-minimal-hover';
       toggleBtn.dataset.action = 'toggle-record-group';
       toggleBtn.dataset.groupSectionId = groupSectionId;
+      toggleBtn.dataset.targetRecordGuid = targetRecordGuid;
       toggleBtn.dataset.recordGuid = recordGuid;
       toggleBtn.title = groupCollapsed ? 'Expand' : 'Collapse';
       toggleBtn.setAttribute('aria-label', groupCollapsed ? 'Expand' : 'Collapse');
@@ -5429,7 +5726,7 @@ class Plugin extends AppPlugin {
 
       const meta = document.createElement('div');
       meta.className = 'tlr-group-meta text-details';
-      meta.textContent = `${(g.lines || []).length}`;
+      meta.textContent = `${lines.length}`;
 
       header.appendChild(title);
       header.appendChild(meta);
@@ -5440,7 +5737,7 @@ class Plugin extends AppPlugin {
       const linesEl = document.createElement('div');
       linesEl.className = 'tlr-lines';
 
-      for (const line of g.lines || []) {
+      for (const line of lines) {
         const entryEl = document.createElement('div');
         entryEl.className = 'tlr-line-entry';
 
@@ -5468,11 +5765,12 @@ class Plugin extends AppPlugin {
 
         if (state && ctx) {
           if (ctx.showMoreContext === true) mainRowEl.classList.add('is-context-open');
-          mainRowEl.appendChild(this.buildLinkedContextControls(line.guid, ctx, {
+          const controlsEl = this.buildLinkedContextControls(line.guid, ctx, {
             showLinkAction: groupSectionId === 'unlinked'
-          }));
+          });
+          if (controlsEl) mainRowEl.appendChild(controlsEl);
 
-          if (ctx.loading === true) {
+          if (ctx.loading === true && ctx.backgroundLoading !== true) {
             const loadingEl = document.createElement('div');
             loadingEl.className = 'tlr-note tlr-context-note';
             loadingEl.textContent = 'Loading context...';
@@ -5514,27 +5812,41 @@ class Plugin extends AppPlugin {
     }
 
     if (ctx?.showMoreContext === true) {
-      group.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
-        icon: 'up',
-        label: this.getAboveToggleLabel(ctx),
-        disabled: ctx?.loaded === true && this.getAvailableAboveContextCount(ctx) === 0,
-        active: (ctx?.siblingAboveCount || 0) > 0
-      }));
-      group.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, {
-        icon: 'down',
-        label: this.getBelowToggleLabel(ctx),
-        disabled: ctx?.loaded === true && this.getAvailableBelowContextCount(ctx) === 0,
-        active: (ctx?.siblingBelowCount || 0) > 0
+      const availableAbove = this.getAvailableAboveContextCount(ctx);
+      const availableBelow = this.getAvailableBelowContextCount(ctx);
+      const showingAbove = (ctx?.siblingAboveCount || 0) > 0;
+      const showingBelow = (ctx?.siblingBelowCount || 0) > 0;
+
+      if (showingAbove || availableAbove > 0) {
+        group.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
+          icon: 'up',
+          label: this.getAboveToggleLabel(ctx),
+          disabled: ctx?.loaded === true && availableAbove === 0,
+          active: showingAbove
+        }));
+      }
+      if (showingBelow || availableBelow > 0) {
+        group.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, {
+          icon: 'down',
+          label: this.getBelowToggleLabel(ctx),
+          disabled: ctx?.loaded === true && availableBelow === 0,
+          active: showingBelow
+        }));
+      }
+    }
+
+    const shouldShowContextToggle = ctx?.showMoreContext === true
+      || this.hasAnyLinkedContext(ctx);
+    if (shouldShowContextToggle) {
+      group.appendChild(this.buildLinkedContextButton('toggle-context-more', lineGuid, {
+        icon: 'toggle',
+        label: ctx?.showMoreContext === true ? 'Hide context' : 'Show more context',
+        disabled: ctx?.showMoreContext !== true && ctx?.loaded === true && !this.hasAnyLinkedContext(ctx),
+        active: ctx?.showMoreContext === true
       }));
     }
 
-    group.appendChild(this.buildLinkedContextButton('toggle-context-more', lineGuid, {
-      icon: 'toggle',
-      label: ctx?.showMoreContext === true ? 'Hide context' : 'Show more context',
-      disabled: ctx?.showMoreContext !== true && ctx?.loaded === true && !this.hasAnyLinkedContext(ctx),
-      active: ctx?.showMoreContext === true
-    }));
-
+    if (group.children.length === 0) controls.classList.add('is-empty');
     controls.appendChild(group);
     return controls;
   }
@@ -6098,6 +6410,9 @@ class Plugin extends AppPlugin {
         --tlr-context-rail-gap: 8px;
         --tlr-text-default: var(--text-default, var(--text, inherit));
         --tlr-text-muted: var(--text-muted, var(--text-secondary, var(--tlr-text-default)));
+        --tlr-label-color: var(--tlr-text-default);
+        --tlr-label-font-size: 14px;
+        --tlr-label-font-weight: 700;
         --tlr-border-color: var(--divider-color, var(--cmdpal-border-color, var(--border-subtle, transparent)));
         --tlr-hover-bg: var(--button-normal-hover-color, var(--bg-hover, transparent));
         --tlr-selected-bg: var(--bg-selected, var(--tlr-hover-bg));
@@ -6141,15 +6456,15 @@ class Plugin extends AppPlugin {
 
       .tlr-count {
         flex: 1 1 auto;
-        color: var(--tlr-text-muted);
-        font-size: 12px;
-        line-height: 21px;
+        color: var(--tlr-label-color);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
+        line-height: normal;
         white-space: nowrap;
         font-variant-numeric: tabular-nums;
         overflow: hidden;
         text-overflow: ellipsis;
         min-width: 0;
-        opacity: 0.92;
       }
 
       .tlr-btn {
@@ -6298,6 +6613,10 @@ class Plugin extends AppPlugin {
         max-height: 300px;
       }
 
+      .tlr-sort-menu .autocomplete {
+        max-height: min(80vh, 460px);
+      }
+
       .tlr-search-autocomplete .vscroll-node,
       .tlr-sort-menu .vscroll-node {
         max-height: 300px;
@@ -6305,6 +6624,11 @@ class Plugin extends AppPlugin {
         scrollbar-width: none;
         -ms-overflow-style: none;
         touch-action: pan-y;
+      }
+
+      .tlr-sort-menu .vscroll-node {
+        max-height: min(80vh, 460px);
+        overflow-y: visible;
       }
 
       .tlr-search-autocomplete .vscroll-node::-webkit-scrollbar,
@@ -6364,13 +6688,36 @@ class Plugin extends AppPlugin {
         width: 100%;
         display: flex;
         align-items: center;
-        line-height: 1.35;
+        min-height: 30px;
+        padding: 6px 10px;
+        line-height: 1.4;
         text-align: left;
         color: var(--tlr-text-default);
+        border-radius: 6px;
+        box-sizing: border-box;
       }
 
       .tlr-sort-option-label {
         flex: 1 1 auto;
+      }
+
+      .tlr-sort-menu .tlr-sort-option.autocomplete--option-selected,
+      .tlr-sort-menu .tlr-sort-option[aria-checked="true"] {
+        background: var(--button-primary-bg-color, var(--accent-bg-color, var(--tlr-selected-bg)));
+        color: var(--button-primary-fg-color, var(--text-on-accent, var(--tlr-text-default)));
+      }
+
+      .tlr-sort-menu .tlr-sort-option:hover,
+      .tlr-sort-menu .tlr-sort-option:focus-visible {
+        background: var(--button-normal-hover-color, var(--tlr-hover-bg));
+      }
+
+      .tlr-sort-menu .tlr-sort-option.autocomplete--option-selected:hover,
+      .tlr-sort-menu .tlr-sort-option.autocomplete--option-selected:focus-visible,
+      .tlr-sort-menu .tlr-sort-option[aria-checked="true"]:hover,
+      .tlr-sort-menu .tlr-sort-option[aria-checked="true"]:focus-visible {
+        background: var(--button-primary-bg-color, var(--accent-bg-color, var(--tlr-selected-bg)));
+        color: var(--button-primary-fg-color, var(--text-on-accent, var(--tlr-text-default)));
       }
 
       .tlr-sort-menu-divider {
@@ -6525,17 +6872,18 @@ class Plugin extends AppPlugin {
       .tlr-section-title {
         flex: 1 1 auto;
         min-width: 0;
-        font-size: 12px;
-        font-weight: 650;
-        color: var(--tlr-text-muted);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
+        color: var(--tlr-label-color);
         text-transform: none;
         letter-spacing: 0;
       }
 
       .tlr-section-meta {
         flex: 0 0 auto;
-        color: var(--tlr-text-muted);
-        font-size: 11px;
+        color: var(--tlr-label-color);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
@@ -6574,8 +6922,13 @@ class Plugin extends AppPlugin {
         gap: 10px;
         width: 100%;
         flex: 1 1 auto;
-        padding: 7px 10px;
+        padding: 2px 0 0;
+        min-height: 0;
+        border: 0;
+        background: transparent !important;
+        box-shadow: none;
         text-align: left;
+        color: var(--tlr-label-color);
       }
 
       .tlr-fold-icon {
@@ -6595,7 +6948,9 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-title {
-        font-weight: 600;
+        color: var(--tlr-label-color);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: normal;
@@ -6605,8 +6960,9 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-prop-meta {
-        color: var(--tlr-text-muted);
-        font-size: 12px;
+        color: var(--tlr-label-color);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
         margin-left: auto;
         flex: 0 0 auto;
       }
@@ -6638,11 +6994,11 @@ class Plugin extends AppPlugin {
         text-decoration: underline;
       }
 
-      .tlr-group { margin: 10px 0 12px; }
+      .tlr-group { margin: 6px 0 10px; }
 
       .tlr-group-row {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 6px;
       }
 
@@ -6654,6 +7010,7 @@ class Plugin extends AppPlugin {
         font-weight: 700;
         color: var(--tlr-text-muted);
         flex: 0 0 auto;
+        margin-top: 1px;
       }
 
       .tlr-group-header {
@@ -6663,8 +7020,13 @@ class Plugin extends AppPlugin {
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        padding: 7px 10px;
+        padding: 2px 0 0;
+        min-height: 0;
+        border: 0;
+        background: transparent !important;
+        box-shadow: none;
         text-align: left;
+        color: var(--tlr-label-color);
       }
 
       .tlr-group-collapsed .tlr-lines {
@@ -6672,18 +7034,25 @@ class Plugin extends AppPlugin {
       }
 
       .tlr-group-title {
-        font-weight: 600;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        color: var(--tlr-label-color);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
+        overflow: visible;
+        text-overflow: clip;
         white-space: normal;
         overflow-wrap: anywhere;
         line-height: 1.35;
       }
 
       .tlr-group-meta {
-        color: var(--tlr-text-muted);
-        font-size: 12px;
+        color: var(--tlr-label-color);
+        font-size: var(--tlr-label-font-size);
+        font-weight: var(--tlr-label-font-weight);
         flex: 0 0 auto;
+      }
+
+      .tlr-group-single .tlr-group-meta {
+        display: none;
       }
 
       .tlr-lines {
@@ -6694,6 +7063,11 @@ class Plugin extends AppPlugin {
         display: flex;
         flex-direction: column;
         gap: 8px;
+      }
+
+      .tlr-group .tlr-lines {
+        margin-top: 2px;
+        gap: 6px;
       }
 
       .tlr-line-entry {
@@ -6710,6 +7084,11 @@ class Plugin extends AppPlugin {
         border: 1px solid transparent;
         background: transparent;
         transition: background-color 0.15s, border-color 0.15s;
+      }
+
+      .tlr-group .tlr-line-main {
+        border: 0;
+        background: transparent;
       }
 
       .tlr-line-main:hover,
@@ -6734,6 +7113,10 @@ class Plugin extends AppPlugin {
         border-radius: inherit;
       }
 
+      .tlr-group .tlr-line {
+        padding: 4px 6px 7px 10px;
+      }
+
       .tlr-prefix {
         color: var(--tlr-text-muted);
       }
@@ -6748,9 +7131,26 @@ class Plugin extends AppPlugin {
         display: flex;
         align-items: center;
         gap: 8px;
-        flex: 0 0 auto;
-        padding: 6px 8px 6px 0;
+        flex: 0 0 82px;
+        width: 82px;
+        padding: 2px 8px 6px 0;
         min-height: 100%;
+        justify-content: flex-end;
+      }
+
+      .tlr-group-unlinked .tlr-line-actions {
+        flex-basis: 110px;
+        width: 110px;
+      }
+
+      .tlr-line-actions {
+        opacity: 0;
+        transition: opacity 120ms ease;
+      }
+
+      .tlr-line-main:hover .tlr-line-actions,
+      .tlr-line-main:focus-within .tlr-line-actions {
+        opacity: 1;
       }
 
       .tlr-line-actions-group {

@@ -89,12 +89,14 @@ Note: this plugin injects CSS at runtime; there is no separate `plugin.css` file
 Edit `custom` in `plugin.json`:
 
 - `maxResults` (number): cap for search results.
+- `queryFilterMaxResults` (number): cap for the global query run used to scope Thymer query filters back to the current page's references.
 - `showSelf` (boolean): include references originating from the active note.
 
 ## Local Checks
 
 - `node --check plugin.js`
 - `node scripts/refactor-smoke.js`
+- Or, with npm: `npm run check && npm test`
 
 ## Verification Checklist
 

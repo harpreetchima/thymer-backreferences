@@ -27,7 +27,7 @@ function makeProperty(name, value) {
   };
 }
 
-function makeRecord({ guid, name, updatedAt, createdAt, properties = [], journal = false }) {
+function makeRecord({ guid, name, updatedAt, createdAt, properties = [], journal = false, journalDate = null }) {
   return {
     guid,
     getName() {
@@ -43,7 +43,7 @@ function makeRecord({ guid, name, updatedAt, createdAt, properties = [], journal
       return properties;
     },
     getJournalDetails() {
-      return journal ? { date: '2026-03-11' } : null;
+      return journal ? { date: journalDate || new Date(2026, 2, 11) } : null;
     }
   };
 }
@@ -111,6 +111,33 @@ function makePanel({ id, record }) {
   };
 }
 
+function makeDomElement(tagName) {
+  const el = {
+    tagName,
+    children: [],
+    dataset: {},
+    attributes: {},
+    className: '',
+    textContent: '',
+    disabled: false,
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    classList: {
+      add(...names) {
+        const existing = new Set((el.className || '').split(/\s+/).filter(Boolean));
+        for (const name of names) existing.add(name);
+        el.className = Array.from(existing).join(' ');
+      }
+    }
+  };
+  return el;
+}
+
 function makePlugin() {
   const Plugin = loadPluginClass();
   const plugin = new Plugin();
@@ -121,6 +148,7 @@ function makePlugin() {
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
+  plugin._defaultQueryFilterMaxResults = 1000;
   plugin._maxStoredPageViewRecords = 400;
   plugin._maxStoredSortByRecords = 400;
   plugin._maxStoredPropGroupStates = 160;
@@ -182,6 +210,28 @@ test('property candidate parsing supports record tuples and nested objects', () 
   assert.equal(plugin.propertyReferencesGuid(prop, 'missing-guid'), false);
 });
 
+test('property references prefer SDK linked records over raw text-like values', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const other = makeRecord({ guid: 'other-guid', name: 'Other' });
+  const prop = {
+    name: 'Entity',
+    value: 'target-guid',
+    linkedRecords() {
+      return [other];
+    },
+    text() {
+      return 'target-guid';
+    },
+    choice() {
+      return 'target-guid';
+    }
+  };
+
+  assert.equal(plugin.propertyReferencesGuid(prop, target.guid), false);
+  assert.equal(plugin.propertyReferencesGuid(prop, other.guid), true);
+});
+
 test('property backlink grouping dedupes records and sorts groups by property name', () => {
   const plugin = makePlugin();
   const targetGuid = 'target-guid';
@@ -204,6 +254,33 @@ test('property backlink grouping dedupes records and sorts groups by property na
   const groups = plugin.buildPropertyBacklinkGroupsFromRecords([alpha, beta, beta], targetGuid, { showSelf: false });
   assert.deepEqual(groups.map((group) => group.propertyName), ['Entity', 'Project']);
   assert.deepEqual(groups[1].records.map((record) => record.guid), ['record-beta', 'record-alpha']);
+});
+
+test('property backlink loading unions indexed candidates and SDK backreference records', async () => {
+  const plugin = makePlugin();
+  const targetGuid = 'target-guid';
+  const indexed = makeRecord({
+    guid: 'indexed-source',
+    name: 'Indexed Source',
+    updatedAt: makeDate('2026-03-11T14:00:00Z'),
+    properties: [makeProperty('Project', ['record', targetGuid])]
+  });
+  const sdk = makeRecord({
+    guid: 'sdk-source',
+    name: 'SDK Source',
+    updatedAt: makeDate('2026-03-11T16:00:00Z'),
+    properties: [makeProperty('Project', ['record', targetGuid])]
+  });
+  const target = makeRecord({ guid: targetGuid, name: 'Target' });
+  target.getBackReferenceRecords = async () => [sdk, indexed];
+
+  const groups = await plugin.getPropertyBacklinkGroups(target, targetGuid, {
+    showSelf: false,
+    candidateRecords: [indexed]
+  });
+
+  assert.deepEqual(groups.map((group) => group.propertyName), ['Project']);
+  assert.deepEqual(groups[0].records.map((record) => record.guid), ['sdk-source', 'indexed-source']);
 });
 
 test('linked and unlinked grouping preserves source grouping rules', () => {
@@ -250,6 +327,72 @@ test('linked and unlinked grouping preserves source grouping rules', () => {
     { showSelf: false }
   );
   assert.deepEqual(unlinkedGroups[0].lines.map((line) => line.guid), ['line-3']);
+});
+
+test('linked reference search includes datetime tags for journal pages', async () => {
+  const plugin = makePlugin();
+  const journal = makeRecord({
+    guid: 'journal-guid',
+    name: 'April 23rd 2026',
+    journal: true,
+    journalDate: new Date(2026, 3, 23)
+  });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source Note', updatedAt: makeDate('2026-04-23T09:00:00Z') });
+  const linkedLine = makeLine({
+    guid: 'linked-line',
+    record: source,
+    segments: [{ type: 'ref', text: { guid: journal.guid, title: journal.getName() } }]
+  });
+  const dateLine = makeLine({
+    guid: 'date-line',
+    record: source,
+    segments: [{ type: 'datetime', text: { d: '20260423' } }]
+  });
+  const queries = [];
+
+  plugin.data.searchByQuery = async (query) => {
+    queries.push(query);
+    if (query === '@linkto = "journal-guid"') return { error: '', records: [source], lines: [linkedLine] };
+    if (query === '@date = "2026-04-23"') return { error: '', records: [source], lines: [linkedLine, dateLine] };
+    return { error: '', records: [], lines: [] };
+  };
+
+  const settled = await plugin.runLinkedReferenceSearch(journal.guid, 200, { targetRecord: journal });
+  const { linkedError, linkedGroups, propertyCandidateRecords } = plugin.resolveLinkedReferenceSearch(
+    settled,
+    journal.guid,
+    { showSelf: false }
+  );
+
+  assert.equal(linkedError, '');
+  assert.deepEqual(queries, ['@linkto = "journal-guid"', '@date = "2026-04-23"']);
+  assert.deepEqual(propertyCandidateRecords.map((record) => record.guid), ['source-guid']);
+  assert.deepEqual(linkedGroups.map((group) => group.record.guid), ['source-guid']);
+  assert.deepEqual(linkedGroups[0].lines.map((line) => line.guid), ['linked-line', 'date-line']);
+});
+
+test('line event matching catches datetime references to journal pages', () => {
+  const plugin = makePlugin();
+  const journal = makeRecord({
+    guid: 'journal-guid',
+    name: 'April 23rd 2026',
+    journal: true,
+    journalDate: new Date(2026, 3, 23)
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: journal });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = journal.guid;
+
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: 'source-guid',
+    segments: [{ type: 'datetime', text: { d: '20260423' } }],
+    referencedGuids: new Set()
+  }), true);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: 'source-guid',
+    segments: [{ type: 'datetime', text: { d: '20260424' } }],
+    referencedGuids: new Set()
+  }), false);
 });
 
 test('sort metrics support reference-count and reference-activity ordering', () => {
@@ -644,6 +787,133 @@ test('scoped query helpers preserve matching property and line groups', () => {
   assert.deepEqual(filteredLines[0].lines.map((line) => line.guid), ['line-2']);
 });
 
+test('refresh config supports a separate scoped query result cap', () => {
+  const plugin = makePlugin();
+  plugin.getConfiguration = () => ({
+    custom: {
+      maxResults: 25,
+      queryFilterMaxResults: 1500,
+      showSelf: true
+    }
+  });
+
+  assert.deepEqual(plugin.getRefreshConfig(), {
+    maxResults: 25,
+    queryFilterMaxResults: 1500,
+    showSelf: true
+  });
+});
+
+test('stale scoped query refreshes cannot overwrite newer filter state', async () => {
+  const plugin = makePlugin();
+  const record = makeRecord({ guid: 'record-alpha', name: 'Alpha' });
+  const { panel } = makePanel({ id: 'panel-1', record });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.searchQuery = '@task';
+  state.queryFilterSeq = 1;
+  state.lastResults = {
+    propertyGroups: [],
+    linkedGroups: [{
+      record,
+      lines: [makeLine({ guid: 'line-1', record, segments: [{ type: 'text', text: 'task' }] })]
+    }],
+    unlinkedGroups: [],
+    unlinkedDeferred: true,
+    unlinkedLoading: false
+  };
+  state.queryFilterState = plugin.createQueryFilterState('@task', { loading: true });
+  plugin._panelStates.set('panel-1', state);
+
+  let searchedWithMaxResults = null;
+  let renderCount = 0;
+  plugin.getConfiguration = () => ({ custom: { queryFilterMaxResults: 1500 } });
+  plugin.data.searchByQuery = async (_query, maxResults) => {
+    searchedWithMaxResults = maxResults;
+    state.queryFilterSeq = 2;
+    return { error: '', records: [record], lines: [] };
+  };
+  plugin.renderFromCache = () => {
+    renderCount += 1;
+  };
+
+  await plugin.refreshScopedQueryFilter('panel-1', 1);
+
+  assert.equal(searchedWithMaxResults, 1500);
+  assert.equal(state.queryFilterState.loading, true);
+  assert.equal(renderCount, 0);
+});
+
+test('context controls omit unavailable directional buttons', () => {
+  const plugin = makePlugin();
+  const previousDocument = global.document;
+  global.document = {
+    createElement: makeDomElement
+  };
+
+  try {
+    const noContext = plugin.buildLinkedContextControls('line-1', {
+      showMoreContext: false,
+      loaded: true,
+      aboveItems: [],
+      belowItems: [],
+      siblingAboveCount: 0,
+      siblingBelowCount: 0,
+      descendants: []
+    });
+    const unlinkedNoContext = plugin.buildLinkedContextControls('line-1', {
+      showMoreContext: false,
+      loaded: true,
+      aboveItems: [],
+      belowItems: [],
+      siblingAboveCount: 0,
+      siblingBelowCount: 0,
+      descendants: []
+    }, { showLinkAction: true });
+    const unknownContext = plugin.buildLinkedContextControls('line-1', {
+      showMoreContext: false,
+      loaded: false,
+      loading: false,
+      aboveItems: [],
+      belowItems: [],
+      siblingAboveCount: 0,
+      siblingBelowCount: 0,
+      descendants: []
+    });
+    const descendantsOnly = plugin.buildLinkedContextControls('line-1', {
+      showMoreContext: true,
+      loaded: true,
+      aboveItems: [],
+      belowItems: [],
+      siblingAboveCount: 0,
+      siblingBelowCount: 0,
+      descendants: [makeLine({ guid: 'child-line' })]
+    });
+    const noContextActions = noContext.children[0].children.map((child) => child.dataset.action);
+    const unlinkedNoContextActions = unlinkedNoContext.children[0].children.map((child) => child.dataset.action);
+    const unknownContextActions = unknownContext.children[0].children.map((child) => child.dataset.action);
+    const descendantsOnlyActions = descendantsOnly.children[0].children.map((child) => child.dataset.action);
+
+    const withBelow = plugin.buildLinkedContextControls('line-1', {
+      showMoreContext: true,
+      loaded: true,
+      aboveItems: [],
+      belowItems: [makeLine({ guid: 'below-line' })],
+      siblingAboveCount: 0,
+      siblingBelowCount: 0,
+      descendants: []
+    });
+    const belowActions = withBelow.children[0].children.map((child) => child.dataset.action);
+
+    assert.deepEqual(noContextActions, []);
+    assert.deepEqual(unlinkedNoContextActions, ['link-unlinked']);
+    assert.deepEqual(unknownContextActions, []);
+    assert.deepEqual(descendantsOnlyActions, ['toggle-context-more']);
+    assert.deepEqual(belowActions, ['toggle-context-below', 'toggle-context-more']);
+  } finally {
+    global.document = previousDocument;
+  }
+});
+
 test('summary counts ignore unlinked refs and footer defaults ignore unlinked-only matches', () => {
   const plugin = makePlugin();
   const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Record' });
@@ -750,6 +1020,20 @@ test('page view preferences round-trip footer and section state through storage 
   }
 });
 
+test('source group collapse state is scoped to the current target page', () => {
+  const plugin = makePlugin();
+  plugin._recordGroupCollapsed = new Set();
+
+  plugin.setRecordGroupCollapsed('linked', 'target-a', 'source-page', true);
+
+  assert.equal(plugin.isRecordGroupCollapsed('linked', 'target-a', 'source-page'), true);
+  assert.equal(plugin.isRecordGroupCollapsed('linked', 'target-b', 'source-page'), false);
+  assert.equal(plugin.isRecordGroupCollapsed('unlinked', 'target-a', 'source-page'), false);
+
+  plugin.setRecordGroupCollapsed('linked', 'target-a', 'source-page', false);
+  assert.equal(plugin.isRecordGroupCollapsed('linked', 'target-a', 'source-page'), false);
+});
+
 test('stored preferences prune oldest entries by recency', () => {
   const plugin = makePlugin();
   const previousLocalStorage = global.localStorage;
@@ -785,7 +1069,7 @@ test('stored preferences prune oldest entries by recency', () => {
     };
     plugin.saveSortByRecordSetting();
 
-    plugin._recordGroupCollapsed = new Set(['linked:alpha', 'linked:beta', 'linked:gamma']);
+    plugin._recordGroupCollapsed = new Set(['linked:target:alpha', 'linked:target:beta', 'linked:target:gamma']);
     plugin.saveRecordGroupCollapsedSetting();
 
     const pagePrefs = JSON.parse(store.get('test-page-view-prune'));
@@ -794,7 +1078,7 @@ test('stored preferences prune oldest entries by recency', () => {
 
     assert.deepEqual(Object.keys(pagePrefs).sort(), ['beta', 'gamma']);
     assert.deepEqual(Object.keys(sortPrefs).sort(), ['beta', 'gamma']);
-    assert.deepEqual(recordGroups, ['linked:beta', 'linked:gamma']);
+    assert.deepEqual(recordGroups, ['linked:target:beta', 'linked:target:gamma']);
   } finally {
     global.localStorage = previousLocalStorage;
   }

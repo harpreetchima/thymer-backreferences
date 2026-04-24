@@ -18,6 +18,7 @@
   },
   "custom": {
     "maxResults": 200,
+    "queryFilterMaxResults": 1000,
     "showSelf": false
   },
   "home": false,
