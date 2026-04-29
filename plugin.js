@@ -1,4 +1,4 @@
-// @generated BEGIN thymer-plugin-settings (source: plugins/plugin-settings/ThymerPluginSettingsRuntime.js — run: npm run embed-plugin-settings)
+// @generated BEGIN thymer-plugin-settings (source: plugins/public repo/plugin-settings/ThymerPluginSettingsRuntime.js — run: npm run embed-plugin-settings)
 /**
  * ThymerPluginSettings — workspace **Plugin Backend** collection + optional localStorage mirror
  * for global plugins that do not own a collection. (Legacy name **Plugin Settings** is still found until renamed.)
@@ -610,7 +610,7 @@
               console.error(
                 '[ThymerPluginSettings] saveConfiguration succeeded but "plugin" field is still type',
                 pf.type,
-                '— check collection General tab or re-import plugins/plugin-settings/Plugin Backend.json.'
+                '— check collection General tab or re-import plugins/public repo/plugin-settings/Plugin Backend.json.'
               );
             }
           } catch (_) {}
