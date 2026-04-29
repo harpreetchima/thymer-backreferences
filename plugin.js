@@ -8,6 +8,9 @@
  * Debug: console filter `[ThymerExt/PluginBackend]`. Off by default; to enable:
  *   localStorage.setItem('thymerext_debug_collections', '1'); location.reload();
  *
+ * Create dedupe: Web Locks + **per-workspace** localStorage lease/recent-create keys (workspaceGuid from
+ * `data.getActiveUsers()[0]`), plus abort if an exact-named Plugin Backend collection already exists.
+ *
  * Rows:
  * - **Vault** (`record_kind` = `vault`): one per `plugin_id` — holds synced localStorage payload JSON.
  * - **Other rows** (`record_kind` = `log`, `config`, …): same **Plugin** field (`plugin`) for filtering;
@@ -859,18 +862,62 @@
     return null;
   }
 
-  const LS_CREATE_LEASE_KEY = 'thymerext_plugin_backend_create_lease_v1';
-  const LS_RECENT_CREATE_KEY = 'thymerext_plugin_backend_recent_create_v1';
-  const LS_RECENT_CREATE_ATTEMPT_KEY = 'thymerext_plugin_backend_recent_create_attempt_v1';
+  /** Unscoped keys (legacy); runtime uses {@link scopedPbLsKey} per workspace. */
+  const LS_CREATE_LEASE_BASE = 'thymerext_plugin_backend_create_lease_v1';
+  const LS_RECENT_CREATE_BASE = 'thymerext_plugin_backend_recent_create_v1';
+  const LS_RECENT_CREATE_ATTEMPT_BASE = 'thymerext_plugin_backend_recent_create_attempt_v1';
+
+  function workspaceSlugFromData(data) {
+    try {
+      const u = data && typeof data.getActiveUsers === 'function' ? data.getActiveUsers() : null;
+      const g = u && u[0] && u[0].workspaceGuid;
+      const s = g != null ? String(g).trim() : '';
+      if (s) return s.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 120);
+    } catch (_) {}
+    return '_unknown_ws';
+  }
+
+  function scopedPbLsKey(base, data) {
+    return `${base}__${workspaceSlugFromData(data)}`;
+  }
+
+  /** Count collections whose sidebar/title name is exactly Plugin Backend (or legacy). */
+  async function countExactPluginBackendNamedCollections(data) {
+    let all;
+    try {
+      all = await data.getAllCollections();
+    } catch (_) {
+      return 0;
+    }
+    if (!Array.isArray(all)) return 0;
+    let n = 0;
+    for (const c of all) {
+      try {
+        const nm = collectionDisplayName(c);
+        if (nm === COL_NAME || nm === COL_NAME_LEGACY) n += 1;
+      } catch (_) {}
+    }
+    return n;
+  }
 
   /**
    * Cross-realm mutex for `createCollection` + first `saveConfiguration` only.
+   * Lease keys are **per workspace** so switching workspaces does not inherit another vault’s lease / cooldown.
    * @returns {{ denied: boolean, release: () => void }}
    */
-  async function acquirePluginBackendCreationLease(maxWaitMs) {
+  async function acquirePluginBackendCreationLease(maxWaitMs, data) {
+    const locksOk =
+      typeof navigator !== 'undefined' && navigator.locks && typeof navigator.locks.request === 'function';
     const noop = { denied: false, release() {} };
     const ls = getSharedThymerLocalStorage();
-    if (!ls) return noop;
+    if (!ls) {
+      if (locksOk) return noop;
+      if (DEBUG_COLLECTIONS) {
+        dlogPathB('lease_denied_no_localstorage_no_locks', { ws: workspaceSlugFromData(data) });
+      }
+      return { denied: true, release() {} };
+    }
+    const leaseKey = scopedPbLsKey(LS_CREATE_LEASE_BASE, data);
     const holder =
       (typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
       `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -879,7 +926,7 @@
     let sawContention = false;
     while (Date.now() < deadline) {
       try {
-        const raw = ls.getItem(LS_CREATE_LEASE_KEY);
+        const raw = ls.getItem(leaseKey);
         let busy = false;
         if (raw) {
           let j = null;
@@ -897,20 +944,20 @@
         }
         const exp = Date.now() + 45000;
         const payload = JSON.stringify({ h: holder, exp });
-        ls.setItem(LS_CREATE_LEASE_KEY, payload);
+        ls.setItem(leaseKey, payload);
         await new Promise((r) => setTimeout(r, 0));
-        if (ls.getItem(LS_CREATE_LEASE_KEY) === payload) {
+        if (ls.getItem(leaseKey) === payload) {
           acquired = true;
-          if (DEBUG_COLLECTIONS) dlogPathB('lease_acquired', { via: 'localStorage', sawContention });
+          if (DEBUG_COLLECTIONS) dlogPathB('lease_acquired', { via: 'localStorage', sawContention, leaseKey });
           break;
         }
       } catch (_) {
-        return noop;
+        return locksOk ? noop : { denied: true, release() {} };
       }
       await new Promise((r) => setTimeout(r, 30 + Math.floor(Math.random() * 50)));
     }
     if (!acquired) {
-      if (DEBUG_COLLECTIONS) dlogPathB('lease_timeout_abort_create', { sawContention });
+      if (DEBUG_COLLECTIONS) dlogPathB('lease_timeout_abort_create', { sawContention, leaseKey });
       return { denied: true, release() {} };
     }
     return {
@@ -919,7 +966,7 @@
         if (!acquired) return;
         acquired = false;
         try {
-          const cur = ls.getItem(LS_CREATE_LEASE_KEY);
+          const cur = ls.getItem(leaseKey);
           if (!cur) return;
           let j = null;
           try {
@@ -927,25 +974,25 @@
           } catch (_) {
             return;
           }
-          if (j && j.h === holder) ls.removeItem(LS_CREATE_LEASE_KEY);
+          if (j && j.h === holder) ls.removeItem(leaseKey);
         } catch (_) {}
       },
     };
   }
 
-  function noteRecentPluginBackendCreate() {
+  function noteRecentPluginBackendCreate(data) {
     const ls = getSharedThymerLocalStorage();
-    if (!ls) return;
+    if (!ls || !data) return;
     try {
-      ls.setItem(LS_RECENT_CREATE_KEY, String(Date.now()));
+      ls.setItem(scopedPbLsKey(LS_RECENT_CREATE_BASE, data), String(Date.now()));
     } catch (_) {}
   }
 
-  function getRecentPluginBackendCreateAgeMs() {
+  function getRecentPluginBackendCreateAgeMs(data) {
     const ls = getSharedThymerLocalStorage();
-    if (!ls) return null;
+    if (!ls || !data) return null;
     try {
-      const raw = ls.getItem(LS_RECENT_CREATE_KEY);
+      const raw = ls.getItem(scopedPbLsKey(LS_RECENT_CREATE_BASE, data));
       const ts = Number(raw);
       if (!Number.isFinite(ts) || ts <= 0) return null;
       return Date.now() - ts;
@@ -954,19 +1001,19 @@
     }
   }
 
-  function noteRecentPluginBackendCreateAttempt() {
+  function noteRecentPluginBackendCreateAttempt(data) {
     const ls = getSharedThymerLocalStorage();
-    if (!ls) return;
+    if (!ls || !data) return;
     try {
-      ls.setItem(LS_RECENT_CREATE_ATTEMPT_KEY, String(Date.now()));
+      ls.setItem(scopedPbLsKey(LS_RECENT_CREATE_ATTEMPT_BASE, data), String(Date.now()));
     } catch (_) {}
   }
 
-  function getRecentPluginBackendCreateAttemptAgeMs() {
+  function getRecentPluginBackendCreateAttemptAgeMs(data) {
     const ls = getSharedThymerLocalStorage();
-    if (!ls) return null;
+    if (!ls || !data) return null;
     try {
-      const raw = ls.getItem(LS_RECENT_CREATE_ATTEMPT_KEY);
+      const raw = ls.getItem(scopedPbLsKey(LS_RECENT_CREATE_ATTEMPT_BASE, data));
       const ts = Number(raw);
       if (!Number.isFinite(ts) || ts <= 0) return null;
       return Date.now() - ts;
@@ -1193,12 +1240,12 @@
         void 0;
       }
       if (DEBUG_COLLECTIONS) dlogPathB('ensureBody_about_to_create', { pathB: pathBWindowSnapshot() });
-      const lease = await acquirePluginBackendCreationLease(14000);
+      const lease = await acquirePluginBackendCreationLease(14000, data);
       if (lease.denied) return;
       try {
         if (await findColl(data)) return;
         if (await hasPluginBackendOnWorkspace(data)) return;
-        const recentAttemptAge = getRecentPluginBackendCreateAttemptAgeMs();
+        const recentAttemptAge = getRecentPluginBackendCreateAttemptAgeMs(data);
         if (recentAttemptAge != null && recentAttemptAge >= 0 && recentAttemptAge < 120000) {
           // Another plugin iframe attempted creation very recently. Avoid burst duplicate creates.
           for (let i = 0; i < 10; i++) {
@@ -1208,7 +1255,7 @@
           }
           return;
         }
-        const recentAge = getRecentPluginBackendCreateAgeMs();
+        const recentAge = getRecentPluginBackendCreateAgeMs(data);
         if (recentAge != null && recentAge >= 0 && recentAge < 90000) {
           // Another plugin/runtime likely just created it; let collection list/indexing settle first.
           for (let i = 0; i < 8; i++) {
@@ -1217,7 +1264,14 @@
             if (await hasPluginBackendOnWorkspace(data)) return;
           }
         }
-        noteRecentPluginBackendCreateAttempt();
+        noteRecentPluginBackendCreateAttempt(data);
+        const exactN = await countExactPluginBackendNamedCollections(data);
+        if (exactN >= 1) {
+          if (DEBUG_COLLECTIONS) {
+            dlogPathB('abort_create_exact_backend_name_exists', { exactN, ws: workspaceSlugFromData(data) });
+          }
+          return;
+        }
         const coll = await queueDataCreateOnSharedWindow(() => data.createCollection());
         if (!coll || typeof coll.getConfiguration !== 'function' || typeof coll.saveConfiguration !== 'function') {
           return;
@@ -1232,7 +1286,7 @@
           ok = await coll.saveConfiguration(conf);
         }
         if (ok === false) return;
-        noteRecentPluginBackendCreate();
+        noteRecentPluginBackendCreate(data);
         await new Promise((r) => setTimeout(r, 250));
       } finally {
         try {
