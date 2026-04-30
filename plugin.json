@@ -1,27 +1,28 @@
 {
-	"ver": 1,
-	"name": "Backreferences",
-	"icon": "ti-link",
-	"item_name": "Note",
-	"description": "Backreferences footer (linked + property references)",
-	"show_sidebar_items": true,
-	"show_cmdpal_items": true,
-	"views": [],
-	"fields": [],
-	"page_field_ids": [],
-	"sidebar_record_sort_field_id": "updated_at",
-	"sidebar_record_sort_dir": "desc",
-	"managed": {
-		"fields": false,
-		"views": false,
-		"sidebar": false
-	},
-	"custom": {
-		"maxResults": 200,
-		"collapsedByDefault": false,
-		"showSelf": false,
-		"previewLines": 10
-	},
-	"home": false,
-	"version": "0.6.0"
+  "ver": 1,
+  "name": "Backreferences",
+  "icon": "ti-link",
+  "item_name": "Note",
+  "description": "Backreferences footer (linked + property references)",
+  "show_sidebar_items": true,
+  "show_cmdpal_items": true,
+  "views": [],
+  "fields": [],
+  "page_field_ids": [],
+  "sidebar_record_sort_field_id": "updated_at",
+  "sidebar_record_sort_dir": "desc",
+  "managed": {
+    "fields": false,
+    "views": false,
+    "sidebar": false
+  },
+  "custom": {
+    "defaultVisible": true,
+    "maxResults": 200,
+    "queryFilterMaxResults": 1000,
+    "showSelf": false,
+    "previewLines": 10
+  },
+  "home": false,
+  "version": "0.5.0"
 }

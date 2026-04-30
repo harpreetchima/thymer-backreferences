@@ -1,19 +1,5 @@
 # Backreferences for Thymer
 
----
-This repository is a fork/customization of the original Backreferences plugin work by harpreetchima.
-
-‼️ In progress. Created by AI, vibes, and someone who knows nothing about coding! Suggestions and support very welcome! ‼️
-
-## Fork focus (what this repo adds)
-
-- Expandable inline preview for backreferenced records
-- One-click linking flow for unlinked references
-- Journal-page suppression (when using Today's Notes footer for daily pages)
-- Styling and UX refinements to align with the current workspace plugin set
-
----
-
 When you are writing a note, one of the first questions is: where else is this referenced?
 Backreferences solves that problem by adding an always-available references panel to the active note, so you can quickly see incoming mentions and navigate to context.
 
@@ -25,12 +11,11 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 
 ## Screenshot
 
-![Backreferences footer screenshot](screenshots/screenshot-2026-03-09_17-20-23.png)
+Backreferences footer screenshot
 
 ## Credits
 
-- Original Backreferences plugin work by harpreetchima.
-- Credit to [@ahpatel](https://github.com/ahpatel) and the fork [ahpatel/thymer-backreferences](https://github.com/ahpatel/thymer-backreferences) for unlinked-reference and collapsible-header patterns that informed this fork.
+- Credit to [@ahpatel](https://github.com/ahpatel) and the fork [ahpatel/thymer-backreferences](https://github.com/ahpatel/thymer-backreferences) for the unlinked references and collapsible header work that informed this plugin.
 
 ## What It Shows
 
@@ -47,7 +32,6 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - Each subsection also has its own chevron toggle for hiding Property, Linked, or Unlinked references independently.
   - Pages remember footer + section collapse choices individually.
   - Without a saved page override, the full footer starts collapsed when there are no linked/property references yet, and `Property References` / `Linked References` start collapsed when they have zero matches.
-
 - **Change sort order**
   - `Page Last Edited`: sort by most recently edited source note.
   - `Reference Activity`: sort by most recent matching reference activity.
@@ -55,7 +39,6 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - `Page Title`: sort alphabetically by source note title.
   - `Page Created Date`: sort by source note creation date.
   - Direction can be `Ascending` or `Descending`.
-
 - **Use the filter button + query bar**
   - The header keeps `Filter` and `Sort` pinned in the top-right.
   - Clicking `Filter` reveals the query bar on its own row below the header.
@@ -67,27 +50,29 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
   - Record-level queries narrow Property References and Linked References together.
   - Unlinked References join the scoped query only when that section is expanded.
   - Plain-text matches still highlight inside rendered titles and lines.
-
 - **Expand linked context**
   - Each linked mention starts with a compact `Show more context` control.
   - Clicking it expands the full child subtree for that mention and exposes up/down controls for nearby sibling lines.
-
 - **Review unlinked mentions**
   - Text mentions of the current note title appear in a separate `Unlinked References` section.
   - That section starts collapsed and only runs its title-search query after you expand it.
   - The section reuses the existing search, sort, grouping, and context controls instead of adding a separate interaction model.
   - Source-note groups in both `Linked References` and `Unlinked References` can be collapsed per page.
-
 - **Empty pages**
   - When a page has no linked/property references, expanding the footer shows the normal section empty states directly.
-
 - **Live activity mode**
   - `New` marks references that appeared since the page was opened.
   - `Changed` marks references updated remotely after the footer had already loaded.
+- **Toggle visibility**
+  - Use `Backreferences: Toggle Globally` to show or hide the footer for all collections on this device.
+  - Use `Backreferences: Toggle in Current Collection` to override the current collection on this device.
+  - Visibility toggles only affect the local view; they do not save plugin configuration or sync across workspaces.
 
-## Command
+## Commands
 
-- `Backreferences: Refresh (Active Page)`
+- `Backreferences: Rebuild Graph Index`
+- `Backreferences: Toggle Globally`
+- `Backreferences: Toggle in Current Collection`
 
 ## Setup
 
@@ -104,12 +89,15 @@ Note: this plugin injects CSS at runtime; there is no separate `plugin.css` file
 Edit `custom` in `plugin.json`:
 
 - `maxResults` (number): cap for search results.
+- `queryFilterMaxResults` (number): cap for the global query run used to scope Thymer query filters back to the current page's references.
 - `showSelf` (boolean): include references originating from the active note.
+- `defaultVisible` (boolean): install-time fallback for local visibility before this device has a saved visibility preference.
 
 ## Local Checks
 
 - `node --check plugin.js`
 - `node scripts/refactor-smoke.js`
+- Or, with npm: `npm run check && npm test`
 
 ## Verification Checklist
 
@@ -142,3 +130,6 @@ Edit `custom` in `plugin.json`:
 27. Click a source note to navigate; Ctrl/Cmd-click to open in a new panel.
 28. Click a linked, unlinked, or context line row and verify Thymer scrolls to and highlights the exact source line.
 29. Ctrl/Cmd-click a linked, unlinked, or context line row and verify the new panel opens with the exact source line highlighted.
+30. Run `Backreferences: Toggle in Current Collection` and confirm the footer disappears only in the active collection.
+31. Run `Backreferences: Toggle in Current Collection` again and confirm the footer returns without reloading the plugin.
+32. Run `Backreferences: Toggle Globally` and confirm the footer hides everywhere, then run it again and confirm collection overrides are cleared.

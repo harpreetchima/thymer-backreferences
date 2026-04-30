@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "scripts": {
+    "check": "node --check plugin.js",
+    "test": "node scripts/refactor-smoke.js"
+  }
+}
