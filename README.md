@@ -97,8 +97,25 @@ Edit `custom` in `plugin.json`:
 
 - `maxResults` (number): cap for search results.
 - `queryFilterMaxResults` (number): cap for the global query run used to scope Thymer query filters back to the current page's references.
+- `contextPreloadMaxLines` (number): cap for background line-context checks after a refresh. Set to `0` to disable context preloading.
 - `showSelf` (boolean): include references originating from the active note.
 - `defaultVisible` (boolean): install-time fallback for local visibility before this device has a saved visibility preference.
+
+## Performance Diagnostics
+
+Backreferences includes optional console timing for large workspaces. It is off by default.
+
+To collect a report:
+
+1. Open browser developer tools.
+2. Run `BackreferencesPerf.enable()` in the console.
+3. Reload Thymer.
+4. Open notes that feel slow, expand/collapse Backreferences sections, try the filter bar, and expand Unlinked References if that workflow is slow.
+5. Run `copy(BackreferencesPerf.report())` in the console.
+6. Paste the copied JSON into the bug report.
+7. Run `BackreferencesPerf.disable()` when finished.
+
+The report contains refresh timings, search timings, context preload timings, property index timings, and reference counts. It does not include note text or raw search queries.
 
 ## Local Checks
 

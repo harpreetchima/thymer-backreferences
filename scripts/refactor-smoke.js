@@ -195,10 +195,13 @@ function makePlugin() {
 
   plugin._panelStates = new Map();
   plugin._eventHandlerIds = [];
+  plugin._lineContentTextCache = new WeakMap();
+  plugin._perfStorageKey = 'thymer_backreferences_perf_v1';
   plugin._defaultSortBy = 'page_last_edited';
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
+  plugin._defaultContextPreloadMaxLines = 30;
   plugin._defaultQueryFilterMaxResults = 1000;
   plugin._propertyIndexStatus = 'idle';
   plugin._propertyIndexByTargetGuid = new Map();
@@ -367,6 +370,48 @@ test('collection visibility toggle without active collection toasts and does not
 
   assert.equal(store.has(plugin._storageKeyVisibility), false);
   assert.match(plugin.__toasters.at(-1).title, /No active collection/);
+});
+
+test('performance diagnostics are opt-in and omit raw query text', async () => {
+  const plugin = makePlugin();
+  const previousWindow = global.window;
+  const previousConsole = global.console;
+  const store = installLocalStorage();
+  global.window = {};
+  global.console = {
+    info() {},
+    groupCollapsed() {},
+    log() {},
+    table() {},
+    groupEnd() {}
+  };
+  plugin.data.searchByQuery = async () => ({
+    lines: [makeLine({ guid: 'line-1', record: makeRecord({ guid: 'record-1', name: 'Record 1' }) })],
+    records: []
+  });
+
+  try {
+    plugin.installPerfConsoleHelper();
+    assert.equal(global.window.BackreferencesPerf.status(), 'disabled');
+    assert.equal(plugin.perfCreate('refresh'), null);
+
+    global.window.BackreferencesPerf.enable();
+    assert.equal(store.get(plugin._perfStorageKey), '1');
+    const perf = plugin.perfCreate('refresh', { reason: 'test' });
+    await plugin.timedSearchByQuery('"Sensitive Note Title"', 25, perf, 'unlinked');
+    plugin.perfLog(perf);
+
+    const report = JSON.parse(global.window.BackreferencesPerf.report());
+    assert.equal(report.length, 1);
+    assert.equal(report[0].steps[0].step, 'search: unlinked');
+    assert.equal(JSON.stringify(report).includes('Sensitive Note Title'), false);
+
+    global.window.BackreferencesPerf.disable();
+    assert.equal(store.has(plugin._perfStorageKey), false);
+  } finally {
+    global.window = previousWindow;
+    global.console = previousConsole;
+  }
 });
 
 test('hidden visible-eligible panel keeps state warm and skips mounting and refresh scheduling', () => {
@@ -843,6 +888,56 @@ test('line event matching catches datetime references to journal pages', () => {
   }), false);
 });
 
+test('line event matching reuses cached target matchers', () => {
+  const plugin = makePlugin();
+  let getNameCalls = 0;
+  const target = {
+    guid: 'target-guid',
+    getName() {
+      getNameCalls += 1;
+      return 'Target Note';
+    },
+    getJournalDetails() {
+      return null;
+    }
+  };
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin.updatePanelStateRecordCache(state, target);
+
+  assert.equal(getNameCalls, 1);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: 'source-guid',
+    segments: [{ type: 'text', text: 'Target Note appears here.' }],
+    referencedGuids: new Set()
+  }), true);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: 'source-guid',
+    segments: [{ type: 'text', text: 'Target Note appears again.' }],
+    referencedGuids: new Set()
+  }), true);
+  assert.equal(getNameCalls, 1);
+});
+
+test('line event ref extraction does not fetch records per segment', () => {
+  const plugin = makePlugin();
+  let getRecordCalls = 0;
+  plugin.data.getRecord = () => {
+    getRecordCalls += 1;
+    return null;
+  };
+
+  const refs = plugin.extractReferencedRecordGuids([
+    { type: 'ref', text: { guid: 'record-a' } },
+    { type: 'ref', text: 'record-b' },
+    { type: 'text', text: 'plain' }
+  ]);
+
+  assert.deepEqual(Array.from(refs).sort(), ['record-a', 'record-b']);
+  assert.equal(getRecordCalls, 0);
+});
+
 test('sort metrics support reference-count and reference-activity ordering', () => {
   const plugin = makePlugin();
   const alpha = makeRecord({
@@ -910,6 +1005,38 @@ test('segment helpers keep plain text, mentions, refs, and datetimes readable', 
   ]);
 
   assert.equal(text, 'Hello @Harpreet meet Linked Record on 2026-03-11');
+});
+
+test('line content text cache reuses segment formatting until a line changes', () => {
+  const plugin = makePlugin();
+  let calls = 0;
+  let updatedAt = makeDate('2026-03-09T09:00:00Z');
+  const line = {
+    guid: 'line-1',
+    segments: [{ type: 'text', text: 'Alpha' }],
+    getUpdatedAt() {
+      return updatedAt;
+    },
+    getCreatedAt() {
+      return null;
+    }
+  };
+
+  const original = plugin.segmentsToPlainText.bind(plugin);
+  plugin.segmentsToPlainText = (segments) => {
+    calls += 1;
+    return original(segments);
+  };
+
+  assert.equal(plugin.getLineContentText(line), 'Alpha');
+  assert.equal(plugin.getLineContentText(line), 'Alpha');
+  assert.equal(calls, 1);
+
+  updatedAt = makeDate('2026-03-09T10:00:00Z');
+  line.segments = [{ type: 'text', text: 'Beta' }];
+
+  assert.equal(plugin.getLineContentText(line), 'Beta');
+  assert.equal(calls, 2);
 });
 
 test('datetime formatter preserves time-only and date-time values', () => {
@@ -1241,6 +1368,7 @@ test('refresh config supports a separate scoped query result cap', () => {
     custom: {
       maxResults: 25,
       queryFilterMaxResults: 1500,
+      contextPreloadMaxLines: 12,
       showSelf: true
     }
   });
@@ -1248,8 +1376,51 @@ test('refresh config supports a separate scoped query result cap', () => {
   assert.deepEqual(plugin.getRefreshConfig(), {
     maxResults: 25,
     queryFilterMaxResults: 1500,
+    contextPreloadMaxLines: 12,
     showSelf: true
   });
+});
+
+test('context availability preload is capped and skips collapsed groups', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const sourceA = makeRecord({ guid: 'source-a', name: 'Source A' });
+  const sourceB = makeRecord({ guid: 'source-b', name: 'Source B' });
+  const sourceC = makeRecord({ guid: 'source-c', name: 'Source C' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin._recordGroupCollapsed = new Set(['linked:target-guid:source-a']);
+
+  const makeContextLine = (guid, record) => ({
+    ...makeLine({ guid, record, segments: [{ type: 'text', text: guid }] }),
+    getTreeContext: async () => ({ descendants: [] })
+  });
+
+  const results = {
+    linkedGroups: [
+      { record: sourceA, lines: [makeContextLine('line-a', sourceA)] },
+      { record: sourceB, lines: [makeContextLine('line-b1', sourceB), makeContextLine('line-b2', sourceB)] }
+    ],
+    unlinkedGroups: [
+      { record: sourceC, lines: [makeContextLine('line-c', sourceC)] }
+    ],
+    unlinkedDeferred: false,
+    unlinkedLoading: false
+  };
+
+  assert.deepEqual(
+    plugin.collectContextPreloadLines(results, { state, limit: 2 }).map((line) => line.guid),
+    ['line-b1', 'line-b2']
+  );
+  assert.deepEqual(
+    plugin.collectContextPreloadLines(results, { state, limit: 10, includeUnlinked: false }).map((line) => line.guid),
+    ['line-b1', 'line-b2']
+  );
+  assert.deepEqual(
+    plugin.collectContextPreloadLines(results, { state, limit: 0 }).map((line) => line.guid),
+    []
+  );
 });
 
 test('stale scoped query refreshes cannot overwrite newer filter state', async () => {
@@ -1822,7 +1993,149 @@ test('reference render plan skips unchanged sections and isolates linked-context
   const thirdPlan = plugin.buildReferenceRenderPlan(state, viewState);
   assert.equal(thirdPlan.propertyChanged, false);
   assert.equal(thirdPlan.linkedChanged, true);
-  assert.equal(thirdPlan.unlinkedChanged, true);
+  assert.equal(thirdPlan.unlinkedChanged, false);
+});
+
+test('collapsed section render keys avoid expensive content signatures', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Record' });
+  const linkedGroups = [{
+    record: linkedRecord,
+    lines: [makeLine({ guid: 'line-1', record: linkedRecord, segments: [{ type: 'text', text: 'linked' }] })]
+  }];
+
+  state.recordGuid = 'target-record';
+  state.sectionCollapsed = {
+    ...plugin.createDefaultSectionCollapsedState(),
+    linked: true,
+    unlinked: true
+  };
+
+  let lineSignatureCalls = 0;
+  plugin.buildLineGroupsSignature = (groups) => {
+    lineSignatureCalls += 1;
+    return `lines:${groups.length}`;
+  };
+
+  const collapsedView = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  plugin.buildReferenceRenderPlan(state, collapsedView);
+  assert.equal(lineSignatureCalls, 0);
+
+  state.sectionCollapsed.linked = false;
+  const openView = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  plugin.buildReferenceRenderPlan(state, openView);
+  assert.equal(lineSignatureCalls, 1);
+});
+
+test('collapsed sections skip render-time sorting', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Record' });
+  const linkedGroups = [{
+    record: linkedRecord,
+    lines: [makeLine({ guid: 'line-1', record: linkedRecord, segments: [{ type: 'text', text: 'linked' }] })]
+  }];
+
+  state.recordGuid = 'target-record';
+  state.sectionCollapsed = {
+    property: true,
+    linked: true,
+    unlinked: true
+  };
+
+  let sortCalls = 0;
+  plugin.computeRecordSortMetrics = () => {
+    sortCalls += 1;
+    return { referenceCountByGuid: new Map(), referenceActivityByGuid: new Map() };
+  };
+  plugin.sortPropertyGroupsForRender = (groups) => {
+    sortCalls += 1;
+    return groups;
+  };
+  plugin.sortLinkedGroupsForRender = (groups) => {
+    sortCalls += 1;
+    return groups;
+  };
+
+  plugin.buildReferenceViewState(state, {
+    propertyGroups: [{ propertyName: 'Entity', records: [linkedRecord] }],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+  assert.equal(sortCalls, 0);
+
+  state.sectionCollapsed.linked = false;
+  plugin.buildReferenceViewState(state, {
+    propertyGroups: [{ propertyName: 'Entity', records: [linkedRecord] }],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+  assert.equal(sortCalls, 2);
+});
+
+test('property index progress sync avoids rebuilding live snapshots without property refs', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-record', name: 'Target' });
+  const source = makeRecord({ guid: 'source-record', name: 'Source' });
+  const state = plugin.createPanelState('panel-1', null);
+  state.recordGuid = target.guid;
+  state.lastResults = {
+    propertyGroups: [],
+    linkedGroups: [{
+      record: source,
+      lines: [makeLine({ guid: 'line-1', record: source, segments: [{ type: 'text', text: 'linked' }] })]
+    }]
+  };
+
+  plugin.getRefreshConfig = () => ({ showSelf: false });
+  plugin._propertyIndexStatus = 'indexing';
+  let snapshotBuilds = 0;
+  plugin.buildResultsSnapshot = () => {
+    snapshotBuilds += 1;
+    return { itemsByKey: new Map(), sourceRecordGuids: new Set() };
+  };
+
+  plugin.syncPropertyIndexResultForState(state);
+  assert.equal(snapshotBuilds, 0);
+
+  plugin._propertyIndexStatus = 'ready';
+  plugin.syncPropertyIndexResultForState(state);
+  assert.equal(snapshotBuilds, 1);
 });
 
 (async () => {
