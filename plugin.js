@@ -3,6 +3,7 @@ class Plugin extends AppPlugin {
     // NOTE: Thymer strips top-level code outside the Plugin class.
     this._panelStates = new Map();
     this._eventHandlerIds = [];
+    this._lineContentTextCache = new WeakMap();
     this._maxStoredPageViewRecords = 400;
     this._maxStoredSortByRecords = 400;
     this._maxStoredPropGroupStates = 160;
@@ -44,6 +45,7 @@ class Plugin extends AppPlugin {
     this._propertyIndexNeedsRebuild = false;
     this._queryAutocompleteCatalog = null;
     this._queryAutocompleteCatalogPromise = null;
+    this._perfStorageKey = 'thymer_backreferences_perf_v1';
     this._queryStandaloneFilters = [
       'task', 'todo', 'done', 'due', 'overdue', 'assigned', 'unassigned', 'scheduled',
       'inprogress', 'wip', 'waiting', 'billing', 'important', 'discuss', 'alert', 'starred',
@@ -57,6 +59,7 @@ class Plugin extends AppPlugin {
       'pguid', 'rguid', 'backref', 'linkto'
     ];
 
+    this.installPerfConsoleHelper();
     this.injectCss();
 
     this._cmdRebuildIndex = this.ui.addCommandPaletteCommand({
@@ -138,6 +141,109 @@ class Plugin extends AppPlugin {
     this._panelStates?.clear?.();
   }
 
+  // ---------- Performance diagnostics ----------
+
+  installPerfConsoleHelper() {
+    try {
+      if (typeof window === 'undefined' || window.BackreferencesPerf) return;
+      const key = this._perfStorageKey || 'thymer_backreferences_perf_v1';
+      window.BackreferencesPerf = {
+        reports: [],
+        enable() {
+          localStorage.setItem(key, '1');
+          console.info('[Backreferences perf] Enabled. Reload Thymer, open Backreferences, then run copy(BackreferencesPerf.report()).');
+        },
+        disable() {
+          localStorage.removeItem(key);
+          console.info('[Backreferences perf] Disabled. Reload Thymer to stop logging.');
+        },
+        status() {
+          return localStorage.getItem(key) === '1' ? 'enabled' : 'disabled';
+        },
+        clear() {
+          this.reports.length = 0;
+          console.info('[Backreferences perf] Cleared collected reports.');
+        },
+        report() {
+          return JSON.stringify(this.reports, null, 2);
+        }
+      };
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  perfEnabled() {
+    try {
+      return typeof localStorage !== 'undefined'
+        && localStorage.getItem(this._perfStorageKey || 'thymer_backreferences_perf_v1') === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  perfNow() {
+    return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+  }
+
+  perfCreate(label, meta = {}) {
+    if (!this.perfEnabled()) return null;
+    return { label, meta, start: this.perfNow(), steps: [], counts: {} };
+  }
+
+  perfStep(perf, label, startedAt, extra = {}) {
+    if (!perf) return;
+    perf.steps.push({
+      step: label,
+      ms: Math.round((this.perfNow() - startedAt) * 10) / 10,
+      ...extra
+    });
+  }
+
+  perfCount(perf, counts) {
+    if (!perf || !counts || typeof counts !== 'object') return;
+    Object.assign(perf.counts, counts);
+  }
+
+  perfLog(perf) {
+    if (!perf) return;
+    const totalMs = Math.round((this.perfNow() - perf.start) * 10) / 10;
+    const report = {
+      label: perf.label,
+      totalMs,
+      meta: perf.meta || {},
+      counts: perf.counts || {},
+      steps: perf.steps || []
+    };
+    try {
+      if (typeof window !== 'undefined' && window.BackreferencesPerf?.reports) {
+        window.BackreferencesPerf.reports.push(report);
+        if (window.BackreferencesPerf.reports.length > 30) window.BackreferencesPerf.reports.shift();
+      }
+      console.groupCollapsed(`[Backreferences perf] ${perf.label} ${totalMs}ms`);
+      console.log('meta', report.meta);
+      console.log('counts', report.counts);
+      if (console.table) console.table(report.steps);
+      else console.log('steps', report.steps);
+      console.log('copy JSON with: copy(BackreferencesPerf.report())');
+      console.groupEnd();
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  async timedSearchByQuery(query, maxResults, perf, label) {
+    const startedAt = this.perfNow();
+    const result = await this.data.searchByQuery(query, maxResults);
+    this.perfStep(perf, `search: ${label || 'query'}`, startedAt, {
+      maxResults,
+      lines: Array.isArray(result?.lines) ? result.lines.length : 0,
+      records: Array.isArray(result?.records) ? result.records.length : 0,
+      error: typeof result?.error === 'string' && result.error ? 'yes' : ''
+    });
+    return result;
+  }
+
   // ---------- Panel lifecycle ----------
 
   handlePanelChanged(panel, reason) {
@@ -174,6 +280,7 @@ class Plugin extends AppPlugin {
     }
     const recordChanged = state.recordGuid !== recordGuid;
     state.recordGuid = recordGuid;
+    this.updatePanelStateRecordCache(state, record);
     if (recordChanged) {
       const viewPrefs = this.getPageViewPreference(recordGuid);
       state.footerCollapsed = viewPrefs.footerCollapsed;
@@ -468,6 +575,9 @@ class Plugin extends AppPlugin {
       searchAutocompleteDismissHandler: null,
       searchAutocompleteRequestSeq: 0,
       searchQuery: '',
+      cachedRecordName: null,
+      cachedRecordDateReferenceIso: null,
+      cachedRecordMentionMatchers: null,
       searchOpen: false,
       footerCollapsed: null,
       sectionCollapsed: this.createDefaultSectionCollapsedState(),
@@ -2157,17 +2267,27 @@ class Plugin extends AppPlugin {
     const state = this._panelStates.get(panelId) || null;
     if (!state) return;
     if (state.queryFilterSeq !== seq) return;
+    const perf = this.perfCreate('query-filter', {
+      reason: reason || '',
+      panelId
+    });
 
     const results = state.lastResults || null;
     const query = (state.searchQuery || '').trim();
     if (!results || this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
       this.clearQueryFilterState(state);
       this.renderFromCache(state);
+      this.perfLog(perf);
       return;
     }
 
+    const scopeStartedAt = this.perfNow();
     const includeUnlinked = this.shouldIncludeUnlinkedInQueryScope(state, results);
     const recordGuids = this.collectQueryScopeRecordGuids(results, { includeUnlinked });
+    this.perfStep(perf, 'collect scope', scopeStartedAt, {
+      scopeRecords: recordGuids.length,
+      includeUnlinked: includeUnlinked === true
+    });
     if (recordGuids.length === 0) {
       if (!this._panelStates.has(panelId)) return;
       state.queryFilterState = this.createQueryFilterState(query, {
@@ -2176,6 +2296,7 @@ class Plugin extends AppPlugin {
         includesUnlinked: includeUnlinked
       });
       this.renderFromCache(state);
+      this.perfLog(perf);
       return;
     }
 
@@ -2183,7 +2304,7 @@ class Plugin extends AppPlugin {
     let error = '';
     try {
       const { queryFilterMaxResults } = this.getRefreshConfig();
-      result = await this.data.searchByQuery(query, queryFilterMaxResults);
+      result = await this.timedSearchByQuery(query, queryFilterMaxResults, perf, 'scoped-filter');
       if (typeof result?.error === 'string' && result.error.trim()) error = result.error.trim();
     } catch (e) {
       error = 'Could not apply query filter.';
@@ -2206,9 +2327,11 @@ class Plugin extends AppPlugin {
         includesUnlinked: latestIncludesUnlinked
       });
       this.renderFromCache(state);
+      this.perfLog(perf);
       return;
     }
 
+    const matchStartedAt = this.perfNow();
     const previous = this.getQueryFilterState(state, query);
     if (error) {
       state.queryFilterState = this.createQueryFilterState(query, {
@@ -2221,6 +2344,7 @@ class Plugin extends AppPlugin {
         matchedLineRecordGuids: previous?.matchedLineRecordGuids
       });
       this.renderFromCache(state);
+      this.perfLog(perf);
       return;
     }
 
@@ -2251,7 +2375,13 @@ class Plugin extends AppPlugin {
       matchedLineGuids,
       matchedLineRecordGuids
     });
+    this.perfStep(perf, 'match scoped results', matchStartedAt, {
+      matchedRecords: matchedRecordGuids.size,
+      matchedLines: matchedLineGuids.size,
+      matchedLineRecords: matchedLineRecordGuids.size
+    });
     this.renderFromCache(state);
+    this.perfLog(perf);
   }
 
   filterPropertyGroupsByScopedQuery(groups, queryFilterState) {
@@ -3413,23 +3543,36 @@ class Plugin extends AppPlugin {
   async buildPropertyIndex(seq, reason) {
     const byTargetGuid = new Map();
     const sourceEntriesByRecordGuid = new Map();
+    const perf = this.perfCreate('property-index', {
+      reason: reason || ''
+    });
 
     try {
       if (typeof this.data?.getAllCollections !== 'function') {
         throw new Error('Thymer graph collections are unavailable.');
       }
 
+      const collectionsStartedAt = this.perfNow();
       const collections = await this.data.getAllCollections();
+      this.perfStep(perf, 'get all collections', collectionsStartedAt, {
+        collections: Array.isArray(collections) ? collections.length : 0
+      });
       if (!Array.isArray(collections)) {
         throw new Error('Thymer graph collections could not be read.');
       }
 
       let lastNotifyAt = Date.now();
+      let collectionCount = 0;
       for (const collection of collections) {
         if (!collection || typeof collection.getAllRecords !== 'function') continue;
         let records = [];
         try {
+          const recordsStartedAt = this.perfNow();
           records = await collection.getAllRecords();
+          collectionCount += 1;
+          this.perfStep(perf, 'get collection records', recordsStartedAt, {
+            records: Array.isArray(records) ? records.length : 0
+          });
         } catch (e) {
           continue;
         }
@@ -3464,6 +3607,12 @@ class Plugin extends AppPlugin {
       };
       this._propertyIndexStatus = 'ready';
       this._propertyIndexError = '';
+      this.perfCount(perf, {
+        collections: collectionCount,
+        scannedRecords: this._propertyIndexStats.scannedRecords || 0,
+        indexedReferences: this._propertyIndexStats.indexedReferences || 0,
+        indexedTargets: this._propertyIndexStats.indexedTargets || 0
+      });
       this.notifyPropertyIndexChanged(reason || 'property-index-ready');
     } catch (e) {
       if (this._propertyIndexBuildSeq !== seq) return;
@@ -3475,6 +3624,7 @@ class Plugin extends AppPlugin {
       };
       this.notifyPropertyIndexChanged(reason || 'property-index-error');
     } finally {
+      this.perfLog(perf);
       if (this._propertyIndexBuildSeq === seq && this._propertyIndexNeedsRebuild) {
         this._propertyIndexNeedsRebuild = false;
         this.schedulePropertyIndexRebuild('queued-property-index-rebuild', 0);
@@ -3824,7 +3974,7 @@ class Plugin extends AppPlugin {
     return `${this.padDateTimeNumber(year, 4)}-${this.padDateTimeNumber(month, 2)}-${this.padDateTimeNumber(day, 2)}`;
   }
 
-  getRecordDateReferenceIso(record) {
+  getRecordDateReferenceIso(record, recordName) {
     if (!record) return '';
 
     try {
@@ -3835,7 +3985,8 @@ class Plugin extends AppPlugin {
       // Fall back to parsing date-like page titles below.
     }
 
-    return this.parseDateIsoFromRecordTitle(record.getName?.() || '');
+    const title = typeof recordName === 'string' ? recordName : (record.getName?.() || '');
+    return this.parseDateIsoFromRecordTitle(title);
   }
 
   getLinkedReferenceSearchSpecs(recordGuid, targetRecord) {
@@ -3850,14 +4001,14 @@ class Plugin extends AppPlugin {
     return specs;
   }
 
-  async runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord } = {}) {
+  async runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord, perf } = {}) {
     const specs = this.getLinkedReferenceSearchSpecs(recordGuid, targetRecord);
     const searches = await Promise.all(specs.map(async (spec) => {
       try {
         return {
           ...spec,
           status: 'fulfilled',
-          value: await this.data.searchByQuery(spec.query, maxResults)
+          value: await this.timedSearchByQuery(spec.query, maxResults, perf, spec.kind || 'linked')
         };
       } catch (e) {
         return {
@@ -4006,10 +4157,10 @@ class Plugin extends AppPlugin {
     return phrases.join(' OR ');
   }
 
-  async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf }) {
+  async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf, perf } = {}) {
     try {
       const query = this.buildUnlinkedSearchQuery(recordName) || this.buildLiteralPhraseSearchQuery(recordName) || recordName;
-      const result = await this.data.searchByQuery(query, maxResults);
+      const result = await this.timedSearchByQuery(query, maxResults, perf, 'unlinked');
       if (result?.error) {
         return { unlinkedError: result.error, unlinkedGroups: [] };
       }
@@ -4032,7 +4183,8 @@ class Plugin extends AppPlugin {
     recordName,
     maxResults,
     showSelf,
-    linkedGroups
+    linkedGroups,
+    perf
   }) {
     const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
     const propertyResult = this.getPropertyBacklinkResult(recordGuid, { showSelf });
@@ -4045,7 +4197,8 @@ class Plugin extends AppPlugin {
         this.loadUnlinkedReferenceGroups(recordName, maxResults, {
           recordGuid,
           linkedGroups,
-          showSelf
+          showSelf,
+          perf
         })
       );
     }
@@ -4178,7 +4331,9 @@ class Plugin extends AppPlugin {
   async preloadContextAvailability(panelId, seq, results) {
     const state = this._panelStates.get(panelId) || null;
     if (!state || state.contextPreloadSeq !== seq || state.lastResults !== results) return;
+    const perf = this.perfCreate('context-preload', { panelId });
 
+    const collectStartedAt = this.perfNow();
     const { contextPreloadMaxLines } = this.getRefreshConfig();
     const lines = this.collectContextPreloadLines(results, {
       state,
@@ -4186,14 +4341,24 @@ class Plugin extends AppPlugin {
       includeLinked: !this.isSectionCollapsed(state, 'linked'),
       includeUnlinked: !this.isSectionCollapsed(state, 'unlinked')
     });
+    this.perfStep(perf, 'collect preload lines', collectStartedAt, {
+      lines: lines.length,
+      limit: contextPreloadMaxLines
+    });
 
+    let loaded = 0;
     for (const line of lines) {
       if (!this._panelStates.has(panelId)) return;
       if (state.contextPreloadSeq !== seq || state.lastResults !== results) return;
       const ctx = this.getLinkedContextState(state, line?.guid || null);
       if (!ctx || ctx.loaded === true || ctx.loading === true) continue;
+      const lineStartedAt = this.perfNow();
       await this.ensureLinkedContextLoaded(state, line, { background: true });
+      loaded += 1;
+      this.perfStep(perf, 'load line context', lineStartedAt);
     }
+    this.perfCount(perf, { collectedLines: lines.length, loadedContexts: loaded });
+    this.perfLog(perf);
   }
 
   async refreshPanel(panelId, { reason } = {}) {
@@ -4221,6 +4386,10 @@ class Plugin extends AppPlugin {
 
     const seq = (state.refreshSeq || 0) + 1;
     state.refreshSeq = seq;
+    const perf = this.perfCreate('refresh', {
+      reason: reason || '',
+      panelId
+    });
 
     this.setLoadingState(state, true);
 
@@ -4228,35 +4397,61 @@ class Plugin extends AppPlugin {
       const { maxResults, showSelf } = this.getRefreshConfig();
 
       const recordName = (record?.getName?.() || '').trim();
-      const searchSettled = await this.runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord: record });
+      const linkedStartedAt = this.perfNow();
+      const searchSettled = await this.runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord: record, perf });
+      this.perfStep(perf, 'linked search total', linkedStartedAt);
 
       if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
+      const resolveStartedAt = this.perfNow();
       const { linkedError, linkedGroups } = this.resolveLinkedReferenceSearch(
         searchSettled,
         recordGuid,
         { showSelf }
       );
+      this.perfStep(perf, 'group linked results', resolveStartedAt, {
+        linkedGroups: linkedGroups.length,
+        linkedRefs: this.countLinkedReferences(linkedGroups)
+      });
 
+      const followupStartedAt = this.perfNow();
       const followupResults = await this.loadFollowupReferenceResults(state, record, {
         recordGuid,
         recordName,
         maxResults,
         showSelf,
-        linkedGroups
+        linkedGroups,
+        perf
+      });
+      this.perfStep(perf, 'load followup results', followupStartedAt, {
+        propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
+        unlinkedGroups: Array.isArray(followupResults.unlinkedGroups) ? followupResults.unlinkedGroups.length : 0,
+        unlinkedRefs: this.countLinkedReferences(followupResults.unlinkedGroups || [])
       });
 
       if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
+      const applyStartedAt = this.perfNow();
       this.applyRefreshedResults(state, {
         ...followupResults,
         linkedGroups,
         linkedError
       }, { reason: reason || 'refresh' });
+      this.perfStep(perf, 'apply and render results', applyStartedAt);
+      this.perfCount(perf, {
+        linkedGroups: linkedGroups.length,
+        linkedRefs: this.countLinkedReferences(linkedGroups),
+        propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
+        propertyRefs: (followupResults.propertyGroups || []).reduce((n, group) => n + (group?.records?.length || 0), 0),
+        unlinkedDeferred: followupResults.unlinkedDeferred === true,
+        unlinkedGroups: Array.isArray(followupResults.unlinkedGroups) ? followupResults.unlinkedGroups.length : 0,
+        unlinkedRefs: this.countLinkedReferences(followupResults.unlinkedGroups || [])
+      });
     } finally {
       if (this.isRefreshStateCurrent(panelId, state, seq)) {
         this.setLoadingState(state, false);
       }
+      this.perfLog(perf);
     }
   }
 
@@ -4265,6 +4460,9 @@ class Plugin extends AppPlugin {
     if (!state || !results) return;
     if (results.unlinkedDeferred !== true) return;
     if (results.unlinkedLoading === true) return;
+    const perf = this.perfCreate('deferred-unlinked', {
+      panelId: state.panelId || ''
+    });
 
     const panel = state.panel || null;
     const record = panel?.getActiveRecord?.() || null;
@@ -4278,15 +4476,21 @@ class Plugin extends AppPlugin {
     this.renderFromCache(state);
 
     const { maxResults, showSelf } = this.getRefreshConfig();
+    const loadStartedAt = this.perfNow();
     const { unlinkedGroups: nextGroups, unlinkedError: nextError } = await this.loadUnlinkedReferenceGroups(
       recordName,
       maxResults,
       {
         recordGuid,
         linkedGroups: Array.isArray(results.linkedGroups) ? results.linkedGroups : [],
-        showSelf
+        showSelf,
+        perf
       }
     );
+    this.perfStep(perf, 'load unlinked groups', loadStartedAt, {
+      unlinkedGroups: Array.isArray(nextGroups) ? nextGroups.length : 0,
+      unlinkedRefs: this.countLinkedReferences(nextGroups || [])
+    });
 
     if (!this._panelStates.has(state.panelId)) return;
     if (state.lastResults !== results) return;
@@ -4300,6 +4504,7 @@ class Plugin extends AppPlugin {
     this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
     this.renderFromCache(state);
     this.scheduleContextAvailabilityPreload(state, results, { reason: 'deferred-unlinked-loaded' });
+    this.perfLog(perf);
   }
 
   setLoadingState(state, isLoading) {
@@ -4327,15 +4532,37 @@ class Plugin extends AppPlugin {
     return [];
   }
 
+  updatePanelStateRecordCache(state, record) {
+    if (!state) return;
+    const activeRecord = record
+      || state.panel?.getActiveRecord?.()
+      || this.data.getRecord?.(state.recordGuid || '')
+      || null;
+    const name = (activeRecord?.getName?.() || '').trim();
+    state.cachedRecordName = name;
+    state.cachedRecordDateReferenceIso = this.getRecordDateReferenceIso(activeRecord, name);
+    state.cachedRecordMentionMatchers = name ? this.buildRecordMentionMatchers(name) : [];
+  }
+
   getStateRecordName(state) {
-    return (state?.panel?.getActiveRecord?.()?.getName?.() || '').trim();
+    if (!state) return '';
+    if (typeof state.cachedRecordName === 'string') return state.cachedRecordName;
+    this.updatePanelStateRecordCache(state);
+    return state.cachedRecordName || '';
   }
 
   getStateRecordDateReferenceIso(state) {
-    const record = state?.panel?.getActiveRecord?.()
-      || this.data.getRecord?.(state?.recordGuid || '')
-      || null;
-    return this.getRecordDateReferenceIso(record);
+    if (!state) return '';
+    if (typeof state.cachedRecordDateReferenceIso === 'string') return state.cachedRecordDateReferenceIso;
+    this.updatePanelStateRecordCache(state);
+    return state.cachedRecordDateReferenceIso || '';
+  }
+
+  getStateRecordMentionMatchers(state) {
+    if (!state) return [];
+    if (Array.isArray(state.cachedRecordMentionMatchers)) return state.cachedRecordMentionMatchers;
+    this.updatePanelStateRecordCache(state);
+    return Array.isArray(state.cachedRecordMentionMatchers) ? state.cachedRecordMentionMatchers : [];
   }
 
   recordReferencesGuid(record, targetGuid) {
@@ -4386,9 +4613,8 @@ class Plugin extends AppPlugin {
       if (this.lineHasDateTimeForDate({ segments }, targetDateIso)) return true;
     }
 
-    const targetName = this.getStateRecordName(state);
-    if (targetName && Array.isArray(segments) && segments.length > 0) {
-      return this.lineHasTextMentionOfRecord({ segments }, targetName);
+    if (Array.isArray(segments) && segments.length > 0) {
+      return this.lineHasTextMention({ segments }, this.getStateRecordMentionMatchers(state));
     }
 
     return false;
@@ -4970,10 +5196,9 @@ class Plugin extends AppPlugin {
     const out = new Set();
     for (const seg of segments || []) {
       if (seg?.type !== 'ref') continue;
-      const guid = seg?.text?.guid || null;
+      const guid = typeof seg?.text === 'string' ? seg.text : (seg?.text?.guid || null);
       if (!guid) continue;
-      const rec = this.data.getRecord?.(guid) || null;
-      if (rec) out.add(guid);
+      out.add(guid);
     }
     return out;
   }
@@ -5319,7 +5544,11 @@ class Plugin extends AppPlugin {
 
   lineHasTextMentionOfRecord(line, recordName) {
     const matchers = this.buildRecordMentionMatchers(recordName);
-    if (matchers.length === 0) return false;
+    return this.lineHasTextMention(line, matchers);
+  }
+
+  lineHasTextMention(line, matchers) {
+    if (!Array.isArray(matchers) || matchers.length === 0) return false;
     const text = this.getLineTextMentionSource(line);
     if (!text) return false;
     return matchers.some((matcher) => matcher.test(text));
@@ -5705,7 +5934,7 @@ class Plugin extends AppPlugin {
       const recordGuid = record?.guid || null;
       if (!recordGuid) continue;
       const lines = (group?.lines || []).filter((line) => {
-        const text = this.segmentsToPlainText(line?.segments || []);
+        const text = this.getLineContentText(line);
         return text.toLowerCase().includes(textQueryLower);
       });
       if (lines.length > 0) nextGroups.push({ record, lines });
@@ -6857,9 +7086,24 @@ class Plugin extends AppPlugin {
   }
 
   getLineContentText(line) {
-    const segmentText = this.segmentsToPlainText(line?.segments || []);
-    if (segmentText) return segmentText;
-    return typeof line?.text === 'string' ? line.text : '';
+    if (!line || typeof line !== 'object') return '';
+
+    const cache = this._lineContentTextCache;
+    const segments = Array.isArray(line?.segments) ? line.segments : [];
+    const activity = this.getLineActivityTimestamp(line);
+    const cached = cache?.get?.(line) || null;
+    if (cached && cached.segments === segments && cached.activity === activity) {
+      return cached.text;
+    }
+
+    const segmentText = this.segmentsToPlainText(segments);
+    const text = segmentText || (typeof line?.text === 'string' ? line.text : '');
+    try {
+      cache?.set?.(line, { segments, activity, text });
+    } catch (e) {
+      // ignore
+    }
+    return text;
   }
 
   hasRenderableLineContent(line) {

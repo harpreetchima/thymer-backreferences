@@ -195,6 +195,8 @@ function makePlugin() {
 
   plugin._panelStates = new Map();
   plugin._eventHandlerIds = [];
+  plugin._lineContentTextCache = new WeakMap();
+  plugin._perfStorageKey = 'thymer_backreferences_perf_v1';
   plugin._defaultSortBy = 'page_last_edited';
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
@@ -368,6 +370,48 @@ test('collection visibility toggle without active collection toasts and does not
 
   assert.equal(store.has(plugin._storageKeyVisibility), false);
   assert.match(plugin.__toasters.at(-1).title, /No active collection/);
+});
+
+test('performance diagnostics are opt-in and omit raw query text', async () => {
+  const plugin = makePlugin();
+  const previousWindow = global.window;
+  const previousConsole = global.console;
+  const store = installLocalStorage();
+  global.window = {};
+  global.console = {
+    info() {},
+    groupCollapsed() {},
+    log() {},
+    table() {},
+    groupEnd() {}
+  };
+  plugin.data.searchByQuery = async () => ({
+    lines: [makeLine({ guid: 'line-1', record: makeRecord({ guid: 'record-1', name: 'Record 1' }) })],
+    records: []
+  });
+
+  try {
+    plugin.installPerfConsoleHelper();
+    assert.equal(global.window.BackreferencesPerf.status(), 'disabled');
+    assert.equal(plugin.perfCreate('refresh'), null);
+
+    global.window.BackreferencesPerf.enable();
+    assert.equal(store.get(plugin._perfStorageKey), '1');
+    const perf = plugin.perfCreate('refresh', { reason: 'test' });
+    await plugin.timedSearchByQuery('"Sensitive Note Title"', 25, perf, 'unlinked');
+    plugin.perfLog(perf);
+
+    const report = JSON.parse(global.window.BackreferencesPerf.report());
+    assert.equal(report.length, 1);
+    assert.equal(report[0].steps[0].step, 'search: unlinked');
+    assert.equal(JSON.stringify(report).includes('Sensitive Note Title'), false);
+
+    global.window.BackreferencesPerf.disable();
+    assert.equal(store.has(plugin._perfStorageKey), false);
+  } finally {
+    global.window = previousWindow;
+    global.console = previousConsole;
+  }
 });
 
 test('hidden visible-eligible panel keeps state warm and skips mounting and refresh scheduling', () => {
@@ -844,6 +888,56 @@ test('line event matching catches datetime references to journal pages', () => {
   }), false);
 });
 
+test('line event matching reuses cached target matchers', () => {
+  const plugin = makePlugin();
+  let getNameCalls = 0;
+  const target = {
+    guid: 'target-guid',
+    getName() {
+      getNameCalls += 1;
+      return 'Target Note';
+    },
+    getJournalDetails() {
+      return null;
+    }
+  };
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin.updatePanelStateRecordCache(state, target);
+
+  assert.equal(getNameCalls, 1);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: 'source-guid',
+    segments: [{ type: 'text', text: 'Target Note appears here.' }],
+    referencedGuids: new Set()
+  }), true);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: 'source-guid',
+    segments: [{ type: 'text', text: 'Target Note appears again.' }],
+    referencedGuids: new Set()
+  }), true);
+  assert.equal(getNameCalls, 1);
+});
+
+test('line event ref extraction does not fetch records per segment', () => {
+  const plugin = makePlugin();
+  let getRecordCalls = 0;
+  plugin.data.getRecord = () => {
+    getRecordCalls += 1;
+    return null;
+  };
+
+  const refs = plugin.extractReferencedRecordGuids([
+    { type: 'ref', text: { guid: 'record-a' } },
+    { type: 'ref', text: 'record-b' },
+    { type: 'text', text: 'plain' }
+  ]);
+
+  assert.deepEqual(Array.from(refs).sort(), ['record-a', 'record-b']);
+  assert.equal(getRecordCalls, 0);
+});
+
 test('sort metrics support reference-count and reference-activity ordering', () => {
   const plugin = makePlugin();
   const alpha = makeRecord({
@@ -911,6 +1005,38 @@ test('segment helpers keep plain text, mentions, refs, and datetimes readable', 
   ]);
 
   assert.equal(text, 'Hello @Harpreet meet Linked Record on 2026-03-11');
+});
+
+test('line content text cache reuses segment formatting until a line changes', () => {
+  const plugin = makePlugin();
+  let calls = 0;
+  let updatedAt = makeDate('2026-03-09T09:00:00Z');
+  const line = {
+    guid: 'line-1',
+    segments: [{ type: 'text', text: 'Alpha' }],
+    getUpdatedAt() {
+      return updatedAt;
+    },
+    getCreatedAt() {
+      return null;
+    }
+  };
+
+  const original = plugin.segmentsToPlainText.bind(plugin);
+  plugin.segmentsToPlainText = (segments) => {
+    calls += 1;
+    return original(segments);
+  };
+
+  assert.equal(plugin.getLineContentText(line), 'Alpha');
+  assert.equal(plugin.getLineContentText(line), 'Alpha');
+  assert.equal(calls, 1);
+
+  updatedAt = makeDate('2026-03-09T10:00:00Z');
+  line.segments = [{ type: 'text', text: 'Beta' }];
+
+  assert.equal(plugin.getLineContentText(line), 'Beta');
+  assert.equal(calls, 2);
 });
 
 test('datetime formatter preserves time-only and date-time values', () => {
