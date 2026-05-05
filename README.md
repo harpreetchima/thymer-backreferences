@@ -97,6 +97,7 @@ Edit `custom` in `plugin.json`:
 
 - `maxResults` (number): cap for search results.
 - `queryFilterMaxResults` (number): cap for the global query run used to scope Thymer query filters back to the current page's references.
+- `contextPreloadMaxLines` (number): cap for background line-context checks after a refresh. Set to `0` to disable context preloading.
 - `showSelf` (boolean): include references originating from the active note.
 - `defaultVisible` (boolean): install-time fallback for local visibility before this device has a saved visibility preference.
 

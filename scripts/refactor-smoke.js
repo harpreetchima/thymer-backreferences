@@ -199,6 +199,7 @@ function makePlugin() {
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
+  plugin._defaultContextPreloadMaxLines = 30;
   plugin._defaultQueryFilterMaxResults = 1000;
   plugin._propertyIndexStatus = 'idle';
   plugin._propertyIndexByTargetGuid = new Map();
@@ -1241,6 +1242,7 @@ test('refresh config supports a separate scoped query result cap', () => {
     custom: {
       maxResults: 25,
       queryFilterMaxResults: 1500,
+      contextPreloadMaxLines: 12,
       showSelf: true
     }
   });
@@ -1248,8 +1250,51 @@ test('refresh config supports a separate scoped query result cap', () => {
   assert.deepEqual(plugin.getRefreshConfig(), {
     maxResults: 25,
     queryFilterMaxResults: 1500,
+    contextPreloadMaxLines: 12,
     showSelf: true
   });
+});
+
+test('context availability preload is capped and skips collapsed groups', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const sourceA = makeRecord({ guid: 'source-a', name: 'Source A' });
+  const sourceB = makeRecord({ guid: 'source-b', name: 'Source B' });
+  const sourceC = makeRecord({ guid: 'source-c', name: 'Source C' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin._recordGroupCollapsed = new Set(['linked:target-guid:source-a']);
+
+  const makeContextLine = (guid, record) => ({
+    ...makeLine({ guid, record, segments: [{ type: 'text', text: guid }] }),
+    getTreeContext: async () => ({ descendants: [] })
+  });
+
+  const results = {
+    linkedGroups: [
+      { record: sourceA, lines: [makeContextLine('line-a', sourceA)] },
+      { record: sourceB, lines: [makeContextLine('line-b1', sourceB), makeContextLine('line-b2', sourceB)] }
+    ],
+    unlinkedGroups: [
+      { record: sourceC, lines: [makeContextLine('line-c', sourceC)] }
+    ],
+    unlinkedDeferred: false,
+    unlinkedLoading: false
+  };
+
+  assert.deepEqual(
+    plugin.collectContextPreloadLines(results, { state, limit: 2 }).map((line) => line.guid),
+    ['line-b1', 'line-b2']
+  );
+  assert.deepEqual(
+    plugin.collectContextPreloadLines(results, { state, limit: 10, includeUnlinked: false }).map((line) => line.guid),
+    ['line-b1', 'line-b2']
+  );
+  assert.deepEqual(
+    plugin.collectContextPreloadLines(results, { state, limit: 0 }).map((line) => line.guid),
+    []
+  );
 });
 
 test('stale scoped query refreshes cannot overwrite newer filter state', async () => {

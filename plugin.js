@@ -29,6 +29,7 @@ class Plugin extends AppPlugin {
     this._sortByRecord = this.loadSortByRecordSetting();
 
     this._defaultMaxResults = 200;
+    this._defaultContextPreloadMaxLines = 30;
     this._refreshDebounceMs = 350;
     this._queryFilterDebounceMs = 180;
     this._defaultQueryFilterMaxResults = 1000;
@@ -3734,6 +3735,10 @@ class Plugin extends AppPlugin {
         cfg.custom?.queryFilterMaxResults,
         Math.max(this._defaultQueryFilterMaxResults, maxResults)
       ),
+      contextPreloadMaxLines: this.coerceNonNegativeInt(
+        cfg.custom?.contextPreloadMaxLines,
+        this._defaultContextPreloadMaxLines
+      ),
       showSelf: cfg.custom?.showSelf === true
     };
   }
@@ -4124,24 +4129,44 @@ class Plugin extends AppPlugin {
     }, 0);
   }
 
-  collectContextPreloadLines(results) {
+  collectContextPreloadLines(results, opts = {}) {
     const out = [];
     const seen = new Set();
-    const appendGroups = (groups) => {
+    const limit = this.coerceNonNegativeInt(opts.limit, this._defaultContextPreloadMaxLines);
+    if (limit === 0) return out;
+
+    const appendGroups = (groups, sectionId) => {
       for (const group of groups || []) {
+        const recordGuid = group?.record?.guid || '';
+        if (
+          opts.state
+          && recordGuid
+          && this.isRecordGroupCollapsed(sectionId, opts.state.recordGuid || '', recordGuid)
+        ) {
+          continue;
+        }
         for (const line of group?.lines || []) {
           const guid = line?.guid || '';
           if (!guid || seen.has(guid)) continue;
           if (typeof line?.getTreeContext !== 'function') continue;
           seen.add(guid);
           out.push(line);
+          if (out.length >= limit) return;
         }
+        if (out.length >= limit) return;
       }
     };
 
-    appendGroups(results?.linkedGroups || []);
-    if (results?.unlinkedDeferred !== true && results?.unlinkedLoading !== true) {
-      appendGroups(results?.unlinkedGroups || []);
+    if (opts.includeLinked !== false) {
+      appendGroups(results?.linkedGroups || [], 'linked');
+    }
+    if (
+      out.length < limit
+      && opts.includeUnlinked !== false
+      && results?.unlinkedDeferred !== true
+      && results?.unlinkedLoading !== true
+    ) {
+      appendGroups(results?.unlinkedGroups || [], 'unlinked');
     }
     return out;
   }
@@ -4150,7 +4175,15 @@ class Plugin extends AppPlugin {
     const state = this._panelStates.get(panelId) || null;
     if (!state || state.contextPreloadSeq !== seq || state.lastResults !== results) return;
 
-    for (const line of this.collectContextPreloadLines(results)) {
+    const { contextPreloadMaxLines } = this.getRefreshConfig();
+    const lines = this.collectContextPreloadLines(results, {
+      state,
+      limit: contextPreloadMaxLines,
+      includeLinked: !this.isSectionCollapsed(state, 'linked'),
+      includeUnlinked: !this.isSectionCollapsed(state, 'unlinked')
+    });
+
+    for (const line of lines) {
       if (!this._panelStates.has(panelId)) return;
       if (state.contextPreloadSeq !== seq || state.lastResults !== results) return;
       const ctx = this.getLinkedContextState(state, line?.guid || null);
@@ -6058,6 +6091,8 @@ class Plugin extends AppPlugin {
 
     if (viewState.propertyError) {
       this.appendError(section.bodyEl, viewState.propertyError);
+    } else if (viewState.propertySectionCollapsed) {
+      return;
     } else if (viewState.propertyIndexStatus === 'indexing' || viewState.propertyIndexStatus === 'idle') {
       this.appendNote(section.bodyEl, viewState.propertyIndexMessage);
     } else if (viewState.propertyIndexStatus === 'error') {
@@ -6089,6 +6124,8 @@ class Plugin extends AppPlugin {
 
     if (viewState.linkedError) {
       this.appendError(section.bodyEl, viewState.linkedError);
+    } else if (viewState.linkedSectionCollapsed) {
+      return;
     } else {
       this.appendLinkedReferenceGroups(section.bodyEl, viewState.linked, {
         groupSectionId: 'linked',
@@ -6118,7 +6155,9 @@ class Plugin extends AppPlugin {
     });
 
     if (viewState.unlinkedLoading) {
-      this.appendNote(section.bodyEl, 'Loading unlinked references...');
+      if (!viewState.unlinkedSectionCollapsed) {
+        this.appendNote(section.bodyEl, 'Loading unlinked references...');
+      }
       return;
     }
 
@@ -6127,10 +6166,12 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (viewState.unlinkedSectionCollapsed) {
+      return;
+    }
+
     if (viewState.unlinkedDeferred) {
-      if (!viewState.unlinkedSectionCollapsed) {
-        this.appendNote(section.bodyEl, 'Loading unlinked references...');
-      }
+      this.appendNote(section.bodyEl, 'Loading unlinked references...');
       return;
     }
 
@@ -6452,54 +6493,56 @@ class Plugin extends AppPlugin {
       const linesEl = document.createElement('div');
       linesEl.className = 'tlr-lines';
 
-      for (const line of lines) {
-        const entryEl = document.createElement('div');
-        entryEl.className = 'tlr-line-entry';
+      if (!groupCollapsed) {
+        for (const line of lines) {
+          const entryEl = document.createElement('div');
+          entryEl.className = 'tlr-line-entry';
 
-        const ctx = state ? this.getLinkedContextState(state, line.guid) : null;
-        if (state && ctx && this.hasRequestedLinkedContext(ctx) && ctx.loaded !== true && ctx.loading !== true) {
-          this.ensureLinkedContextLoaded(state, line).catch(() => {
-            // ignore
-          });
-        }
-
-        this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'top');
-
-        const lineEl = document.createElement('button');
-        lineEl.type = 'button';
-        lineEl.className = 'tlr-line button-none button-minimal-hover';
-        lineEl.dataset.action = 'open-line';
-        lineEl.dataset.recordGuid = recordGuid;
-        lineEl.dataset.lineGuid = line.guid;
-        this.appendLineText(lineEl, line, query);
-        this.appendLiveBadges(lineEl, state, this.getLinkedSnapshotKey(line.guid));
-        const mainRowEl = document.createElement('div');
-        mainRowEl.className = 'tlr-line-main';
-        mainRowEl.appendChild(lineEl);
-        entryEl.appendChild(mainRowEl);
-
-        if (state && ctx) {
-          if (ctx.showMoreContext === true) mainRowEl.classList.add('is-context-open');
-          const controlsEl = this.buildLinkedContextControls(line.guid, ctx, {
-            showLinkAction: groupSectionId === 'unlinked'
-          });
-          if (controlsEl) mainRowEl.appendChild(controlsEl);
-
-          if (ctx.loading === true && ctx.backgroundLoading !== true) {
-            const loadingEl = document.createElement('div');
-            loadingEl.className = 'tlr-note tlr-context-note';
-            loadingEl.textContent = 'Loading context...';
-            entryEl.appendChild(loadingEl);
-          } else if (ctx.error) {
-            const errorEl = document.createElement('div');
-            errorEl.className = 'tlr-error tlr-context-note';
-            errorEl.textContent = ctx.error;
-            entryEl.appendChild(errorEl);
+          const ctx = state ? this.getLinkedContextState(state, line.guid) : null;
+          if (state && ctx && this.hasRequestedLinkedContext(ctx) && ctx.loaded !== true && ctx.loading !== true) {
+            this.ensureLinkedContextLoaded(state, line).catch(() => {
+              // ignore
+            });
           }
-        }
 
-        this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'bottom');
-        linesEl.appendChild(entryEl);
+          this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'top');
+
+          const lineEl = document.createElement('button');
+          lineEl.type = 'button';
+          lineEl.className = 'tlr-line button-none button-minimal-hover';
+          lineEl.dataset.action = 'open-line';
+          lineEl.dataset.recordGuid = recordGuid;
+          lineEl.dataset.lineGuid = line.guid;
+          this.appendLineText(lineEl, line, query);
+          this.appendLiveBadges(lineEl, state, this.getLinkedSnapshotKey(line.guid));
+          const mainRowEl = document.createElement('div');
+          mainRowEl.className = 'tlr-line-main';
+          mainRowEl.appendChild(lineEl);
+          entryEl.appendChild(mainRowEl);
+
+          if (state && ctx) {
+            if (ctx.showMoreContext === true) mainRowEl.classList.add('is-context-open');
+            const controlsEl = this.buildLinkedContextControls(line.guid, ctx, {
+              showLinkAction: groupSectionId === 'unlinked'
+            });
+            if (controlsEl) mainRowEl.appendChild(controlsEl);
+
+            if (ctx.loading === true && ctx.backgroundLoading !== true) {
+              const loadingEl = document.createElement('div');
+              loadingEl.className = 'tlr-note tlr-context-note';
+              loadingEl.textContent = 'Loading context...';
+              entryEl.appendChild(loadingEl);
+            } else if (ctx.error) {
+              const errorEl = document.createElement('div');
+              errorEl.className = 'tlr-error tlr-context-note';
+              errorEl.textContent = ctx.error;
+              entryEl.appendChild(errorEl);
+            }
+          }
+
+          this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'bottom');
+          linesEl.appendChild(entryEl);
+        }
       }
 
       groupEl.appendChild(rowEl);
