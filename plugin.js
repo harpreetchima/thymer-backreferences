@@ -3371,12 +3371,16 @@ class Plugin extends AppPlugin {
     if (!state || !results) return false;
     const { showSelf } = this.getRefreshConfig();
     const next = this.getPropertyBacklinkResult(state.recordGuid, { showSelf });
+    const hadPropertyGroups = Array.isArray(results.propertyGroups) && results.propertyGroups.length > 0;
+    const hasPropertyGroups = Array.isArray(next.propertyGroups) && next.propertyGroups.length > 0;
     results.propertyGroups = next.propertyGroups;
     results.propertyError = next.propertyError;
     results.propertyIndexStatus = next.propertyIndexStatus;
     results.propertyIndexStats = next.propertyIndexStats;
     results.propertyIndexError = next.propertyIndexError;
-    this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
+    if (next.propertyIndexStatus === 'ready' || hadPropertyGroups || hasPropertyGroups) {
+      this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
+    }
     return true;
   }
 
@@ -5885,15 +5889,21 @@ class Plugin extends AppPlugin {
     const totalVisibleRefCount = totalPropRefCount + totalLinkedRefCount;
     const filteredVisibleRefCount = filteredPropRefCount + filteredLinkedRefCount;
     const filteredUniquePages = this.collectUniquePageGuids(props, linked, []);
+    const propertySectionCollapsed = this.isSectionCollapsed(state, 'property', collapseMetrics);
+    const linkedSectionCollapsed = this.isSectionCollapsed(state, 'linked', collapseMetrics);
+    const unlinkedSectionCollapsed = this.isSectionCollapsed(state, 'unlinked', collapseMetrics);
 
     const sortSpec = {
       sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
       sortDir: this.normalizeSortDir(state?.sortDir) || this._defaultSortDir
     };
-    const sortMetrics = this.computeRecordSortMetrics(props, [...linked, ...unlinked]);
-    props = this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
-    linked = this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
-    unlinked = this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
+    const shouldSortAnySection = !propertySectionCollapsed || !linkedSectionCollapsed || !unlinkedSectionCollapsed;
+    const sortMetrics = shouldSortAnySection
+      ? this.computeRecordSortMetrics(props, [...linked, ...unlinked])
+      : null;
+    props = propertySectionCollapsed ? props : this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
+    linked = linkedSectionCollapsed ? linked : this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
+    unlinked = unlinkedSectionCollapsed ? unlinked : this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     return {
       searchMode,
@@ -5933,9 +5943,9 @@ class Plugin extends AppPlugin {
       hasScopedView,
       showUnlinkedCounts,
       showScopedCounts,
-      propertySectionCollapsed: this.isSectionCollapsed(state, 'property', collapseMetrics),
-      linkedSectionCollapsed: this.isSectionCollapsed(state, 'linked', collapseMetrics),
-      unlinkedSectionCollapsed: this.isSectionCollapsed(state, 'unlinked', collapseMetrics),
+      propertySectionCollapsed,
+      linkedSectionCollapsed,
+      unlinkedSectionCollapsed,
       summaryText: this.buildReferenceSummaryParts({
         searchMode,
         incompleteQueryDraft,
@@ -5988,8 +5998,9 @@ class Plugin extends AppPlugin {
   }
 
   buildPropertySectionRenderKey(state, viewState) {
+    const isCollapsed = viewState.propertySectionCollapsed === true;
     return [
-      viewState.propertySectionCollapsed === true ? 'collapsed' : 'open',
+      isCollapsed ? 'collapsed' : 'open',
       viewState.propertyError || '',
       viewState.propertyIndexStatus || 'idle',
       viewState.propertyIndexStats?.scannedRecords || 0,
@@ -5999,14 +6010,15 @@ class Plugin extends AppPlugin {
       viewState.highlightQuery || '',
       viewState.filteredPropRefCount,
       viewState.totalPropRefCount,
-      this.buildPropertyGroupsSignature(viewState.props),
-      state?.liveRenderVersion || 0
+      isCollapsed ? '' : this.buildPropertyGroupsSignature(viewState.props),
+      isCollapsed ? 0 : (state?.liveRenderVersion || 0)
     ].join('|');
   }
 
   buildLinkedSectionRenderKey(state, viewState) {
+    const isCollapsed = viewState.linkedSectionCollapsed === true;
     return [
-      viewState.linkedSectionCollapsed === true ? 'collapsed' : 'open',
+      isCollapsed ? 'collapsed' : 'open',
       viewState.linkedError || '',
       viewState.showScopedCounts === true ? 'scoped' : 'plain',
       viewState.hasScopedView === true ? 'filtered' : 'all',
@@ -6014,15 +6026,16 @@ class Plugin extends AppPlugin {
       viewState.filteredLinkedRefCount,
       viewState.totalLinkedRefCount,
       viewState.maxResults || 0,
-      this.buildLineGroupsSignature(viewState.linked),
-      state?.liveRenderVersion || 0,
-      state?.linkedContextRenderVersion || 0
+      isCollapsed ? '' : this.buildLineGroupsSignature(viewState.linked),
+      isCollapsed ? 0 : (state?.liveRenderVersion || 0),
+      isCollapsed ? 0 : (state?.linkedContextRenderVersion || 0)
     ].join('|');
   }
 
   buildUnlinkedSectionRenderKey(state, viewState) {
+    const isCollapsed = viewState.unlinkedSectionCollapsed === true;
     return [
-      viewState.unlinkedSectionCollapsed === true ? 'collapsed' : 'open',
+      isCollapsed ? 'collapsed' : 'open',
       viewState.unlinkedError || '',
       viewState.unlinkedDeferred === true ? 'deferred' : 'ready',
       viewState.unlinkedLoading === true ? 'loading' : 'idle',
@@ -6033,9 +6046,9 @@ class Plugin extends AppPlugin {
       viewState.filteredUnlinkedRefCount,
       viewState.totalUnlinkedRefCount,
       viewState.maxResults || 0,
-      this.buildLineGroupsSignature(viewState.unlinked),
-      state?.liveRenderVersion || 0,
-      state?.linkedContextRenderVersion || 0
+      isCollapsed ? '' : this.buildLineGroupsSignature(viewState.unlinked),
+      isCollapsed ? 0 : (state?.liveRenderVersion || 0),
+      isCollapsed ? 0 : (state?.linkedContextRenderVersion || 0)
     ].join('|');
   }
 

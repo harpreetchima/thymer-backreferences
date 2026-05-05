@@ -1867,7 +1867,149 @@ test('reference render plan skips unchanged sections and isolates linked-context
   const thirdPlan = plugin.buildReferenceRenderPlan(state, viewState);
   assert.equal(thirdPlan.propertyChanged, false);
   assert.equal(thirdPlan.linkedChanged, true);
-  assert.equal(thirdPlan.unlinkedChanged, true);
+  assert.equal(thirdPlan.unlinkedChanged, false);
+});
+
+test('collapsed section render keys avoid expensive content signatures', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Record' });
+  const linkedGroups = [{
+    record: linkedRecord,
+    lines: [makeLine({ guid: 'line-1', record: linkedRecord, segments: [{ type: 'text', text: 'linked' }] })]
+  }];
+
+  state.recordGuid = 'target-record';
+  state.sectionCollapsed = {
+    ...plugin.createDefaultSectionCollapsedState(),
+    linked: true,
+    unlinked: true
+  };
+
+  let lineSignatureCalls = 0;
+  plugin.buildLineGroupsSignature = (groups) => {
+    lineSignatureCalls += 1;
+    return `lines:${groups.length}`;
+  };
+
+  const collapsedView = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  plugin.buildReferenceRenderPlan(state, collapsedView);
+  assert.equal(lineSignatureCalls, 0);
+
+  state.sectionCollapsed.linked = false;
+  const openView = plugin.buildReferenceViewState(state, {
+    propertyGroups: [],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  plugin.buildReferenceRenderPlan(state, openView);
+  assert.equal(lineSignatureCalls, 1);
+});
+
+test('collapsed sections skip render-time sorting', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Record' });
+  const linkedGroups = [{
+    record: linkedRecord,
+    lines: [makeLine({ guid: 'line-1', record: linkedRecord, segments: [{ type: 'text', text: 'linked' }] })]
+  }];
+
+  state.recordGuid = 'target-record';
+  state.sectionCollapsed = {
+    property: true,
+    linked: true,
+    unlinked: true
+  };
+
+  let sortCalls = 0;
+  plugin.computeRecordSortMetrics = () => {
+    sortCalls += 1;
+    return { referenceCountByGuid: new Map(), referenceActivityByGuid: new Map() };
+  };
+  plugin.sortPropertyGroupsForRender = (groups) => {
+    sortCalls += 1;
+    return groups;
+  };
+  plugin.sortLinkedGroupsForRender = (groups) => {
+    sortCalls += 1;
+    return groups;
+  };
+
+  plugin.buildReferenceViewState(state, {
+    propertyGroups: [{ propertyName: 'Entity', records: [linkedRecord] }],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+  assert.equal(sortCalls, 0);
+
+  state.sectionCollapsed.linked = false;
+  plugin.buildReferenceViewState(state, {
+    propertyGroups: [{ propertyName: 'Entity', records: [linkedRecord] }],
+    propertyError: '',
+    linkedGroups,
+    linkedError: '',
+    unlinkedGroups: linkedGroups,
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+  assert.equal(sortCalls, 2);
+});
+
+test('property index progress sync avoids rebuilding live snapshots without property refs', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-record', name: 'Target' });
+  const source = makeRecord({ guid: 'source-record', name: 'Source' });
+  const state = plugin.createPanelState('panel-1', null);
+  state.recordGuid = target.guid;
+  state.lastResults = {
+    propertyGroups: [],
+    linkedGroups: [{
+      record: source,
+      lines: [makeLine({ guid: 'line-1', record: source, segments: [{ type: 'text', text: 'linked' }] })]
+    }]
+  };
+
+  plugin.getRefreshConfig = () => ({ showSelf: false });
+  plugin._propertyIndexStatus = 'indexing';
+  let snapshotBuilds = 0;
+  plugin.buildResultsSnapshot = () => {
+    snapshotBuilds += 1;
+    return { itemsByKey: new Map(), sourceRecordGuids: new Set() };
+  };
+
+  plugin.syncPropertyIndexResultForState(state);
+  assert.equal(snapshotBuilds, 0);
+
+  plugin._propertyIndexStatus = 'ready';
+  plugin.syncPropertyIndexResultForState(state);
+  assert.equal(snapshotBuilds, 1);
 });
 
 (async () => {
