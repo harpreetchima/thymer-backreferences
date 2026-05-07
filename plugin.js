@@ -448,11 +448,27 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    if (this.shouldSkipPanelChangedRefresh(state, { reason, recordChanged })) {
+      if (state.lastResults) this.renderFromCache(state);
+      return;
+    }
+
     // Always refresh on navigation; on focus we debounce unless already loaded.
     this.scheduleRefreshForPanel(panel, {
       force: recordChanged,
       reason: reason || (recordChanged ? 'record-changed' : 'record-same')
     });
+  }
+
+  shouldSkipPanelChangedRefresh(state, { reason, recordChanged } = {}) {
+    if (!state || recordChanged) return false;
+    if (state.pendingRemoteSync === true) return false;
+
+    const normalizedReason = `${reason || ''}`.trim();
+    const softSameRecordReason = normalizedReason === 'panel.focused' || normalizedReason === 'initial-delayed';
+    if (!softSameRecordReason) return false;
+
+    return Boolean(state.lastResults || state.isLoading === true || state.refreshTimer);
   }
 
   shouldSuppressInPanel(panel, panelEl) {

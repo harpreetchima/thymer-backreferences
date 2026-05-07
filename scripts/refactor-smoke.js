@@ -2140,6 +2140,60 @@ test('panel lifecycle reuses state and only forces refresh on record changes', (
   assert.equal(refreshes[1].force, false);
 });
 
+test('panel focus with loaded same-record results renders from cache without refresh', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = 'target-guid';
+  state.lastResults = { propertyGroups: [], linkedGroups: [], unlinkedGroups: [] };
+  plugin._panelStates.set('panel-1', state);
+
+  let refreshCount = 0;
+  let cacheRenderCount = 0;
+  plugin.findMountContainer = () => ({});
+  plugin.mountFooter = () => {};
+  plugin.scheduleRefreshForPanel = () => {
+    refreshCount += 1;
+  };
+  plugin.renderFromCache = (nextState) => {
+    assert.equal(nextState, state);
+    cacheRenderCount += 1;
+  };
+
+  plugin.handlePanelChanged(panel, 'panel.focused');
+
+  assert.equal(refreshCount, 0);
+  assert.equal(cacheRenderCount, 1);
+});
+
+test('panel focus refreshes loaded same-record results when remote sync is pending', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = 'target-guid';
+  state.lastResults = { propertyGroups: [], linkedGroups: [], unlinkedGroups: [] };
+  state.pendingRemoteSync = true;
+  plugin._panelStates.set('panel-1', state);
+
+  const refreshes = [];
+  plugin.findMountContainer = () => ({});
+  plugin.mountFooter = () => {};
+  plugin.scheduleRefreshForPanel = (_panel, args) => {
+    refreshes.push(args);
+  };
+  plugin.renderFromCache = () => {
+    throw new Error('pending remote sync should schedule a refresh');
+  };
+
+  plugin.handlePanelChanged(panel, 'panel.focused');
+
+  assert.equal(refreshes.length, 1);
+  assert.equal(refreshes[0].force, false);
+  assert.equal(refreshes[0].reason, 'panel.focused');
+});
+
 test('ctrl-click line navigation opens a new panel then highlights the line', async () => {
   const plugin = makePlugin();
   const current = makePanel({
