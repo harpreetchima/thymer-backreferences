@@ -1737,76 +1737,149 @@ class Plugin extends AppPlugin {
     return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
 
-  getPanelLineNavigationElement(panel, lineGuid) {
-    const panelEl = panel?.getElement?.() || null;
-    if (!panelEl || typeof panelEl.querySelector !== 'function' || !lineGuid) return null;
+  getInspectablePanelElement(panel) {
+    if (!panel || typeof panel.getElement !== 'function') return null;
+    const panelEl = panel.getElement();
+    if (!panelEl || typeof panelEl.querySelector !== 'function') return null;
+    return panelEl;
+  }
+
+  getPanelLineNavigationElementFromRoot(panelEl, lineGuid) {
+    if (!panelEl || !lineGuid) return null;
     const escaped = this.escapeCssAttributeValue(lineGuid);
-    return panelEl.querySelector(`[data-guid="${escaped}"]`)
-      || panelEl.querySelector(`[dbg-guid="${escaped}"]`)
-      || null;
+    const dataGuidElement = panelEl.querySelector(`[data-guid="${escaped}"]`);
+    if (dataGuidElement) return dataGuidElement;
+    return panelEl.querySelector(`[dbg-guid="${escaped}"]`) || null;
+  }
+
+  getPanelLineNavigationElement(panel, lineGuid) {
+    return this.getPanelLineNavigationElementFromRoot(
+      this.getInspectablePanelElement(panel),
+      lineGuid
+    );
+  }
+
+  getClosestPanelLineScroller(lineEl) {
+    if (!lineEl || typeof lineEl.closest !== 'function') return null;
+    return lineEl.closest('.panel-scroller-y') || null;
+  }
+
+  isPanelLineScroller(element) {
+    if (!element || typeof element.matches !== 'function') return false;
+    return element.matches('.panel-scroller-y') === true;
+  }
+
+  queryPanelLineScroller(panelEl) {
+    if (!panelEl || typeof panelEl.querySelector !== 'function') return null;
+    return panelEl.querySelector('.panel-scroller-y') || null;
   }
 
   getPanelLineScrollContainer(panelEl, lineEl) {
-    if (!panelEl) return null;
-    const closestScroller = lineEl?.closest?.('.panel-scroller-y') || null;
+    const closestScroller = this.getClosestPanelLineScroller(lineEl);
     if (closestScroller) return closestScroller;
-    if (panelEl.matches?.('.panel-scroller-y')) return panelEl;
-    return panelEl.querySelector?.('.panel-scroller-y') || panelEl;
+    if (this.isPanelLineScroller(panelEl)) return panelEl;
+    return this.queryPanelLineScroller(panelEl) || panelEl || null;
   }
 
-  getPanelLineNavigationInfo(panel, lineGuid) {
-    const panelEl = panel?.getElement?.() || null;
-    if (!panelEl || typeof panelEl.querySelector !== 'function') {
-      return { supported: false, found: false, visible: false };
-    }
+  getElementRect(element) {
+    if (!element || typeof element.getBoundingClientRect !== 'function') return null;
+    return element.getBoundingClientRect();
+  }
 
-    const lineEl = this.getPanelLineNavigationElement(panel, lineGuid);
-    if (!lineEl || typeof lineEl.getBoundingClientRect !== 'function') {
-      return { supported: true, found: false, visible: false };
-    }
+  getWindowNavigationMetric(name) {
+    if (typeof window === 'undefined') return 0;
+    const value = Number(window[name]);
+    return Number.isFinite(value) ? value : 0;
+  }
 
-    const scroller = this.getPanelLineScrollContainer(panelEl, lineEl);
-    const rect = lineEl.getBoundingClientRect();
-    const bounds = scroller?.getBoundingClientRect?.()
-      || panelEl.getBoundingClientRect?.()
-      || {
-        top: 0,
-        bottom: typeof window !== 'undefined' ? window.innerHeight || 0 : 0,
-        left: 0,
-        right: typeof window !== 'undefined' ? window.innerWidth || 0 : 0
-      };
-    const visible = rect.width > 0
-      && rect.height > 0
-      && rect.bottom > bounds.top
-      && rect.top < bounds.bottom
-      && rect.right > bounds.left
-      && rect.left < bounds.right;
-
+  getViewportLineNavigationBounds() {
     return {
-      supported: true,
-      found: true,
-      visible,
-      lineEl,
-      scroller,
-      lineTop: Math.round(rect.top || 0),
-      lineBottom: Math.round(rect.bottom || 0),
-      scrollTop: Math.round(scroller?.scrollTop || 0),
-      scrollHeight: Math.round(scroller?.scrollHeight || 0),
-      clientHeight: Math.round(scroller?.clientHeight || 0)
+      top: 0,
+      bottom: this.getWindowNavigationMetric('innerHeight'),
+      left: 0,
+      right: this.getWindowNavigationMetric('innerWidth')
     };
   }
 
-  getPanelLineNavigationLayoutKey(info) {
-    if (!info?.supported) return 'unsupported';
-    if (!info.found) return 'missing';
+  getPanelLineNavigationBounds(panelEl, scroller) {
+    const scrollerBounds = this.getElementRect(scroller);
+    if (scrollerBounds) return scrollerBounds;
+    return this.getElementRect(panelEl) || this.getViewportLineNavigationBounds();
+  }
+
+  isPanelLineRectVisible(rect, bounds) {
+    if (!rect || !bounds) return false;
     return [
-      info.visible === true ? 'visible' : 'hidden',
-      info.lineTop || 0,
-      info.lineBottom || 0,
-      info.scrollTop || 0,
-      info.scrollHeight || 0,
-      info.clientHeight || 0
-    ].join(':');
+      rect.width > 0,
+      rect.height > 0,
+      rect.bottom > bounds.top,
+      rect.top < bounds.bottom,
+      rect.right > bounds.left,
+      rect.left < bounds.right
+    ].every((value) => value === true);
+  }
+
+  roundNavigationMetric(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.round(number) : 0;
+  }
+
+  getMissingPanelLineNavigationInfo(supported) {
+    return {
+      supported: supported === true,
+      found: false,
+      visible: false
+    };
+  }
+
+  getFoundPanelLineNavigationInfo(panelEl, lineEl) {
+    const scroller = this.getPanelLineScrollContainer(panelEl, lineEl);
+    const rect = lineEl.getBoundingClientRect();
+    const bounds = this.getPanelLineNavigationBounds(panelEl, scroller);
+    return {
+      supported: true,
+      found: true,
+      visible: this.isPanelLineRectVisible(rect, bounds),
+      lineEl,
+      scroller,
+      lineTop: this.roundNavigationMetric(rect.top),
+      lineBottom: this.roundNavigationMetric(rect.bottom),
+      scrollTop: this.roundNavigationMetric(scroller && scroller.scrollTop),
+      scrollHeight: this.roundNavigationMetric(scroller && scroller.scrollHeight),
+      clientHeight: this.roundNavigationMetric(scroller && scroller.clientHeight)
+    };
+  }
+
+  getPanelLineNavigationInfo(panel, lineGuid) {
+    const panelEl = this.getInspectablePanelElement(panel);
+    if (!panelEl) return this.getMissingPanelLineNavigationInfo(false);
+
+    const lineEl = this.getPanelLineNavigationElementFromRoot(panelEl, lineGuid);
+    if (!this.getElementRect(lineEl)) return this.getMissingPanelLineNavigationInfo(true);
+
+    return this.getFoundPanelLineNavigationInfo(panelEl, lineEl);
+  }
+
+  getPanelLineNavigationLayoutStatus(info) {
+    if (!info || !info.supported) return 'unsupported';
+    if (!info.found) return 'missing';
+    return info.visible === true ? 'visible' : 'hidden';
+  }
+
+  getPanelLineNavigationLayoutMetrics(info) {
+    return [
+      info.lineTop,
+      info.lineBottom,
+      info.scrollTop,
+      info.scrollHeight,
+      info.clientHeight
+    ].map((value) => this.roundNavigationMetric(value));
+  }
+
+  getPanelLineNavigationLayoutKey(info) {
+    const status = this.getPanelLineNavigationLayoutStatus(info);
+    if (status === 'unsupported' || status === 'missing') return status;
+    return [status, ...this.getPanelLineNavigationLayoutMetrics(info)].join(':');
   }
 
   scrollPanelLineIntoView(info) {
@@ -1846,54 +1919,82 @@ class Plugin extends AppPlugin {
     }
   }
 
-  async ensureLineVisibleAfterNavigation(panel, lineGuid) {
-    const initial = this.getPanelLineNavigationInfo(panel, lineGuid);
-    if (!initial.supported) return { supported: false, found: false, visible: false, scrolled: false };
+  getLineNavigationSettleConfig() {
+    return {
+      minWaitMs: this.coerceNonNegativeInt(this._lineNavigationSettleMinMs, 450),
+      maxWaitMs: this.coerceNonNegativeInt(this._lineNavigationSettleMaxMs, 1200),
+      stableMs: this.coerceNonNegativeInt(this._lineNavigationSettleStableMs, 100)
+    };
+  }
 
-    const minWaitMs = this.coerceNonNegativeInt(this._lineNavigationSettleMinMs, 450);
-    const maxWaitMs = this.coerceNonNegativeInt(this._lineNavigationSettleMaxMs, 1200);
-    const stableMs = this.coerceNonNegativeInt(this._lineNavigationSettleStableMs, 100);
+  shouldStopLineNavigationSettle(state, config, now) {
+    if (!state.sawLine) return false;
+    if (now - state.startedAt < config.minWaitMs) return false;
+    return now - state.stableSince >= config.stableMs;
+  }
+
+  updateLineNavigationSettleState(state, info, now) {
+    const key = this.getPanelLineNavigationLayoutKey(info);
+    const sawLine = state.sawLine || info.found === true;
+    if (key === state.lastKey) return { ...state, sawLine };
+    return {
+      startedAt: state.startedAt,
+      sawLine,
+      lastKey: key,
+      stableSince: now
+    };
+  }
+
+  async waitForPanelLineNavigationSettle(panel, lineGuid, initial) {
+    const config = this.getLineNavigationSettleConfig();
     const startedAt = this.perfNow();
-    let sawLine = initial.found === true;
-    let lastKey = this.getPanelLineNavigationLayoutKey(initial);
-    let stableSince = startedAt;
+    let state = {
+      startedAt,
+      sawLine: initial.found === true,
+      lastKey: this.getPanelLineNavigationLayoutKey(initial),
+      stableSince: startedAt
+    };
 
-    while (this.perfNow() - startedAt < maxWaitMs) {
+    while (this.perfNow() - startedAt < config.maxWaitMs) {
       await this.waitForPanelNavigationTick();
       const info = this.getPanelLineNavigationInfo(panel, lineGuid);
-      if (info.found) sawLine = true;
-      const key = this.getPanelLineNavigationLayoutKey(info);
       const now = this.perfNow();
-      if (key === lastKey) {
-        if (sawLine && now - startedAt >= minWaitMs && now - stableSince >= stableMs) break;
-      } else {
-        lastKey = key;
-        stableSince = now;
-      }
+      state = this.updateLineNavigationSettleState(state, info, now);
+      if (this.shouldStopLineNavigationSettle(state, config, now)) break;
       await this.waitForPanelNavigationDelay(40);
     }
 
-    const settled = this.getPanelLineNavigationInfo(panel, lineGuid);
-    if (!settled.found || settled.visible) {
-      return {
-        supported: true,
-        found: settled.found === true,
-        visible: settled.visible === true,
-        scrolled: false,
-        marked: settled.found === true ? this.markPanelLineNavigationTarget(settled) : false
-      };
-    }
+    return this.getPanelLineNavigationInfo(panel, lineGuid);
+  }
 
+  getLineNavigationResult(info, scrolled) {
+    const found = info && info.found === true;
+    return {
+      supported: info && info.supported === true,
+      found,
+      visible: info && info.visible === true,
+      scrolled: scrolled === true,
+      marked: found ? this.markPanelLineNavigationTarget(info) : false
+    };
+  }
+
+  async scrollSettledPanelLineIntoView(panel, lineGuid, settled) {
     const scrolled = this.scrollPanelLineIntoView(settled);
     if (scrolled) await this.waitForPanelNavigationTick();
-    const after = this.getPanelLineNavigationInfo(panel, lineGuid);
-    return {
-      supported: true,
-      found: true,
-      visible: after.visible === true,
-      scrolled,
-      marked: this.markPanelLineNavigationTarget(after)
-    };
+    return this.getLineNavigationResult(
+      this.getPanelLineNavigationInfo(panel, lineGuid),
+      scrolled
+    );
+  }
+
+  async ensureLineVisibleAfterNavigation(panel, lineGuid) {
+    const initial = this.getPanelLineNavigationInfo(panel, lineGuid);
+    if (!initial.supported) return this.getLineNavigationResult(initial, false);
+
+    const settled = await this.waitForPanelLineNavigationSettle(panel, lineGuid, initial);
+    if (!settled.found || settled.visible) return this.getLineNavigationResult(settled, false);
+
+    return this.scrollSettledPanelLineIntoView(panel, lineGuid, settled);
   }
 
   async openRecord(panel, recordGuid, lineGuid, e) {
