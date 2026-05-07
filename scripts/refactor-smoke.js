@@ -407,6 +407,30 @@ function attachTwoPanelStates(plugin, {
   return { targetA, targetB, stateA, stateB, refreshes };
 }
 
+function makeFooterActionEl(action, dataset = {}, extras = {}) {
+  return {
+    dataset: { action, ...dataset },
+    ...extras
+  };
+}
+
+function clickFooterAction(plugin, panelId, actionEl, event = {}) {
+  const openLineEl = actionEl?.dataset?.action === 'open-line' ? actionEl : null;
+  const target = event.target || {
+    closest(selector) {
+      if (selector === '[data-action="open-line"]') return openLineEl;
+      if (selector === '[data-action]') return actionEl;
+      return null;
+    }
+  };
+
+  plugin.handleFooterClick({
+    currentTarget: { dataset: { panelId } },
+    target,
+    ...event
+  });
+}
+
 const tests = [];
 
 function test(name, fn) {
@@ -2714,6 +2738,107 @@ test('nested record refs inside a backreference row still open the source line',
     { prevented: true },
     { stopped: true },
     { panelId: 'panel-1', recordGuid: 'source-guid', lineGuid: 'line-guid', ctrlKey: true }
+  ]);
+});
+
+test('footer click dispatches collapse and search controls', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  state.footerCollapsed = false;
+  state.sectionCollapsed.linked = false;
+  state.searchOpen = false;
+  state.searchQuery = 'needle';
+  state.searchInputEl = { value: 'needle' };
+  plugin._panelStates.set('panel-1', state);
+
+  const calls = [];
+  plugin.applyFooterCollapsedPreferenceForRecord = (recordGuid, collapsed) => {
+    calls.push({ type: 'footer', recordGuid, collapsed });
+  };
+  plugin.applySectionCollapsedPreferenceForRecord = (recordGuid, sectionId, collapsed) => {
+    calls.push({ type: 'section', recordGuid, sectionId, collapsed });
+  };
+  plugin.setSearchOpen = (nextState, open) => {
+    calls.push({ type: 'search-open', panelId: nextState.panelId, open });
+  };
+  plugin.scheduleRefreshForPanel = (nextPanel, opts) => {
+    calls.push({ type: 'refresh', panelId: nextPanel.getId(), opts });
+  };
+  plugin.handleSearchQueryChanged = (nextState, opts) => {
+    calls.push({ type: 'clear-search', panelId: nextState.panelId, opts });
+  };
+
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle'));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle-section', { sectionId: 'linked' }));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle-search'));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('refresh-search'));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('clear-search'));
+
+  assert.deepEqual(calls, [
+    { type: 'footer', recordGuid: 'target-guid', collapsed: true },
+    { type: 'section', recordGuid: 'target-guid', sectionId: 'linked', collapsed: true },
+    { type: 'search-open', panelId: 'panel-1', open: true },
+    { type: 'refresh', panelId: 'panel-1', opts: { force: true, reason: 'search-refresh' } },
+    { type: 'clear-search', panelId: 'panel-1', opts: { immediate: true, keepFocus: true } }
+  ]);
+  assert.equal(state.searchQuery, '');
+  assert.equal(state.searchInputEl.value, '');
+});
+
+test('footer click dispatches sort, rebuild, and context controls', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  state.sortBy = 'page_last_edited';
+  state.sortDir = 'desc';
+  state.sortMenuOpen = false;
+  plugin._panelStates.set('panel-1', state);
+
+  const calls = [];
+  plugin.setSortMenuOpen = (nextState, open) => {
+    nextState.sortMenuOpen = open === true;
+    calls.push({ type: 'sort-menu', panelId: nextState.panelId, open: open === true });
+  };
+  plugin.applySortPreferenceForRecord = (recordGuid, sortBy, sortDir) => {
+    state.sortBy = sortBy;
+    state.sortDir = sortDir;
+    calls.push({ type: 'sort', recordGuid, sortBy, sortDir });
+  };
+  plugin.rebuildPropertyIndex = (opts) => {
+    calls.push({ type: 'rebuild', opts });
+    return Promise.resolve();
+  };
+  plugin.handleLinkedContextAction = (_nextState, action, lineGuid) => {
+    calls.push({ type: 'context', action, lineGuid });
+    return Promise.resolve();
+  };
+  plugin.linkUnlinkedReference = (_nextState, lineGuid) => {
+    calls.push({ type: 'link-unlinked', lineGuid });
+    return Promise.resolve();
+  };
+
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle-sort-menu'));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('set-sort-by', { sortBy: 'reference_count' }));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('set-sort-dir', { sortDir: 'asc' }));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('rebuild-property-index'));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle-context-more', { lineGuid: 'line-guid' }));
+  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('link-unlinked', { lineGuid: 'line-guid' }));
+
+  assert.deepEqual(calls, [
+    { type: 'sort-menu', panelId: 'panel-1', open: true },
+    { type: 'sort', recordGuid: 'target-guid', sortBy: 'reference_count', sortDir: 'desc' },
+    { type: 'sort-menu', panelId: 'panel-1', open: true },
+    { type: 'sort', recordGuid: 'target-guid', sortBy: 'reference_count', sortDir: 'asc' },
+    { type: 'sort-menu', panelId: 'panel-1', open: true },
+    { type: 'rebuild', opts: { reason: 'footer-rebuild-index' } },
+    { type: 'context', action: 'toggle-context-more', lineGuid: 'line-guid' },
+    { type: 'sort-menu', panelId: 'panel-1', open: false },
+    { type: 'link-unlinked', lineGuid: 'line-guid' }
   ]);
 });
 

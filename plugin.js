@@ -1471,193 +1471,276 @@ class Plugin extends AppPlugin {
   // ---------- Click handling ----------
 
   handleFooterClick(e) {
-    const root = e.currentTarget;
-    if (!root) return;
+    const context = this.getFooterClickContext(e);
+    if (!context) return;
 
-    const lineActionEl = e.target?.closest?.('[data-action="open-line"]') || null;
-    const actionEl = lineActionEl || e.target?.closest?.('[data-action]') || null;
-    if (!actionEl) return;
+    if (this.handleFooterCollapseClick(context)) return;
+    if (this.handleFooterSearchSortClick(context)) return;
+    if (this.handleFooterContextClick(context)) return;
+    this.handleFooterNavigationClick(context);
+  }
+
+  getFooterClickContext(e) {
+    const root = e?.currentTarget || null;
+    if (!root) return null;
+
+    const actionEl = this.getFooterClickActionElement(e.target);
+    if (!actionEl) return null;
 
     const action = actionEl.dataset.action || '';
     const panelId = root.dataset.panelId || null;
-    if (!panelId) return;
+    if (!panelId) return null;
 
-    const state = this._panelStates.get(panelId) || null;
+    return {
+      e,
+      root,
+      actionEl,
+      action,
+      panelId,
+      state: this._panelStates.get(panelId) || null
+    };
+  }
 
-    if (action === 'toggle') {
-      if (!state) return;
-      const nextCollapsed = !this.isFooterCollapsed(state, this.getCollapseMetrics(state.lastResults));
-      this.applyFooterCollapsedPreferenceForRecord(state.recordGuid, nextCollapsed);
-      return;
+  getFooterClickActionElement(target) {
+    const lineActionEl = target?.closest?.('[data-action="open-line"]') || null;
+    return lineActionEl || target?.closest?.('[data-action]') || null;
+  }
+
+  handleFooterCollapseClick({ action, actionEl, state }) {
+    switch (action) {
+      case 'toggle':
+        this.toggleFooterCollapsedFromClick(state);
+        return true;
+      case 'toggle-prop-group':
+        this.togglePropGroupFromClick(actionEl);
+        return true;
+      case 'toggle-record-group':
+        this.toggleRecordGroupFromClick(actionEl, state);
+        return true;
+      case 'toggle-section':
+        this.toggleSectionFromClick(actionEl, state);
+        return true;
+      default:
+        return false;
     }
+  }
 
-    if (action === 'toggle-prop-group') {
-      const propName = (actionEl.dataset.propName || '').trim();
-      if (!propName) return;
+  toggleFooterCollapsedFromClick(state) {
+    if (!state) return;
+    const nextCollapsed = !this.isFooterCollapsed(state, this.getCollapseMetrics(state.lastResults));
+    this.applyFooterCollapsedPreferenceForRecord(state.recordGuid, nextCollapsed);
+  }
 
-      const groupEl = actionEl.closest?.('.tlr-prop-group') || null;
-      const isCollapsed = groupEl ? groupEl.classList.contains('tlr-prop-collapsed') : this.isPropGroupCollapsed(propName);
-      const nextCollapsed = !isCollapsed;
+  togglePropGroupFromClick(actionEl) {
+    const propName = (actionEl.dataset.propName || '').trim();
+    if (!propName) return;
 
-      this.setPropGroupCollapsed(propName, nextCollapsed);
-      if (groupEl) groupEl.classList.toggle('tlr-prop-collapsed', nextCollapsed);
-      const propControls = groupEl?.querySelectorAll?.('[data-action="toggle-prop-group"]') || [];
-      propControls.forEach((el) => {
-        el.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
-        if (el.classList?.contains?.('tlr-prop-toggle')) {
-          el.title = nextCollapsed ? 'Expand' : 'Collapse';
-          el.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
-        }
-      });
-      this.syncChevronIcon(groupEl?.querySelector?.('.tlr-prop-caret') || null, nextCollapsed);
-      return;
-    }
+    const groupEl = actionEl.closest?.('.tlr-prop-group') || null;
+    const isCollapsed = groupEl ? groupEl.classList.contains('tlr-prop-collapsed') : this.isPropGroupCollapsed(propName);
+    const nextCollapsed = !isCollapsed;
 
-    if (action === 'toggle-record-group') {
-      const sectionId = this.normalizeRecordGroupSectionId(actionEl.dataset.groupSectionId);
-      const recordGuid = (actionEl.dataset.recordGuid || '').trim();
-      const targetRecordGuid = (actionEl.dataset.targetRecordGuid || state?.recordGuid || '').trim();
-      if (!sectionId || !recordGuid || !targetRecordGuid) return;
+    this.setPropGroupCollapsed(propName, nextCollapsed);
+    this.syncPropGroupCollapsedClickState(groupEl, nextCollapsed);
+  }
 
-      const groupEl = actionEl.closest?.('.tlr-group') || null;
-      const isCollapsed = groupEl ? groupEl.classList.contains('tlr-group-collapsed') : this.isRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid);
-      const nextCollapsed = !isCollapsed;
-
-      this.setRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid, nextCollapsed);
-      if (groupEl) groupEl.classList.toggle('tlr-group-collapsed', nextCollapsed);
-      actionEl.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
-      actionEl.title = nextCollapsed ? 'Expand' : 'Collapse';
-      actionEl.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
-      this.syncChevronIcon(actionEl.querySelector?.('.tlr-group-caret') || null, nextCollapsed);
-      return;
-    }
-
-    if (action === 'toggle-section') {
-      if (!state) return;
-      const sectionId = this.normalizeSectionId(actionEl.dataset.sectionId);
-      if (!sectionId) return;
-
-      const nextCollapsed = !this.isSectionCollapsed(state, sectionId, this.getCollapseMetrics(state.lastResults));
-      this.applySectionCollapsedPreferenceForRecord(state.recordGuid, sectionId, nextCollapsed);
-      return;
-    }
-
-    if (action === 'toggle-search') {
-      if (!state) return;
-      this.setSearchOpen(state, state.searchOpen !== true);
-      return;
-    }
-
-    if (action === 'toggle-sort-menu') {
-      if (!state) return;
-      if (state.sortMenuOpen === true) {
-        this.setSortMenuOpen(state, false);
-      } else {
-        this.setSortMenuOpen(state, true);
+  syncPropGroupCollapsedClickState(groupEl, nextCollapsed) {
+    if (!groupEl) return;
+    groupEl.classList.toggle('tlr-prop-collapsed', nextCollapsed);
+    const propControls = groupEl.querySelectorAll?.('[data-action="toggle-prop-group"]') || [];
+    propControls.forEach((el) => {
+      el.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
+      if (el.classList?.contains?.('tlr-prop-toggle')) {
+        el.title = nextCollapsed ? 'Expand' : 'Collapse';
+        el.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
       }
-      return;
-    }
+    });
+    this.syncChevronIcon(groupEl.querySelector?.('.tlr-prop-caret') || null, nextCollapsed);
+  }
 
-    if (action === 'refresh-search') {
-      if (!state) return;
-      this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'search-refresh' });
-      return;
-    }
+  toggleRecordGroupFromClick(actionEl, state) {
+    const sectionId = this.normalizeRecordGroupSectionId(actionEl.dataset.groupSectionId);
+    const recordGuid = (actionEl.dataset.recordGuid || '').trim();
+    const targetRecordGuid = (actionEl.dataset.targetRecordGuid || state?.recordGuid || '').trim();
+    if (!sectionId || !recordGuid || !targetRecordGuid) return;
 
-    if (action === 'rebuild-property-index') {
-      this.rebuildPropertyIndex({ reason: 'footer-rebuild-index' }).catch(() => {
-        // The error state is rendered in the footer.
-      });
-      return;
-    }
+    const groupEl = actionEl.closest?.('.tlr-group') || null;
+    const isCollapsed = groupEl ? groupEl.classList.contains('tlr-group-collapsed') : this.isRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid);
+    const nextCollapsed = !isCollapsed;
 
-    if (action === 'set-sort-by') {
-      if (!state) return;
-      const nextSortBy = this.normalizeSortBy(actionEl.dataset.sortBy);
-      if (!nextSortBy) return;
-      this.applySortPreferenceForRecord(state.recordGuid, nextSortBy, state.sortDir);
-      this.setSortMenuOpen(state, true);
-      return;
-    }
+    this.setRecordGroupCollapsed(sectionId, targetRecordGuid, recordGuid, nextCollapsed);
+    if (groupEl) groupEl.classList.toggle('tlr-group-collapsed', nextCollapsed);
+    actionEl.setAttribute?.('aria-expanded', nextCollapsed ? 'false' : 'true');
+    actionEl.title = nextCollapsed ? 'Expand' : 'Collapse';
+    actionEl.setAttribute?.('aria-label', nextCollapsed ? 'Expand' : 'Collapse');
+    this.syncChevronIcon(actionEl.querySelector?.('.tlr-group-caret') || null, nextCollapsed);
+  }
 
-    if (action === 'set-sort-dir') {
-      if (!state) return;
-      const nextSortDir = this.normalizeSortDir(actionEl.dataset.sortDir);
-      if (!nextSortDir) return;
-      this.applySortPreferenceForRecord(state.recordGuid, state.sortBy, nextSortDir);
-      this.setSortMenuOpen(state, true);
-      return;
-    }
+  toggleSectionFromClick(actionEl, state) {
+    if (!state) return;
+    const sectionId = this.normalizeSectionId(actionEl.dataset.sectionId);
+    if (!sectionId) return;
 
-    if (action === 'clear-search') {
-      if (!state) return;
-      const q = (state.searchQuery || '').trim();
-      if (q) {
-        state.searchQuery = '';
-        if (state.searchInputEl) state.searchInputEl.value = '';
-        this.handleSearchQueryChanged(state, { immediate: true, keepFocus: true });
-      } else {
-        state.searchInputEl?.blur?.();
-      }
-      return;
-    }
+    const nextCollapsed = !this.isSectionCollapsed(state, sectionId, this.getCollapseMetrics(state.lastResults));
+    this.applySectionCollapsedPreferenceForRecord(state.recordGuid, sectionId, nextCollapsed);
+  }
 
-    if (
-      action === 'toggle-context-more' ||
-      action === 'toggle-context-above' ||
-      action === 'toggle-context-below'
-    ) {
-      if (!state) return;
-      this.handleLinkedContextAction(
-        state,
-        action,
-        actionEl.dataset.lineGuid || null
-      ).catch(() => {
-        // ignore
-      });
-      return;
+  handleFooterSearchSortClick({ action, actionEl, state }) {
+    switch (action) {
+      case 'toggle-search':
+        this.toggleFooterSearchFromClick(state);
+        return true;
+      case 'toggle-sort-menu':
+        this.toggleFooterSortMenuFromClick(state);
+        return true;
+      case 'refresh-search':
+        this.refreshFooterSearchFromClick(state);
+        return true;
+      case 'rebuild-property-index':
+        this.rebuildPropertyIndexFromClick();
+        return true;
+      case 'set-sort-by':
+        this.setFooterSortByFromClick(actionEl, state);
+        return true;
+      case 'set-sort-dir':
+        this.setFooterSortDirFromClick(actionEl, state);
+        return true;
+      case 'clear-search':
+        this.clearFooterSearchFromClick(state);
+        return true;
+      default:
+        return false;
     }
+  }
 
+  toggleFooterSearchFromClick(state) {
+    if (!state) return;
+    this.setSearchOpen(state, state.searchOpen !== true);
+  }
+
+  toggleFooterSortMenuFromClick(state) {
+    if (!state) return;
+    this.setSortMenuOpen(state, state.sortMenuOpen !== true);
+  }
+
+  refreshFooterSearchFromClick(state) {
+    if (!state) return;
+    this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'search-refresh' });
+  }
+
+  rebuildPropertyIndexFromClick() {
+    this.rebuildPropertyIndex({ reason: 'footer-rebuild-index' }).catch(() => {
+      // The error state is rendered in the footer.
+    });
+  }
+
+  setFooterSortByFromClick(actionEl, state) {
+    if (!state) return;
+    const nextSortBy = this.normalizeSortBy(actionEl.dataset.sortBy);
+    if (!nextSortBy) return;
+    this.applySortPreferenceForRecord(state.recordGuid, nextSortBy, state.sortDir);
+    this.setSortMenuOpen(state, true);
+  }
+
+  setFooterSortDirFromClick(actionEl, state) {
+    if (!state) return;
+    const nextSortDir = this.normalizeSortDir(actionEl.dataset.sortDir);
+    if (!nextSortDir) return;
+    this.applySortPreferenceForRecord(state.recordGuid, state.sortBy, nextSortDir);
+    this.setSortMenuOpen(state, true);
+  }
+
+  clearFooterSearchFromClick(state) {
+    if (!state) return;
+    const q = (state.searchQuery || '').trim();
+    if (q) {
+      state.searchQuery = '';
+      if (state.searchInputEl) state.searchInputEl.value = '';
+      this.handleSearchQueryChanged(state, { immediate: true, keepFocus: true });
+    } else {
+      state.searchInputEl?.blur?.();
+    }
+  }
+
+  handleFooterContextClick({ action, actionEl, state }) {
+    if (this.isFooterContextToggleAction(action)) {
+      this.toggleLinkedContextFromClick(action, actionEl, state);
+      return true;
+    }
     if (action === 'link-unlinked') {
-      if (!state) return;
-      const lineGuid = actionEl.dataset.lineGuid || null;
-      if (!lineGuid) return;
-      this.setSortMenuOpen(state, false);
-      this.linkUnlinkedReference(state, lineGuid).catch(() => {
-        // ignore
-      });
-      return;
+      this.linkUnlinkedReferenceFromClick(actionEl, state);
+      return true;
     }
+    return false;
+  }
 
+  isFooterContextToggleAction(action) {
+    return action === 'toggle-context-more'
+      || action === 'toggle-context-above'
+      || action === 'toggle-context-below';
+  }
+
+  toggleLinkedContextFromClick(action, actionEl, state) {
+    if (!state) return;
+    this.handleLinkedContextAction(
+      state,
+      action,
+      actionEl.dataset.lineGuid || null
+    ).catch(() => {
+      // ignore
+    });
+  }
+
+  linkUnlinkedReferenceFromClick(actionEl, state) {
+    if (!state) return;
+    const lineGuid = actionEl.dataset.lineGuid || null;
+    if (!lineGuid) return;
+    this.setSortMenuOpen(state, false);
+    this.linkUnlinkedReference(state, lineGuid).catch(() => {
+      // ignore
+    });
+  }
+
+  handleFooterNavigationClick({ action, actionEl, state, e }) {
     const panel = state?.panel || null;
-    if (!panel) return;
+    if (!panel) return false;
 
-    if (action === 'open-record') {
-      const guid = actionEl.dataset.recordGuid || null;
-      if (!guid) return;
-      this.setSortMenuOpen(state, false);
-      this.openRecord(panel, guid, null, e);
-      return;
+    switch (action) {
+      case 'open-record':
+        return this.openRecordFromFooterClick(panel, actionEl, state, e);
+      case 'open-line':
+        return this.openLineFromFooterClick(panel, actionEl, state, e);
+      case 'open-ref':
+        return this.openReferenceFromFooterClick(panel, actionEl, state, e);
+      default:
+        return false;
     }
+  }
 
-    if (action === 'open-line') {
-      const guid = actionEl.dataset.recordGuid || null;
-      const lineGuid = actionEl.dataset.lineGuid || null;
-      if (!guid) return;
-      e.preventDefault?.();
-      e.stopPropagation?.();
-      this.setSortMenuOpen(state, false);
-      this.openRecord(panel, guid, lineGuid || null, e);
-      return;
-    }
+  openRecordFromFooterClick(panel, actionEl, state, e) {
+    const guid = actionEl.dataset.recordGuid || null;
+    if (!guid) return true;
+    this.setSortMenuOpen(state, false);
+    this.openRecord(panel, guid, null, e);
+    return true;
+  }
 
-    if (action === 'open-ref') {
-      const guid = actionEl.dataset.refGuid || null;
-      if (!guid) return;
-      this.setSortMenuOpen(state, false);
-      this.openRecord(panel, guid, null, e);
-      return;
-    }
+  openLineFromFooterClick(panel, actionEl, state, e) {
+    const guid = actionEl.dataset.recordGuid || null;
+    const lineGuid = actionEl.dataset.lineGuid || null;
+    if (!guid) return true;
+    e.preventDefault?.();
+    e.stopPropagation?.();
+    this.setSortMenuOpen(state, false);
+    this.openRecord(panel, guid, lineGuid || null, e);
+    return true;
+  }
+
+  openReferenceFromFooterClick(panel, actionEl, state, e) {
+    const guid = actionEl.dataset.refGuid || null;
+    if (!guid) return true;
+    this.setSortMenuOpen(state, false);
+    this.openRecord(panel, guid, null, e);
+    return true;
   }
 
   navigatePanelToRecord(panel, recordGuid, lineGuid, workspaceGuid) {
