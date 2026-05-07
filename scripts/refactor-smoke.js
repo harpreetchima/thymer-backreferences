@@ -78,6 +78,31 @@ function makeLine({ guid, record, segments = [], type = 'text', createdAt, updat
   };
 }
 
+function makeJournalBacklinkFixture({ journalName = 'April 23rd 2026', sourceName = 'Source Note' } = {}) {
+  const journal = makeRecord({
+    guid: 'journal-guid',
+    name: journalName,
+    journal: true,
+    journalDate: new Date(2026, 3, 23)
+  });
+  const source = makeRecord({
+    guid: 'source-guid',
+    name: sourceName,
+    updatedAt: makeDate('2026-04-23T09:00:00Z')
+  });
+  const linkedLine = makeLine({
+    guid: 'linked-line',
+    record: source,
+    segments: [{ type: 'ref', text: { guid: journal.guid, title: journal.getName() } }]
+  });
+  const dateLine = makeLine({
+    guid: 'date-line',
+    record: source,
+    segments: [{ type: 'datetime', text: { d: '20260423' } }]
+  });
+  return { journal, source, linkedLine, dateLine };
+}
+
 function makePanel({ id, record, collection = null, element = null, type = 'edit_panel', navType = 'edit_panel' }) {
   let activeRecord = record || null;
   let activeCollection = collection || null;
@@ -203,6 +228,19 @@ function makeDomElement(tagName) {
   return el;
 }
 
+function attachRefreshPanelState(plugin, panel, recordGuid, { collapseUnlinked = false } = {}) {
+  const panelId = panel.getId();
+  const state = plugin.createPanelState(panelId, panel);
+  state.recordGuid = recordGuid;
+  state.sectionCollapsed.unlinked = collapseUnlinked === true;
+  state.rootEl = makeDomElement('div');
+  state.rootEl.isConnected = true;
+  state.bodyEl = makeDomElement('div');
+  state.countEl = makeDomElement('span');
+  plugin._panelStates.set(panelId, state);
+  return state;
+}
+
 function makePlugin() {
   const Plugin = loadPluginClass();
   const plugin = new Plugin();
@@ -221,6 +259,7 @@ function makePlugin() {
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
   plugin._defaultContextPreloadMaxLines = 30;
+  plugin._linkedDateSearchDelayMs = 1200;
   plugin._propertyIndexInitialDelayMs = 500;
   plugin._propertyIndexHydratedRefreshDelayMs = 30000;
   plugin._propertyIndexYieldEveryRecords = 25;
@@ -1276,23 +1315,7 @@ test('linked and unlinked grouping preserves source grouping rules', () => {
 
 test('linked reference search includes datetime tags for journal pages', async () => {
   const plugin = makePlugin();
-  const journal = makeRecord({
-    guid: 'journal-guid',
-    name: 'April 23rd 2026',
-    journal: true,
-    journalDate: new Date(2026, 3, 23)
-  });
-  const source = makeRecord({ guid: 'source-guid', name: 'Source Note', updatedAt: makeDate('2026-04-23T09:00:00Z') });
-  const linkedLine = makeLine({
-    guid: 'linked-line',
-    record: source,
-    segments: [{ type: 'ref', text: { guid: journal.guid, title: journal.getName() } }]
-  });
-  const dateLine = makeLine({
-    guid: 'date-line',
-    record: source,
-    segments: [{ type: 'datetime', text: { d: '20260423' } }]
-  });
+  const { journal, source, linkedLine, dateLine } = makeJournalBacklinkFixture();
   const queries = [];
 
   plugin.data.searchByQuery = async (query) => {
@@ -1313,6 +1336,114 @@ test('linked reference search includes datetime tags for journal pages', async (
   assert.deepEqual(queries, ['@linkto = "journal-guid"', '@date = "2026-04-23"']);
   assert.deepEqual(linkedGroups.map((group) => group.record.guid), ['source-guid']);
   assert.deepEqual(linkedGroups[0].lines.map((line) => line.guid), ['linked-line', 'date-line']);
+});
+
+test('refresh defers journal datetime search until after first render', async () => {
+  const plugin = makePlugin();
+  const { journal, source, linkedLine, dateLine } = makeJournalBacklinkFixture({
+    journalName: 'Thu Apr 23',
+    sourceName: 'Source'
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: journal });
+  const state = attachRefreshPanelState(plugin, panel, journal.guid, { collapseUnlinked: true });
+
+  let resolveDateSearch;
+  const dateSearch = new Promise((resolve) => {
+    resolveDateSearch = resolve;
+  });
+  const queries = [];
+  const renderSnapshots = [];
+  plugin._linkedDateSearchDelayMs = 0;
+  plugin.getRefreshConfig = () => ({ maxResults: 200, showSelf: false });
+  plugin.data.searchByQuery = async (query) => {
+    queries.push(query);
+    if (query === '@linkto = "journal-guid"') return { error: '', records: [source], lines: [linkedLine] };
+    if (query === '@date = "2026-04-23"') return dateSearch;
+    return { error: '', records: [], lines: [] };
+  };
+  plugin.loadUnlinkedReferenceGroups = async () => ({ unlinkedError: '', unlinkedGroups: [] });
+  plugin.renderFromCache = (nextState) => {
+    renderSnapshots.push({
+      linkedDateDeferred: nextState.lastResults?.linkedDateDeferred === true,
+      linkedLineGuids: nextState.lastResults?.linkedGroups?.flatMap((group) => group.lines.map((line) => line.guid)) || []
+    });
+  };
+  plugin.scheduleContextAvailabilityPreload = () => {};
+
+  await plugin.refreshPanel('panel-1', { reason: 'journal-open' });
+
+  assert.deepEqual(queries, ['@linkto = "journal-guid"']);
+  assert.deepEqual(renderSnapshots[0], {
+    linkedDateDeferred: true,
+    linkedLineGuids: ['linked-line']
+  });
+  const refreshSample = plugin.getPerfSnapshot().samples.find((sample) => sample.label === 'refresh');
+  assert.equal(refreshSample.steps.some((step) => step.step === 'search: datetime'), false);
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(queries, ['@linkto = "journal-guid"', '@date = "2026-04-23"']);
+
+  resolveDateSearch({ error: '', records: [source], lines: [linkedLine, dateLine] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(state.lastResults.linkedDateDeferred, false);
+  assert.deepEqual(
+    state.lastResults.linkedGroups[0].lines.map((line) => line.guid),
+    ['linked-line', 'date-line']
+  );
+});
+
+test('refresh overlaps linked and unlinked searches but groups after linked results', async () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source' });
+  const linkedLine = makeLine({
+    guid: 'linked-line',
+    record: source,
+    segments: [{ type: 'ref', text: { guid: target.guid, title: target.getName() } }]
+  });
+  const mentionLine = makeLine({
+    guid: 'mention-line',
+    record: source,
+    segments: [{ type: 'text', text: 'Target Note is mentioned without a link.' }]
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = attachRefreshPanelState(plugin, panel, target.guid);
+
+  let resolveLinkedSearch;
+  let resolveUnlinkedSearch;
+  const linkedSearch = new Promise((resolve) => {
+    resolveLinkedSearch = resolve;
+  });
+  const unlinkedSearch = new Promise((resolve) => {
+    resolveUnlinkedSearch = resolve;
+  });
+  const queries = [];
+  plugin.getRefreshConfig = () => ({ maxResults: 200, showSelf: false });
+  plugin.data.searchByQuery = async (query) => {
+    queries.push(query);
+    if (query === '@linkto = "target-guid"') return linkedSearch;
+    if (query === '"Target Note"') return unlinkedSearch;
+    return { error: '', records: [], lines: [] };
+  };
+  plugin.renderFromCache = () => {};
+  plugin.scheduleContextAvailabilityPreload = () => {};
+
+  const refresh = plugin.refreshPanel('panel-1', { reason: 'open-target' });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(queries, ['@linkto = "target-guid"', '"Target Note"']);
+
+  resolveUnlinkedSearch({ error: '', records: [source], lines: [linkedLine, mentionLine] });
+  await Promise.resolve();
+  assert.equal(state.lastResults, null);
+
+  resolveLinkedSearch({ error: '', records: [source], lines: [linkedLine] });
+  await refresh;
+
+  assert.deepEqual(state.lastResults.linkedGroups[0].lines.map((line) => line.guid), ['linked-line']);
+  assert.deepEqual(state.lastResults.unlinkedGroups[0].lines.map((line) => line.guid), ['mention-line']);
 });
 
 test('line event matching catches datetime references to journal pages', () => {
@@ -2306,24 +2437,96 @@ test('ctrl-click line navigation opens a new panel then highlights the line', as
     }
   };
   plugin.waitForPanelNavigationFrame = async () => {};
-  plugin.waitForPanelRecord = async () => true;
 
   await plugin.openRecord(current.panel, 'target-guid', 'line-guid', { metaKey: true });
 
   assert.deepEqual(focusedPanels, ['panel-created']);
   assert.deepEqual(created.navigateCalls, [
     {
-      type: 'edit_panel',
-      rootId: 'target-guid',
-      subId: null,
-      workspaceGuid: 'workspace-guid'
-    },
-    {
       itemGuid: 'line-guid',
       highlight: true
     }
   ]);
   assert.equal(current.navigateCalls.length, 0);
+});
+
+test('plain-click line navigation reuses current panel and highlights the line', async () => {
+  const plugin = makePlugin();
+  const current = makePanel({
+    id: 'panel-current',
+    record: makeRecord({ guid: 'source-guid', name: 'Source' })
+  });
+  const focusedPanels = [];
+
+  plugin.getWorkspaceGuid = () => 'workspace-guid';
+  plugin.ui.setActivePanel = (panel) => {
+    focusedPanels.push(panel.getId());
+  };
+  plugin.waitForPanelNavigationFrame = async () => {};
+
+  await plugin.openRecord(current.panel, 'target-guid', 'line-guid', {});
+
+  assert.deepEqual(focusedPanels, ['panel-current']);
+  assert.deepEqual(current.navigateCalls, [
+    {
+      itemGuid: 'line-guid',
+      highlight: true
+    }
+  ]);
+});
+
+test('nested record refs inside a backreference row still open the source line', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin._panelStates.set('panel-1', state);
+
+  const calls = [];
+  const root = { dataset: { panelId: 'panel-1' } };
+  const lineAction = {
+    dataset: {
+      action: 'open-line',
+      recordGuid: 'source-guid',
+      lineGuid: 'line-guid'
+    }
+  };
+  const nestedRefAction = {
+    dataset: {
+      action: 'open-ref',
+      refGuid: 'nested-ref-guid'
+    }
+  };
+  const targetEl = {
+    closest(selector) {
+      if (selector === '[data-action="open-line"]') return lineAction;
+      if (selector === '[data-action]') return nestedRefAction;
+      return null;
+    }
+  };
+
+  plugin.openRecord = (nextPanel, recordGuid, lineGuid, event) => {
+    calls.push({ panelId: nextPanel.getId(), recordGuid, lineGuid, ctrlKey: event.ctrlKey === true });
+  };
+
+  plugin.handleFooterClick({
+    currentTarget: root,
+    target: targetEl,
+    ctrlKey: true,
+    preventDefault() {
+      calls.push({ prevented: true });
+    },
+    stopPropagation() {
+      calls.push({ stopped: true });
+    }
+  });
+
+  assert.deepEqual(calls, [
+    { prevented: true },
+    { stopped: true },
+    { panelId: 'panel-1', recordGuid: 'source-guid', lineGuid: 'line-guid', ctrlKey: true }
+  ]);
 });
 
 test('deferred unlinked loading hydrates cached state for the current panel only', async () => {

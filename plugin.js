@@ -31,6 +31,7 @@ class Plugin extends AppPlugin {
 
     this._defaultMaxResults = 200;
     this._defaultContextPreloadMaxLines = 30;
+    this._linkedDateSearchDelayMs = 1200;
     this._propertyIndexInitialDelayMs = 500;
     this._propertyIndexHydratedRefreshDelayMs = 30000;
     this._propertyIndexYieldEveryRecords = 25;
@@ -748,6 +749,8 @@ class Plugin extends AppPlugin {
       queryFilterState: null,
       contextPreloadTimer: null,
       contextPreloadSeq: 0,
+      linkedDateTimer: null,
+      linkedDateSeq: 0,
       lastResults: null,
       observer: null,
       refreshTimer: null,
@@ -774,6 +777,12 @@ class Plugin extends AppPlugin {
       state.contextPreloadTimer = null;
     }
     state.contextPreloadSeq = (state.contextPreloadSeq || 0) + 1;
+
+    if (state.linkedDateTimer) {
+      clearTimeout(state.linkedDateTimer);
+      state.linkedDateTimer = null;
+    }
+    state.linkedDateSeq = (state.linkedDateSeq || 0) + 1;
 
     try {
       state.observer?.disconnect?.();
@@ -1211,7 +1220,8 @@ class Plugin extends AppPlugin {
     const root = e.currentTarget;
     if (!root) return;
 
-    const actionEl = e.target?.closest?.('[data-action]') || null;
+    const lineActionEl = e.target?.closest?.('[data-action="open-line"]') || null;
+    const actionEl = lineActionEl || e.target?.closest?.('[data-action]') || null;
     if (!actionEl) return;
 
     const action = actionEl.dataset.action || '';
@@ -1380,6 +1390,8 @@ class Plugin extends AppPlugin {
       const guid = actionEl.dataset.recordGuid || null;
       const lineGuid = actionEl.dataset.lineGuid || null;
       if (!guid) return;
+      e.preventDefault?.();
+      e.stopPropagation?.();
       this.setSortMenuOpen(state, false);
       this.openRecord(panel, guid, lineGuid || null, e);
       return;
@@ -1405,20 +1417,35 @@ class Plugin extends AppPlugin {
       return Promise.resolve(true);
     }
 
-    try {
-      const result = panel.navigateTo({
-        itemGuid: lineGuid,
-        highlight: true
-      });
+    return (async () => {
+      try {
+        const result = panel.navigateTo({
+          itemGuid: lineGuid,
+          highlight: true
+        });
 
-      if (result && typeof result.then === 'function') {
-        return result.then((found) => found !== false);
+        if (result && typeof result.then === 'function') {
+          const found = await result;
+          if (found !== false) return true;
+        } else if (result !== false) {
+          return true;
+        }
+      } catch (_err) {
+        // Fall through to direct line navigation below.
       }
 
-      return Promise.resolve(result !== false);
-    } catch (_err) {
-      return Promise.resolve(false);
-    }
+      try {
+        panel.navigateTo({
+          type: 'edit_panel',
+          rootId: recordGuid,
+          subId: lineGuid,
+          workspaceGuid
+        });
+        return true;
+      } catch (_err) {
+        return false;
+      }
+    })();
   }
 
   waitForPanelNavigationFrame() {
@@ -1428,34 +1455,6 @@ class Plugin extends AppPlugin {
         return;
       }
       setTimeout(resolve, 0);
-    });
-  }
-
-  waitForPanelRecord(panel, recordGuid, timeoutMs = 1800) {
-    return new Promise((resolve) => {
-      const startedAt = Date.now();
-
-      const check = () => {
-        const activeRecordGuid = panel?.getActiveRecord?.()?.guid || null;
-        if (activeRecordGuid && (!recordGuid || activeRecordGuid === recordGuid)) {
-          resolve(true);
-          return;
-        }
-
-        if ((Date.now() - startedAt) >= timeoutMs) {
-          resolve(false);
-          return;
-        }
-
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(check);
-          return;
-        }
-
-        setTimeout(check, 16);
-      };
-
-      check();
     });
   }
 
@@ -1471,21 +1470,18 @@ class Plugin extends AppPlugin {
         if (!newPanel) return;
         this.ui.setActivePanel(newPanel);
         await this.waitForPanelNavigationFrame();
-        await this.navigatePanelToRecord(newPanel, recordGuid, null, workspaceGuid);
-        await this.waitForPanelRecord(newPanel, recordGuid);
-
-        if (lineGuid) {
-          await this.navigatePanelToRecord(newPanel, recordGuid, lineGuid, workspaceGuid);
-          await this.waitForPanelNavigationFrame();
-          await this.waitForPanelNavigationFrame();
-        }
+        await this.navigatePanelToRecord(newPanel, recordGuid, lineGuid || null, workspaceGuid);
+        await this.waitForPanelNavigationFrame();
+        await this.waitForPanelNavigationFrame();
       } catch (_err) {
         // ignore
       }
       return;
     }
 
-    this.navigatePanelToRecord(panel, recordGuid, lineGuid || null, workspaceGuid);
+    await this.navigatePanelToRecord(panel, recordGuid, lineGuid || null, workspaceGuid).catch(() => {
+      // ignore
+    });
     this.ui.setActivePanel(panel);
   }
 
@@ -4446,20 +4442,20 @@ class Plugin extends AppPlugin {
     return this.parseDateIsoFromRecordTitle(title);
   }
 
-  getLinkedReferenceSearchSpecs(recordGuid, targetRecord) {
+  getLinkedReferenceSearchSpecs(recordGuid, targetRecord, { includeDatetime = true } = {}) {
     const guid = (recordGuid || '').trim();
     if (!guid) return [];
 
     const specs = [{ kind: 'linkto', query: `@linkto = "${guid}"` }];
     const dateIso = this.getRecordDateReferenceIso(targetRecord);
-    if (dateIso) {
+    if (includeDatetime !== false && dateIso) {
       specs.push({ kind: 'datetime', query: `@date = "${dateIso}"`, dateIso });
     }
     return specs;
   }
 
-  async runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord, perf } = {}) {
-    const specs = this.getLinkedReferenceSearchSpecs(recordGuid, targetRecord);
+  async runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord, perf, includeDatetime = true } = {}) {
+    const specs = this.getLinkedReferenceSearchSpecs(recordGuid, targetRecord, { includeDatetime });
     const searches = await Promise.all(specs.map(async (spec) => {
       try {
         return {
@@ -4522,6 +4518,28 @@ class Plugin extends AppPlugin {
     }
 
     return { linkedError, linkedGroups };
+  }
+
+  collectLinkedReferenceLines(groups) {
+    const lines = [];
+    for (const group of groups || []) {
+      for (const line of group?.lines || []) {
+        if (line) lines.push(line);
+      }
+    }
+    return lines;
+  }
+
+  mergeLinkedReferenceLines(left, right) {
+    const lines = [];
+    const seenLineGuids = new Set();
+    for (const line of [...(left || []), ...(right || [])]) {
+      const guid = line?.guid || '';
+      if (!guid || seenLineGuids.has(guid)) continue;
+      seenLineGuids.add(guid);
+      lines.push(line);
+    }
+    return lines;
   }
 
   buildLiteralPhraseSearchQuery(value) {
@@ -4614,19 +4632,38 @@ class Plugin extends AppPlugin {
     return phrases.join(' OR ');
   }
 
-  async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf, perf } = {}) {
+  async runUnlinkedReferenceSearch(recordName, maxResults, { perf } = {}) {
     try {
       const query = this.buildUnlinkedSearchQuery(recordName) || this.buildLiteralPhraseSearchQuery(recordName) || recordName;
-      const result = await this.timedSearchByQuery(query, maxResults, perf, 'unlinked');
-      if (result?.error) {
-        return { unlinkedError: result.error, unlinkedGroups: [] };
-      }
-
-      const lines = Array.isArray(result?.lines) ? result.lines : [];
+      return await this.timedSearchByQuery(query, maxResults, perf, 'unlinked');
+    } catch (e) {
       return {
-        unlinkedError: '',
-        unlinkedGroups: this.groupUnlinkedReferenceLines(lines, linkedGroups, recordGuid, recordName, { showSelf })
+        error: 'Error loading unlinked references.',
+        lines: []
       };
+    }
+  }
+
+  resolveUnlinkedReferenceSearch(result, recordName, { recordGuid, linkedGroups, showSelf } = {}) {
+    if (result?.error) {
+      return { unlinkedError: result.error, unlinkedGroups: [] };
+    }
+
+    const lines = Array.isArray(result?.lines) ? result.lines : [];
+    return {
+      unlinkedError: '',
+      unlinkedGroups: this.groupUnlinkedReferenceLines(lines, linkedGroups, recordGuid, recordName, { showSelf })
+    };
+  }
+
+  async loadUnlinkedReferenceGroups(recordName, maxResults, { recordGuid, linkedGroups, showSelf, perf } = {}) {
+    try {
+      const result = await this.runUnlinkedReferenceSearch(recordName, maxResults, { perf });
+      return this.resolveUnlinkedReferenceSearch(result, recordName, {
+        recordGuid,
+        linkedGroups,
+        showSelf
+      });
     } catch (e) {
       return {
         unlinkedError: 'Error loading unlinked references.',
@@ -4641,7 +4678,8 @@ class Plugin extends AppPlugin {
     maxResults,
     showSelf,
     linkedGroups,
-    perf
+    perf,
+    unlinkedSearchPromise
   }) {
     const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
     const propertyResult = this.getPropertyBacklinkResult(recordGuid, { showSelf });
@@ -4651,12 +4689,12 @@ class Plugin extends AppPlugin {
 
     if (shouldLoadUnlinked) {
       followupPromises.push(
-        this.loadUnlinkedReferenceGroups(recordName, maxResults, {
-          recordGuid,
-          linkedGroups,
-          showSelf,
-          perf
-        })
+        (unlinkedSearchPromise || this.runUnlinkedReferenceSearch(recordName, maxResults, { perf }))
+          .then((result) => this.resolveUnlinkedReferenceSearch(result, recordName, {
+            recordGuid,
+            linkedGroups,
+            showSelf
+          }))
       );
     }
 
@@ -4713,16 +4751,97 @@ class Plugin extends AppPlugin {
       this.unmountFooterForHiddenPanel(state);
       return;
     }
-    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: reason || 'refresh' });
-    this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
-    this.invalidateLinkedContextCache(state);
-    this.renderFromCache(state);
-    this.scheduleContextAvailabilityPreload(state, results, { reason: reason || 'refresh' });
+    this.applyRenderedResults(state, results, reason || 'refresh');
+    if (state.lastResults?.linkedDateDeferred === true) {
+      this.scheduleDeferredDateReferencesLoad(state, results);
+    }
     if (state.lastResults?.unlinkedDeferred === true && !this.isSectionCollapsed(state, 'unlinked')) {
       this.ensureDeferredUnlinkedLoaded(state).catch(() => {
         // ignore
       });
     }
+  }
+
+  scheduleDeferredDateReferencesLoad(state, results) {
+    if (!state || !results || results.linkedDateDeferred !== true) return;
+    if (state.linkedDateTimer) {
+      clearTimeout(state.linkedDateTimer);
+      state.linkedDateTimer = null;
+    }
+    const seq = (state.linkedDateSeq || 0) + 1;
+    state.linkedDateSeq = seq;
+    const delay = this.coerceNonNegativeInt(this._linkedDateSearchDelayMs, 1200);
+    state.linkedDateTimer = setTimeout(() => {
+      state.linkedDateTimer = null;
+      if (state.linkedDateSeq !== seq) return;
+      if (state.lastResults !== results) return;
+      this.ensureDeferredDateReferencesLoaded(state).catch(() => {
+        // ignore
+      });
+    }, delay);
+    state.linkedDateTimer?.unref?.();
+  }
+
+  async ensureDeferredDateReferencesLoaded(state) {
+    const results = state?.lastResults || null;
+    if (!state || !results) return;
+    if (results.linkedDateDeferred !== true) return;
+    if (results.linkedDateLoading === true) return;
+
+    const panel = state.panel || null;
+    const record = panel?.getActiveRecord?.() || null;
+    const recordGuid = record?.guid || state.recordGuid || null;
+    const recordName = (record?.getName?.() || '').trim();
+    const dateIso = results.linkedDateIso || this.getRecordDateReferenceIso(record, recordName);
+    if (!recordGuid || !dateIso) return;
+
+    const seq = state.refreshSeq || 0;
+    results.linkedDateLoading = true;
+    const perf = this.perfCreate('deferred-date-linked', {
+      panelId: state.panelId || '',
+      recordGuid,
+      dateIso
+    });
+
+    try {
+      const { maxResults, showSelf } = this.getRefreshConfig();
+      const searchStartedAt = this.perfNow();
+      const dateResult = await this.timedSearchByQuery(`@date = "${dateIso}"`, maxResults, perf, 'datetime');
+      this.perfStep(perf, 'date linked search total', searchStartedAt);
+
+      if (!this._panelStates.has(state.panelId)) return;
+      if (state.lastResults !== results) return;
+      if (state.refreshSeq !== seq) return;
+      if ((state.recordGuid || '') !== recordGuid) return;
+
+      if (dateResult?.error) {
+        results.linkedError = results.linkedError || dateResult.error;
+        results.linkedDateDeferred = false;
+        results.linkedDateLoading = false;
+        return;
+      }
+
+      const existingLines = this.collectLinkedReferenceLines(results.linkedGroups);
+      const mergedLines = this.mergeLinkedReferenceLines(existingLines, dateResult?.lines || []);
+      results.linkedGroups = this.groupBacklinkLines(mergedLines, recordGuid, { showSelf });
+      results.linkedDateDeferred = false;
+      results.linkedDateLoading = false;
+      this.applyRenderedResults(state, results, 'deferred-date-linked-loaded');
+    } finally {
+      if (results.linkedDateLoading === true && state.lastResults === results) {
+        results.linkedDateLoading = false;
+      }
+      this.perfLog(perf);
+    }
+  }
+
+  applyRenderedResults(state, results, reason) {
+    const renderReason = reason || 'refresh';
+    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: renderReason });
+    this.applyLiveSnapshot(state, this.buildResultsSnapshot(results?.propertyGroups, results?.linkedGroups));
+    this.invalidateLinkedContextCache(state);
+    this.renderFromCache(state);
+    this.scheduleContextAvailabilityPreload(state, results, { reason: renderReason });
   }
 
   scheduleContextAvailabilityPreload(state, results, { reason } = {}) {
@@ -4854,8 +4973,19 @@ class Plugin extends AppPlugin {
       const { maxResults, showSelf } = this.getRefreshConfig();
 
       const recordName = (record?.getName?.() || '').trim();
+      const linkedDateIso = this.getRecordDateReferenceIso(record, recordName);
+      const deferLinkedDateSearch = Boolean(linkedDateIso);
+      const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
       const linkedStartedAt = this.perfNow();
-      const searchSettled = await this.runLinkedReferenceSearch(recordGuid, maxResults, { targetRecord: record, perf });
+      const linkedSearchPromise = this.runLinkedReferenceSearch(recordGuid, maxResults, {
+        targetRecord: record,
+        perf,
+        includeDatetime: !deferLinkedDateSearch
+      });
+      const unlinkedSearchPromise = shouldLoadUnlinked
+        ? this.runUnlinkedReferenceSearch(recordName, maxResults, { perf })
+        : null;
+      const searchSettled = await linkedSearchPromise;
       this.perfStep(perf, 'linked search total', linkedStartedAt);
 
       if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
@@ -4878,7 +5008,8 @@ class Plugin extends AppPlugin {
         maxResults,
         showSelf,
         linkedGroups,
-        perf
+        perf,
+        unlinkedSearchPromise
       });
       this.perfStep(perf, 'load followup results', followupStartedAt, {
         propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
@@ -4892,12 +5023,16 @@ class Plugin extends AppPlugin {
       this.applyRefreshedResults(state, {
         ...followupResults,
         linkedGroups,
-        linkedError
+        linkedError,
+        linkedDateDeferred: deferLinkedDateSearch,
+        linkedDateLoading: false,
+        linkedDateIso
       }, { reason: reason || 'refresh' });
       this.perfStep(perf, 'apply and render results', applyStartedAt);
       this.perfCount(perf, {
         linkedGroups: linkedGroups.length,
         linkedRefs: this.countLinkedReferences(linkedGroups),
+        linkedDateDeferred: deferLinkedDateSearch,
         propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
         propertyRefs: (followupResults.propertyGroups || []).reduce((n, group) => n + (group?.records?.length || 0), 0),
         unlinkedDeferred: followupResults.unlinkedDeferred === true,
