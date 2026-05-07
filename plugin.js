@@ -306,6 +306,14 @@ class Plugin extends AppPlugin {
     };
   }
 
+  isNavigationDiagnosticElementHighlighted(el) {
+    const className = String(el?.className || '');
+    if (/highlight|selected|focus|target/i.test(className)) return true;
+    const lineEl = el?.closest?.('[data-guid]') || null;
+    const lineClassName = String(lineEl?.className || '');
+    return /highlight|selected|focus|target|caret/i.test(lineClassName);
+  }
+
   findNavigationDiagnosticRow(opts = {}) {
     if (typeof document === 'undefined') {
       return { found: false, reason: 'document is unavailable.' };
@@ -365,7 +373,7 @@ class Plugin extends AppPlugin {
         tag: el.tagName || '',
         className: className.slice(0, 180),
         inViewport: this.isDiagnosticElementInViewport(el),
-        highlighted: /highlight|selected|focus|target/i.test(className),
+        highlighted: this.isNavigationDiagnosticElementHighlighted(el),
         rect: this.getDiagnosticRect(el),
         text: this.getDiagnosticElementText(el).slice(0, 220)
       });
@@ -1672,8 +1680,12 @@ class Plugin extends AppPlugin {
 
         if (result && typeof result.then === 'function') {
           const found = await result;
-          if (found !== false) return true;
+          if (found !== false) {
+            await this.ensureLineVisibleAfterNavigation(panel, lineGuid);
+            return true;
+          }
         } else if (result !== false) {
+          await this.ensureLineVisibleAfterNavigation(panel, lineGuid);
           return true;
         }
       } catch (_err) {
@@ -1687,6 +1699,7 @@ class Plugin extends AppPlugin {
           subId: lineGuid,
           workspaceGuid
         });
+        await this.ensureLineVisibleAfterNavigation(panel, lineGuid);
         return true;
       } catch (_err) {
         return false;
@@ -1696,12 +1709,191 @@ class Plugin extends AppPlugin {
 
   waitForPanelNavigationFrame() {
     return new Promise((resolve) => {
+      let resolved = false;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        resolve();
+      };
       if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => resolve());
-        return;
+        requestAnimationFrame(finish);
       }
-      setTimeout(resolve, 0);
+      setTimeout(finish, 80);
     });
+  }
+
+  waitForPanelNavigationDelay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, this.coerceNonNegativeInt(ms, 0)));
+  }
+
+  waitForPanelNavigationTick(ms = 80) {
+    return Promise.race([
+      this.waitForPanelNavigationFrame(),
+      this.waitForPanelNavigationDelay(ms)
+    ]);
+  }
+
+  escapeCssAttributeValue(value) {
+    return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  getPanelLineNavigationElement(panel, lineGuid) {
+    const panelEl = panel?.getElement?.() || null;
+    if (!panelEl || typeof panelEl.querySelector !== 'function' || !lineGuid) return null;
+    const escaped = this.escapeCssAttributeValue(lineGuid);
+    return panelEl.querySelector(`[data-guid="${escaped}"]`)
+      || panelEl.querySelector(`[dbg-guid="${escaped}"]`)
+      || null;
+  }
+
+  getPanelLineScrollContainer(panelEl, lineEl) {
+    if (!panelEl) return null;
+    const closestScroller = lineEl?.closest?.('.panel-scroller-y') || null;
+    if (closestScroller) return closestScroller;
+    if (panelEl.matches?.('.panel-scroller-y')) return panelEl;
+    return panelEl.querySelector?.('.panel-scroller-y') || panelEl;
+  }
+
+  getPanelLineNavigationInfo(panel, lineGuid) {
+    const panelEl = panel?.getElement?.() || null;
+    if (!panelEl || typeof panelEl.querySelector !== 'function') {
+      return { supported: false, found: false, visible: false };
+    }
+
+    const lineEl = this.getPanelLineNavigationElement(panel, lineGuid);
+    if (!lineEl || typeof lineEl.getBoundingClientRect !== 'function') {
+      return { supported: true, found: false, visible: false };
+    }
+
+    const scroller = this.getPanelLineScrollContainer(panelEl, lineEl);
+    const rect = lineEl.getBoundingClientRect();
+    const bounds = scroller?.getBoundingClientRect?.()
+      || panelEl.getBoundingClientRect?.()
+      || {
+        top: 0,
+        bottom: typeof window !== 'undefined' ? window.innerHeight || 0 : 0,
+        left: 0,
+        right: typeof window !== 'undefined' ? window.innerWidth || 0 : 0
+      };
+    const visible = rect.width > 0
+      && rect.height > 0
+      && rect.bottom > bounds.top
+      && rect.top < bounds.bottom
+      && rect.right > bounds.left
+      && rect.left < bounds.right;
+
+    return {
+      supported: true,
+      found: true,
+      visible,
+      lineEl,
+      scroller,
+      lineTop: Math.round(rect.top || 0),
+      lineBottom: Math.round(rect.bottom || 0),
+      scrollTop: Math.round(scroller?.scrollTop || 0),
+      scrollHeight: Math.round(scroller?.scrollHeight || 0),
+      clientHeight: Math.round(scroller?.clientHeight || 0)
+    };
+  }
+
+  getPanelLineNavigationLayoutKey(info) {
+    if (!info?.supported) return 'unsupported';
+    if (!info.found) return 'missing';
+    return [
+      info.visible === true ? 'visible' : 'hidden',
+      info.lineTop || 0,
+      info.lineBottom || 0,
+      info.scrollTop || 0,
+      info.scrollHeight || 0,
+      info.clientHeight || 0
+    ].join(':');
+  }
+
+  scrollPanelLineIntoView(info) {
+    const lineEl = info?.lineEl || null;
+    if (!lineEl || typeof lineEl.scrollIntoView !== 'function') return false;
+    try {
+      lineEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+      return true;
+    } catch (_err) {
+      try {
+        lineEl.scrollIntoView();
+        return true;
+      } catch (_fallbackErr) {
+        return false;
+      }
+    }
+  }
+
+  markPanelLineNavigationTarget(info) {
+    const lineEl = info?.lineEl || null;
+    const targetEl = lineEl?.closest?.('[data-guid]') || lineEl;
+    if (!targetEl?.classList?.add) return false;
+    try {
+      targetEl.classList.remove('tlr-backref-jump-target');
+      void targetEl.offsetWidth;
+      targetEl.classList.add('tlr-backref-jump-target');
+      setTimeout(() => {
+        try {
+          targetEl.classList?.remove?.('tlr-backref-jump-target');
+        } catch (_err) {
+          // ignore
+        }
+      }, 2400);
+      return true;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  async ensureLineVisibleAfterNavigation(panel, lineGuid) {
+    const initial = this.getPanelLineNavigationInfo(panel, lineGuid);
+    if (!initial.supported) return { supported: false, found: false, visible: false, scrolled: false };
+
+    const minWaitMs = this.coerceNonNegativeInt(this._lineNavigationSettleMinMs, 450);
+    const maxWaitMs = this.coerceNonNegativeInt(this._lineNavigationSettleMaxMs, 1200);
+    const stableMs = this.coerceNonNegativeInt(this._lineNavigationSettleStableMs, 100);
+    const startedAt = this.perfNow();
+    let sawLine = initial.found === true;
+    let lastKey = this.getPanelLineNavigationLayoutKey(initial);
+    let stableSince = startedAt;
+
+    while (this.perfNow() - startedAt < maxWaitMs) {
+      await this.waitForPanelNavigationTick();
+      const info = this.getPanelLineNavigationInfo(panel, lineGuid);
+      if (info.found) sawLine = true;
+      const key = this.getPanelLineNavigationLayoutKey(info);
+      const now = this.perfNow();
+      if (key === lastKey) {
+        if (sawLine && now - startedAt >= minWaitMs && now - stableSince >= stableMs) break;
+      } else {
+        lastKey = key;
+        stableSince = now;
+      }
+      await this.waitForPanelNavigationDelay(40);
+    }
+
+    const settled = this.getPanelLineNavigationInfo(panel, lineGuid);
+    if (!settled.found || settled.visible) {
+      return {
+        supported: true,
+        found: settled.found === true,
+        visible: settled.visible === true,
+        scrolled: false,
+        marked: settled.found === true ? this.markPanelLineNavigationTarget(settled) : false
+      };
+    }
+
+    const scrolled = this.scrollPanelLineIntoView(settled);
+    if (scrolled) await this.waitForPanelNavigationTick();
+    const after = this.getPanelLineNavigationInfo(panel, lineGuid);
+    return {
+      supported: true,
+      found: true,
+      visible: after.visible === true,
+      scrolled,
+      marked: this.markPanelLineNavigationTarget(after)
+    };
   }
 
   async openRecord(panel, recordGuid, lineGuid, e) {
@@ -8358,6 +8550,26 @@ class Plugin extends AppPlugin {
         margin-top: 14px;
         color: var(--tlr-text-default);
         font-size: 13px;
+      }
+
+      .tlr-backref-jump-target {
+        border-radius: 4px;
+        animation: tlrBackrefJumpTarget 2400ms ease-out 1;
+      }
+
+      @keyframes tlrBackrefJumpTarget {
+        0% {
+          background-color: rgba(255, 213, 94, 0.24);
+          box-shadow: 0 0 0 2px var(--button-primary-bg-color, rgba(255, 213, 94, 0.72));
+        }
+        70% {
+          background-color: rgba(255, 213, 94, 0.14);
+          box-shadow: 0 0 0 2px var(--button-primary-bg-color, rgba(255, 213, 94, 0.44));
+        }
+        100% {
+          background-color: transparent;
+          box-shadow: 0 0 0 0 rgba(255, 213, 94, 0);
+        }
       }
 
       .tlr-header {

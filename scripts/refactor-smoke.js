@@ -2572,6 +2572,97 @@ test('plain-click line navigation reuses current panel and highlights the line',
   ]);
 });
 
+test('line navigation verifies the highlighted line remains visible after layout settles', async () => {
+  const plugin = makePlugin();
+  const current = makePanel({
+    id: 'panel-current',
+    record: makeRecord({ guid: 'source-guid', name: 'Source' })
+  });
+  const calls = [];
+
+  plugin.ensureLineVisibleAfterNavigation = async (panel, lineGuid) => {
+    calls.push({ panelId: panel.getId(), lineGuid });
+    return { supported: true, found: true, visible: true, scrolled: false };
+  };
+
+  await plugin.navigatePanelToRecord(current.panel, 'target-guid', 'line-guid', 'workspace-guid');
+
+  assert.deepEqual(current.navigateCalls, [
+    {
+      itemGuid: 'line-guid',
+      highlight: true
+    }
+  ]);
+  assert.deepEqual(calls, [{ panelId: 'panel-current', lineGuid: 'line-guid' }]);
+});
+
+test('line visibility guard scrolls the exact rendered line back into view', async () => {
+  const plugin = makePlugin();
+  let lineTop = 1500;
+  let scrollOptions = null;
+  const scroller = {
+    scrollTop: 78,
+    scrollHeight: 8500,
+    clientHeight: 900,
+    getBoundingClientRect() {
+      return { top: 0, bottom: 900, left: 0, right: 700, width: 700, height: 900 };
+    }
+  };
+  const lineEl = {
+    scrollIntoView(options) {
+      scrollOptions = options;
+      scroller.scrollTop = 1100;
+      lineTop = 420;
+    },
+    closest(selector) {
+      return selector === '.panel-scroller-y' ? scroller : null;
+    },
+    getBoundingClientRect() {
+      return {
+        top: lineTop,
+        bottom: lineTop + 48,
+        left: 10,
+        right: 610,
+        width: 600,
+        height: 48
+      };
+    }
+  };
+  const panelEl = {
+    matches() {
+      return false;
+    },
+    querySelector(selector) {
+      if (selector.includes('[data-guid="line-guid"]')) return lineEl;
+      if (selector === '.panel-scroller-y') return scroller;
+      return null;
+    },
+    getBoundingClientRect() {
+      return { top: 0, bottom: 900, left: 0, right: 700, width: 700, height: 900 };
+    }
+  };
+  const { panel } = makePanel({
+    id: 'panel-current',
+    record: makeRecord({ guid: 'target-guid', name: 'Target' }),
+    element: panelEl
+  });
+
+  plugin._lineNavigationSettleMinMs = 0;
+  plugin._lineNavigationSettleStableMs = 0;
+  plugin._lineNavigationSettleMaxMs = 1;
+  plugin.waitForPanelNavigationFrame = async () => {};
+  plugin.waitForPanelNavigationDelay = async () => {};
+
+  const result = await plugin.ensureLineVisibleAfterNavigation(panel, 'line-guid');
+
+  assert.equal(result.supported, true);
+  assert.equal(result.found, true);
+  assert.equal(result.scrolled, true);
+  assert.equal(result.visible, true);
+  assert.deepEqual(scrollOptions, { block: 'center', inline: 'nearest' });
+  assert.equal(scroller.scrollTop, 1100);
+});
+
 test('nested record refs inside a backreference row still open the source line', () => {
   const plugin = makePlugin();
   const target = makeRecord({ guid: 'target-guid', name: 'Target' });
