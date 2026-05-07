@@ -2922,6 +2922,13 @@ class Plugin extends AppPlugin {
     state.queryFilterState = null;
   }
 
+  getRunnableScopedQuery(state) {
+    const query = (state?.searchQuery || '').trim();
+    if (this.getSearchMode(query) !== 'query') return '';
+    if (this.isIncompleteQueryDraft(query)) return '';
+    return query;
+  }
+
   handleSearchQueryChanged(state, { immediate, keepFocus } = {}) {
     if (!state) return;
     this.syncSearchControlState(state);
@@ -2942,8 +2949,7 @@ class Plugin extends AppPlugin {
 
   syncScopedQueryWithCurrentInput(state, { immediate, reason } = {}) {
     if (!state) return;
-    const query = (state.searchQuery || '').trim();
-    if (this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
+    if (!this.getRunnableScopedQuery(state)) {
       this.clearQueryFilterState(state);
       return;
     }
@@ -2995,6 +3001,15 @@ class Plugin extends AppPlugin {
     return out;
   }
 
+  filterPropertyGroupsByRecordSet(groups, allowedRecordGuids) {
+    const allowed = allowedRecordGuids instanceof Set ? allowedRecordGuids : new Set();
+    if (allowed.size === 0) return [];
+    return this.filterPropertyGroups(groups, (record) => {
+      const guid = (record?.guid || '').trim();
+      return Boolean(guid && allowed.has(guid));
+    });
+  }
+
   filterLineGroups(groups, predicate) {
     const match = typeof predicate === 'function' ? predicate : null;
     if (!match) return [];
@@ -3013,8 +3028,8 @@ class Plugin extends AppPlugin {
   scheduleQueryFilterRefresh(state, { immediate, reason } = {}) {
     if (!state) return;
 
-    const query = (state.searchQuery || '').trim();
-    if (this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
+    const query = this.getRunnableScopedQuery(state);
+    if (!query) {
       this.clearQueryFilterState(state);
       return;
     }
@@ -3058,8 +3073,8 @@ class Plugin extends AppPlugin {
     });
 
     const results = state.lastResults || null;
-    const query = (state.searchQuery || '').trim();
-    if (!results || this.getSearchMode(query) !== 'query' || this.isIncompleteQueryDraft(query)) {
+    const query = this.getRunnableScopedQuery(state);
+    if (!results || !query) {
       this.clearQueryFilterState(state);
       this.renderFromCache(state);
       this.perfLog(perf);
@@ -3172,11 +3187,10 @@ class Plugin extends AppPlugin {
   filterPropertyGroupsByScopedQuery(groups, queryFilterState) {
     const matchedRecordGuids = queryFilterState?.matchedRecordGuids || new Set();
     const matchedLineRecordGuids = queryFilterState?.matchedLineRecordGuids || new Set();
-    return this.filterPropertyGroups(groups, (record) => {
-      const guid = (record?.guid || '').trim();
-      if (!guid) return false;
-      return matchedRecordGuids.has(guid) || matchedLineRecordGuids.has(guid);
-    });
+    return this.filterPropertyGroupsByRecordSet(groups, new Set([
+      ...matchedRecordGuids,
+      ...matchedLineRecordGuids
+    ]));
   }
 
   filterLineGroupsByScopedQuery(groups, queryFilterState) {
@@ -3319,33 +3333,41 @@ class Plugin extends AppPlugin {
     return this.isValidSortDir(sortDir) ? sortDir : null;
   }
 
+  getDefaultReferenceSortPreference() {
+    return { sortBy: this._defaultSortBy, sortDir: this._defaultSortDir };
+  }
+
+  normalizeReferenceSortPreference(recordGuid, sortBy, sortDir) {
+    const fallback = this.getDefaultReferenceSortPreference();
+    return {
+      recordGuid: (recordGuid || '').trim(),
+      sortBy: this.normalizeSortBy(sortBy) || fallback.sortBy,
+      sortDir: this.normalizeSortDir(sortDir) || fallback.sortDir
+    };
+  }
+
   getSortPreferenceForRecord(recordGuid) {
+    const fallback = this.getDefaultReferenceSortPreference();
     const guid = (recordGuid || '').trim();
-    const fallback = { sortBy: this._defaultSortBy, sortDir: this._defaultSortDir };
     if (!guid) return fallback;
 
     const raw = this._sortByRecord?.[guid] || null;
     if (!raw || typeof raw !== 'object') return fallback;
 
-    return {
-      sortBy: this.normalizeSortBy(raw.sortBy) || fallback.sortBy,
-      sortDir: this.normalizeSortDir(raw.sortDir) || fallback.sortDir
-    };
+    const pref = this.normalizeReferenceSortPreference(guid, raw.sortBy, raw.sortDir);
+    return { sortBy: pref.sortBy, sortDir: pref.sortDir };
   }
 
   applySortPreferenceForRecord(recordGuid, sortBy, sortDir) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return;
+    const pref = this.normalizeReferenceSortPreference(recordGuid, sortBy, sortDir);
+    if (!pref.recordGuid) return;
 
-    const nextSortBy = this.normalizeSortBy(sortBy) || this._defaultSortBy;
-    const nextSortDir = this.normalizeSortDir(sortDir) || this._defaultSortDir;
-
-    this.setSortPreferenceForRecord(guid, nextSortBy, nextSortDir);
+    this.setSortPreferenceForRecord(pref.recordGuid, pref.sortBy, pref.sortDir);
 
     for (const s of this._panelStates.values()) {
-      if (!s || s.recordGuid !== guid) continue;
-      s.sortBy = nextSortBy;
-      s.sortDir = nextSortDir;
+      if (!s || s.recordGuid !== pref.recordGuid) continue;
+      s.sortBy = pref.sortBy;
+      s.sortDir = pref.sortDir;
       this.renderSortMenu(s);
       this.syncSortControlState(s);
       this.renderFromCache(s);
@@ -3917,22 +3939,19 @@ class Plugin extends AppPlugin {
   }
 
   setSortPreferenceForRecord(recordGuid, sortBy, sortDir) {
-    const guid = (recordGuid || '').trim();
-    if (!guid) return;
-
-    const nextSortBy = this.normalizeSortBy(sortBy) || this._defaultSortBy;
-    const nextSortDir = this.normalizeSortDir(sortDir) || this._defaultSortDir;
+    const pref = this.normalizeReferenceSortPreference(recordGuid, sortBy, sortDir);
+    if (!pref.recordGuid) return;
 
     if (!this._sortByRecord || typeof this._sortByRecord !== 'object') {
       this._sortByRecord = {};
     }
 
-    if (nextSortBy === this._defaultSortBy && nextSortDir === this._defaultSortDir) {
-      delete this._sortByRecord[guid];
+    if (pref.sortBy === this._defaultSortBy && pref.sortDir === this._defaultSortDir) {
+      delete this._sortByRecord[pref.recordGuid];
     } else {
-      this._sortByRecord[guid] = {
-        sortBy: nextSortBy,
-        sortDir: nextSortDir,
+      this._sortByRecord[pref.recordGuid] = {
+        sortBy: pref.sortBy,
+        sortDir: pref.sortDir,
         touchedAt: Date.now()
       };
     }
@@ -4853,26 +4872,7 @@ class Plugin extends AppPlugin {
       return { propertyName, records };
     }).filter((group) => group.records.length > 0);
 
-    groups.sort((a, b) => {
-      const an = (a.propertyName || '').toLowerCase();
-      const bn = (b.propertyName || '').toLowerCase();
-      return an < bn ? -1 : an > bn ? 1 : 0;
-    });
-
-    for (const g of groups) {
-      g.records.sort((a, b) => {
-        const ad = a?.getUpdatedAt?.() || null;
-        const bd = b?.getUpdatedAt?.() || null;
-        const at = ad ? ad.getTime() : 0;
-        const bt = bd ? bd.getTime() : 0;
-        if (bt !== at) return bt - at;
-        const an = (a?.getName?.() || '').toLowerCase();
-        const bn = (b?.getName?.() || '').toLowerCase();
-        return an < bn ? -1 : an > bn ? 1 : 0;
-      });
-    }
-
-    return groups;
+    return this.sortPropertyReferenceGroups(groups);
   }
 
   getPropertyBacklinkResult(targetGuid, { showSelf } = {}) {
@@ -6441,6 +6441,34 @@ class Plugin extends AppPlugin {
 
   // ---------- Grouping + rendering ----------
 
+  comparePropertyReferenceGroupNames(a, b) {
+    const an = (a?.propertyName || '').toLowerCase();
+    const bn = (b?.propertyName || '').toLowerCase();
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  }
+
+  comparePropertyReferenceRecords(a, b) {
+    const ad = a?.getUpdatedAt?.() || null;
+    const bd = b?.getUpdatedAt?.() || null;
+    const at = ad ? ad.getTime() : 0;
+    const bt = bd ? bd.getTime() : 0;
+    if (bt !== at) return bt - at;
+    const an = (a?.getName?.() || '').toLowerCase();
+    const bn = (b?.getName?.() || '').toLowerCase();
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  }
+
+  sortPropertyReferenceGroups(groups) {
+    const out = Array.isArray(groups) ? groups : [];
+    out.sort((a, b) => this.comparePropertyReferenceGroupNames(a, b));
+    for (const group of out) {
+      if (Array.isArray(group?.records)) {
+        group.records.sort((a, b) => this.comparePropertyReferenceRecords(a, b));
+      }
+    }
+    return out;
+  }
+
   async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf } = {}) {
     return this.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf });
   }
@@ -6476,26 +6504,7 @@ class Plugin extends AppPlugin {
       records: Array.from(recordMap.values())
     }));
 
-    groups.sort((a, b) => {
-      const an = (a.propertyName || '').toLowerCase();
-      const bn = (b.propertyName || '').toLowerCase();
-      return an < bn ? -1 : an > bn ? 1 : 0;
-    });
-
-    for (const g of groups) {
-      g.records.sort((a, b) => {
-        const ad = a?.getUpdatedAt?.() || null;
-        const bd = b?.getUpdatedAt?.() || null;
-        const at = ad ? ad.getTime() : 0;
-        const bt = bd ? bd.getTime() : 0;
-        if (bt !== at) return bt - at;
-        const an = (a?.getName?.() || '').toLowerCase();
-        const bn = (b?.getName?.() || '').toLowerCase();
-        return an < bn ? -1 : an > bn ? 1 : 0;
-      });
-    }
-
-    return groups;
+    return this.sortPropertyReferenceGroups(groups);
   }
 
   propertyReferencesGuid(prop, targetGuid) {
@@ -7150,17 +7159,10 @@ class Plugin extends AppPlugin {
   }
 
   filterPropertyGroupsByText(groups, textQueryLower) {
-    const nextGroups = [];
-    for (const group of groups || []) {
-      const propertyName = (group?.propertyName || '').trim();
-      if (!propertyName) continue;
-      const records = (group?.records || []).filter((record) => {
-        const name = (record?.getName?.() || '').toLowerCase();
-        return name.includes(textQueryLower);
-      });
-      if (records.length > 0) nextGroups.push({ propertyName, records });
-    }
-    return nextGroups;
+    return this.filterPropertyGroups(groups, (record) => {
+      const name = (record?.getName?.() || '').toLowerCase();
+      return name.includes(textQueryLower);
+    });
   }
 
   filterLineGroupsByText(groups, textQueryLower) {

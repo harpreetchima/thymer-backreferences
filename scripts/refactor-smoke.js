@@ -1153,7 +1153,7 @@ test('property references recurse through nested raw SDK value objects', () => {
   assert.equal(plugin.propertyReferencesGuid(prop, 'target-guid'), true);
 });
 
-test('property backlink grouping dedupes records and sorts groups by property name', () => {
+test('property backlink grouping dedupes records and sorts groups by property and record recency', () => {
   const plugin = makePlugin();
   const targetGuid = 'target-guid';
   const alpha = makeRecord({
@@ -1171,10 +1171,16 @@ test('property backlink grouping dedupes records and sorts groups by property na
     updatedAt: makeDate('2026-03-11T16:00:00Z'),
     properties: [makeProperty('Project', ['record', targetGuid])]
   });
+  const gamma = makeRecord({
+    guid: 'record-gamma',
+    name: 'Gamma',
+    updatedAt: makeDate('2026-03-11T14:00:00Z'),
+    properties: [makeProperty('Project', ['record', targetGuid])]
+  });
 
-  const groups = plugin.buildPropertyBacklinkGroupsFromRecords([alpha, beta, beta], targetGuid, { showSelf: false });
+  const groups = plugin.buildPropertyBacklinkGroupsFromRecords([alpha, beta, gamma, beta], targetGuid, { showSelf: false });
   assert.deepEqual(groups.map((group) => group.propertyName), ['Entity', 'Project']);
-  assert.deepEqual(groups[1].records.map((record) => record.guid), ['record-beta', 'record-alpha']);
+  assert.deepEqual(groups[1].records.map((record) => record.guid), ['record-beta', 'record-alpha', 'record-gamma']);
 });
 
 test('graph property index serves target pages without per-page discovery', async () => {
@@ -2135,6 +2141,23 @@ test('query-mode helpers distinguish plain text from Thymer query drafts', () =>
   assert.equal(plugin.isIncompleteQueryDraft('@modified_at > "2026-03-01"'), false);
 });
 
+test('scoped query draft input clears pending filter state', () => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  state.searchQuery = '@Sources.';
+  state.queryFilterState = plugin.createQueryFilterState('@Sources.Status = "Active"', { ready: true });
+  state.queryFilterTimer = setTimeout(() => {}, 1000);
+
+  plugin.syncScopedQueryWithCurrentInput(state, { immediate: true });
+
+  assert.equal(plugin.getRunnableScopedQuery(state), '');
+  assert.equal(state.queryFilterState, null);
+  assert.equal(state.queryFilterTimer, null);
+
+  state.searchQuery = '@modified_at > "2026-03-01"';
+  assert.equal(plugin.getRunnableScopedQuery(state), '@modified_at > "2026-03-01"');
+});
+
 test('scoped query helpers preserve matching property and line groups', () => {
   const plugin = makePlugin();
   const alpha = makeRecord({ guid: 'record-alpha', name: 'Alpha' });
@@ -2150,16 +2173,18 @@ test('scoped query helpers preserve matching property and line groups', () => {
 
   const propertyState = plugin.createQueryFilterState('@Journey.Status = "Active"', {
     ready: true,
-    matchedRecordGuids: new Set([beta.guid])
+    matchedLineRecordGuids: new Set([beta.guid])
   });
   const lineState = plugin.createQueryFilterState('@Journey.Status = "Active"', {
     ready: true,
     matchedLineGuids: new Set(['line-2'])
   });
 
+  const filteredBySet = plugin.filterPropertyGroupsByRecordSet(propertyGroups, new Set([alpha.guid]));
   const filteredProps = plugin.filterPropertyGroupsByScopedQuery(propertyGroups, propertyState);
   const filteredLines = plugin.filterLineGroupsByScopedQuery(linkedGroups, lineState);
 
+  assert.deepEqual(filteredBySet[0].records.map((record) => record.guid), ['record-alpha']);
   assert.deepEqual(filteredProps[0].records.map((record) => record.guid), ['record-beta']);
   assert.deepEqual(filteredLines[0].lines.map((line) => line.guid), ['line-2']);
 });
@@ -2566,6 +2591,46 @@ test('stored preferences prune oldest entries by recency', () => {
     assert.deepEqual(Object.keys(pagePrefs).sort(), ['beta', 'gamma']);
     assert.deepEqual(Object.keys(sortPrefs).sort(), ['beta', 'gamma']);
     assert.deepEqual(recordGroups, ['linked:target:beta', 'linked:target:gamma']);
+  } finally {
+    global.localStorage = previousLocalStorage;
+  }
+});
+
+test('sort preferences normalize invalid values and persist only overrides', () => {
+  const plugin = makePlugin();
+  const previousLocalStorage = global.localStorage;
+  const store = new Map();
+  global.localStorage = {
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      store.set(key, value);
+    }
+  };
+
+  try {
+    plugin._storageKeySortByRecord = 'test-sort-prefs';
+    plugin._sortByRecord = {};
+
+    plugin.setSortPreferenceForRecord('record-1', 'reference_count', 'asc');
+    assert.deepEqual(plugin.getSortPreferenceForRecord('record-1'), {
+      sortBy: 'reference_count',
+      sortDir: 'asc'
+    });
+
+    let saved = JSON.parse(store.get('test-sort-prefs'));
+    assert.equal(saved['record-1'].sortBy, 'reference_count');
+    assert.equal(saved['record-1'].sortDir, 'asc');
+    assert.equal(typeof saved['record-1'].touchedAt, 'number');
+
+    plugin.setSortPreferenceForRecord('record-1', 'not-a-sort', 'sideways');
+    saved = JSON.parse(store.get('test-sort-prefs'));
+    assert.equal(Object.prototype.hasOwnProperty.call(saved, 'record-1'), false);
+    assert.deepEqual(plugin.getSortPreferenceForRecord('record-1'), {
+      sortBy: 'page_last_edited',
+      sortDir: 'desc'
+    });
   } finally {
     global.localStorage = previousLocalStorage;
   }
