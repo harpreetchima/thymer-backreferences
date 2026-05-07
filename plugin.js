@@ -633,76 +633,157 @@ class Plugin extends AppPlugin {
   // ---------- Panel lifecycle ----------
 
   handlePanelChanged(panel, reason) {
-    const panelId = panel?.getId?.() || null;
-    if (!panelId) return;
+    const context = this.getPanelChangeContext(panel);
+    if (!context) return;
 
-    const panelEl = panel?.getElement?.() || null;
-    if (this.shouldSuppressInPanel(panel, panelEl)) {
-      this.disposePanelState(panelId);
-      return;
-    }
+    const { state, recordGuid } = context;
+    const recordChanged = this.syncPanelStateForRecord(state, context.record, recordGuid);
+    if (!this.mountVisiblePanelState(context.panel, state)) return;
 
-    const mountContainer = this.findMountContainer(panelEl);
-    if (!mountContainer) {
-      this.disposePanelState(panelId);
-      return;
-    }
+    this.schedulePanelChangedRefresh(context.panel, state, { reason, recordChanged });
+  }
 
-    const record = panel?.getActiveRecord?.() || null;
-    const recordGuid = record?.guid || null;
+  getPanelChangeContext(panel) {
+    const mountContext = this.getPanelMountContext(panel);
+    if (!mountContext) return null;
 
-    if (!recordGuid) {
-      // If the panel no longer shows a record, remove our footer.
-      this.disposePanelState(panelId);
-      return;
-    }
+    const { panelId } = mountContext;
+    const recordContext = this.getPanelRecordContext(panel);
+    if (!recordContext) return this.disposePanelStateForMissingRecord(panelId);
 
     const state = this.getOrCreatePanelState(panel);
+    return { panel, ...mountContext, ...recordContext, state };
+  }
+
+  getPanelMountContext(panel) {
+    const panelId = this.getPanelId(panel);
+    if (!panelId) return null;
+
+    const panelEl = this.getPanelElement(panel);
+    if (this.shouldSuppressInPanel(panel, panelEl)) return this.disposePanelStateAndReturnNull(panelId);
+
+    const mountContainer = this.findMountContainer(panelEl);
+    if (!mountContainer) return this.disposePanelStateAndReturnNull(panelId);
+
+    return { panelId, panelEl, mountContainer };
+  }
+
+  getPanelId(panel) {
+    if (!panel || typeof panel.getId !== 'function') return null;
+    return panel.getId() || null;
+  }
+
+  getPanelElement(panel) {
+    if (!panel || typeof panel.getElement !== 'function') return null;
+    return panel.getElement() || null;
+  }
+
+  getPanelRecordContext(panel) {
+    const record = this.getPanelActiveRecord(panel);
+    const recordGuid = this.getRecordGuid(record);
+    return recordGuid ? { record, recordGuid } : null;
+  }
+
+  getPanelActiveRecord(panel) {
+    if (!panel || typeof panel.getActiveRecord !== 'function') return null;
+    return panel.getActiveRecord() || null;
+  }
+
+  getRecordGuid(record) {
+    return record?.guid || null;
+  }
+
+  disposePanelStateAndReturnNull(panelId) {
+    this.disposePanelState(panelId);
+    return null;
+  }
+
+  disposePanelStateForMissingRecord(panelId) {
+    // If the panel no longer shows a record, remove our footer.
+    return this.disposePanelStateAndReturnNull(panelId);
+  }
+
+  syncPanelStateForRecord(state, record, recordGuid) {
+    this.ensurePanelStatePreferenceShape(state);
+    const recordChanged = this.updatePanelRecordIdentity(state, record, recordGuid);
+    if (recordChanged) this.applyPanelRecordViewPreferences(state, recordGuid);
+
+    if (this.shouldResetPanelRecordRuntimeState(state, recordChanged)) {
+      this.resetPanelRecordRuntimeState(state, recordGuid);
+    }
+
+    return recordChanged;
+  }
+
+  ensurePanelStatePreferenceShape(state) {
     if (!state.sectionCollapsed || typeof state.sectionCollapsed !== 'object') {
       state.sectionCollapsed = this.createDefaultSectionCollapsedState();
     }
     if (state.footerCollapsed !== true && state.footerCollapsed !== false) {
       state.footerCollapsed = null;
     }
+  }
+
+  updatePanelRecordIdentity(state, record, recordGuid) {
     const recordChanged = state.recordGuid !== recordGuid;
     state.recordGuid = recordGuid;
     this.updatePanelStateRecordCache(state, record);
-    if (recordChanged) {
-      const viewPrefs = this.getPageViewPreference(recordGuid);
-      state.footerCollapsed = viewPrefs.footerCollapsed;
-      state.sectionCollapsed = this.cloneSectionCollapsedState(viewPrefs.sections);
-    }
+    return recordChanged;
+  }
 
-    if (recordChanged || !this.isValidSortBy(state.sortBy) || !this.isValidSortDir(state.sortDir)) {
-      state.linkedContextByLine = new Map();
-      state.searchAutocompleteItems = [];
-      state.searchAutocompleteSelectedIndex = 0;
-      state.searchAutocompleteOpen = false;
-      state.liveBaselineSnapshot = null;
-      state.liveCurrentSnapshot = null;
-      state.liveNewKeys = new Set();
-      state.liveRemoteBadgesByKey = new Map();
-      state.pendingRemoteSync = false;
-      state.pendingRemoteUsers = new Set();
-      if (state.queryFilterTimer) {
-        clearTimeout(state.queryFilterTimer);
-        state.queryFilterTimer = null;
-      }
-      state.queryFilterState = null;
-      const pref = this.getSortPreferenceForRecord(recordGuid);
-      state.sortBy = pref.sortBy;
-      state.sortDir = pref.sortDir;
-      state.sortMenuOpen = false;
-      state.searchOpen = Boolean((state.searchQuery || '').trim());
-    }
+  applyPanelRecordViewPreferences(state, recordGuid) {
+    const viewPrefs = this.getPageViewPreference(recordGuid);
+    state.footerCollapsed = viewPrefs.footerCollapsed;
+    state.sectionCollapsed = this.cloneSectionCollapsedState(viewPrefs.sections);
+  }
 
+  shouldResetPanelRecordRuntimeState(state, recordChanged) {
+    if (recordChanged) return true;
+    if (!this.isValidSortBy(state.sortBy)) return true;
+    return !this.isValidSortDir(state.sortDir);
+  }
+
+  resetPanelRecordRuntimeState(state, recordGuid) {
+    state.linkedContextByLine = new Map();
+    state.searchAutocompleteItems = [];
+    state.searchAutocompleteSelectedIndex = 0;
+    state.searchAutocompleteOpen = false;
+    state.liveBaselineSnapshot = null;
+    state.liveCurrentSnapshot = null;
+    state.liveNewKeys = new Set();
+    state.liveRemoteBadgesByKey = new Map();
+    state.pendingRemoteSync = false;
+    state.pendingRemoteUsers = new Set();
+    this.clearPanelQueryFilterTimer(state);
+    state.queryFilterState = null;
+    this.applyPanelSortPreference(state, recordGuid);
+    state.sortMenuOpen = false;
+    state.searchOpen = Boolean((state.searchQuery || '').trim());
+  }
+
+  clearPanelQueryFilterTimer(state) {
+    if (!state.queryFilterTimer) return;
+    clearTimeout(state.queryFilterTimer);
+    state.queryFilterTimer = null;
+  }
+
+  applyPanelSortPreference(state, recordGuid) {
+    const pref = this.getSortPreferenceForRecord(recordGuid);
+    state.sortBy = pref.sortBy;
+    state.sortDir = pref.sortDir;
+  }
+
+  mountVisiblePanelState(panel, state) {
     if (this.isPanelVisible(panel)) {
       this.mountFooter(panel, state);
+      return true;
     } else {
       this.unmountFooterForHiddenPanel(state);
-      return;
+      return false;
     }
+  }
 
+  schedulePanelChangedRefresh(panel, state, { reason, recordChanged } = {}) {
     if (this.shouldSkipPanelChangedRefresh(state, { reason, recordChanged })) {
       if (state.lastResults) this.renderFromCache(state);
       return;
@@ -5408,48 +5489,54 @@ class Plugin extends AppPlugin {
 
     const [propertySettled, unlinkedSettled] = await Promise.allSettled(followupPromises);
 
-    let propertyError = '';
-    let propertyGroups = [];
-    if (propertySettled.status === 'fulfilled') {
-      propertyError = propertySettled.value?.propertyError || '';
-      propertyGroups = Array.isArray(propertySettled.value?.propertyGroups)
-        ? propertySettled.value.propertyGroups
-        : [];
-    } else {
-      propertyError = 'Error loading property references.';
-    }
-
+    const property = this.resolvePropertyFollowupResult(propertySettled);
     const unlinkedDeferred = Boolean(recordName) && !shouldLoadUnlinked;
-    let unlinkedError = '';
-    let unlinkedGroups = [];
-    if (recordName && shouldLoadUnlinked) {
-      if (unlinkedSettled.status === 'fulfilled') {
-        unlinkedError = unlinkedSettled.value?.unlinkedError || '';
-        unlinkedGroups = Array.isArray(unlinkedSettled.value?.unlinkedGroups)
-          ? unlinkedSettled.value.unlinkedGroups
-          : [];
-      } else {
-        unlinkedError = 'Error loading unlinked references.';
-      }
-    }
+    const unlinked = this.resolveUnlinkedFollowupResult(unlinkedSettled, {
+      shouldLoad: Boolean(recordName) && shouldLoadUnlinked
+    });
 
     return {
-      propertyError,
-      propertyGroups,
-      propertyIndexStatus: propertySettled.status === 'fulfilled'
-        ? propertySettled.value?.propertyIndexStatus || 'idle'
-        : 'error',
-      propertyIndexStats: propertySettled.status === 'fulfilled'
-        ? propertySettled.value?.propertyIndexStats || this.createEmptyPropertyIndexStats()
-        : this.createEmptyPropertyIndexStats(),
-      propertyIndexError: propertySettled.status === 'fulfilled'
-        ? propertySettled.value?.propertyIndexError || ''
-        : 'Error loading property references.',
-      unlinkedError,
-      unlinkedGroups,
+      ...property,
+      ...unlinked,
       unlinkedDeferred,
       unlinkedLoading: false,
       maxResults
+    };
+  }
+
+  resolvePropertyFollowupResult(propertySettled) {
+    if (propertySettled?.status !== 'fulfilled') {
+      return {
+        propertyError: 'Error loading property references.',
+        propertyGroups: [],
+        propertyIndexStatus: 'error',
+        propertyIndexStats: this.createEmptyPropertyIndexStats(),
+        propertyIndexError: 'Error loading property references.'
+      };
+    }
+
+    const value = propertySettled.value || {};
+    return {
+      propertyError: value.propertyError || '',
+      propertyGroups: Array.isArray(value.propertyGroups) ? value.propertyGroups : [],
+      propertyIndexStatus: value.propertyIndexStatus || 'idle',
+      propertyIndexStats: value.propertyIndexStats || this.createEmptyPropertyIndexStats(),
+      propertyIndexError: value.propertyIndexError || ''
+    };
+  }
+
+  resolveUnlinkedFollowupResult(unlinkedSettled, { shouldLoad } = {}) {
+    if (shouldLoad !== true) {
+      return { unlinkedError: '', unlinkedGroups: [] };
+    }
+    if (unlinkedSettled?.status !== 'fulfilled') {
+      return { unlinkedError: 'Error loading unlinked references.', unlinkedGroups: [] };
+    }
+
+    const value = unlinkedSettled.value || {};
+    return {
+      unlinkedError: value.unlinkedError || '',
+      unlinkedGroups: Array.isArray(value.unlinkedGroups) ? value.unlinkedGroups : []
     };
   }
 
@@ -5491,56 +5578,116 @@ class Plugin extends AppPlugin {
   }
 
   async ensureDeferredDateReferencesLoaded(state) {
-    const results = state?.lastResults || null;
-    if (!state || !results) return;
-    if (results.linkedDateDeferred !== true) return;
-    if (results.linkedDateLoading === true) return;
-
-    const panel = state.panel || null;
-    const record = panel?.getActiveRecord?.() || null;
-    const recordGuid = record?.guid || state.recordGuid || null;
-    const recordName = (record?.getName?.() || '').trim();
-    const dateIso = results.linkedDateIso || this.getRecordDateReferenceIso(record, recordName);
-    if (!recordGuid || !dateIso) return;
-
-    const seq = state.refreshSeq || 0;
-    results.linkedDateLoading = true;
-    const perf = this.perfCreate('deferred-date-linked', {
-      panelId: state.panelId || '',
-      recordGuid,
-      dateIso
-    });
+    const request = this.getDeferredDateLoadRequest(state);
+    if (!request) return;
+    const { results, context } = request;
+    const perf = this.beginDeferredDateLoad(state, results, context);
 
     try {
-      const { maxResults, showSelf } = this.getRefreshConfig();
-      const searchStartedAt = this.perfNow();
-      const dateResult = await this.timedSearchByQuery(`@date = "${dateIso}"`, maxResults, perf, 'datetime');
-      this.perfStep(perf, 'date linked search total', searchStartedAt);
+      const loadResult = await this.loadDeferredDateSearchResult(context, perf);
 
-      if (!this._panelStates.has(state.panelId)) return;
-      if (state.lastResults !== results) return;
-      if (state.refreshSeq !== seq) return;
-      if ((state.recordGuid || '') !== recordGuid) return;
-
-      if (dateResult?.error) {
-        results.linkedError = results.linkedError || dateResult.error;
-        results.linkedDateDeferred = false;
-        results.linkedDateLoading = false;
-        return;
+      if (this.isDeferredLoadCurrent(state, results, context.seq, context.recordGuid)) {
+        this.applyDeferredDateLoadResult(state, results, context, loadResult);
       }
-
-      const existingLines = this.collectLinkedReferenceLines(results.linkedGroups);
-      const mergedLines = this.mergeLinkedReferenceLines(existingLines, dateResult?.lines || []);
-      results.linkedGroups = this.groupBacklinkLines(mergedLines, recordGuid, { showSelf });
-      results.linkedDateDeferred = false;
-      results.linkedDateLoading = false;
-      this.applyRenderedResults(state, results, 'deferred-date-linked-loaded');
     } finally {
       if (results.linkedDateLoading === true && state.lastResults === results) {
         results.linkedDateLoading = false;
       }
       this.perfLog(perf);
     }
+  }
+
+  getDeferredDateLoadRequest(state) {
+    const results = state?.lastResults || null;
+    if (!state || !this.shouldLoadDeferredDateReferences(results)) return null;
+    const context = this.getDeferredDateLoadContext(state, results);
+    return context ? { results, context } : null;
+  }
+
+  shouldLoadDeferredDateReferences(results) {
+    return results?.linkedDateDeferred === true && results.linkedDateLoading !== true;
+  }
+
+  beginDeferredDateLoad(state, results, { recordGuid, dateIso }) {
+    results.linkedDateLoading = true;
+    return this.perfCreate('deferred-date-linked', {
+      panelId: state.panelId || '',
+      recordGuid,
+      dateIso
+    });
+  }
+
+  async loadDeferredDateSearchResult({ dateIso }, perf) {
+    const { maxResults, showSelf } = this.getRefreshConfig();
+    const searchStartedAt = this.perfNow();
+    const dateResult = await this.timedSearchByQuery(`@date = "${dateIso}"`, maxResults, perf, 'datetime');
+    this.perfStep(perf, 'date linked search total', searchStartedAt);
+    return { dateResult, showSelf };
+  }
+
+  applyDeferredDateLoadResult(state, results, context, { dateResult, showSelf }) {
+    if (dateResult?.error) {
+      this.applyDeferredDateError(results, dateResult.error);
+      return;
+    }
+
+    this.applyDeferredDateResults(results, context.recordGuid, dateResult, { showSelf });
+    this.applyRenderedResults(state, results, 'deferred-date-linked-loaded');
+  }
+
+  getDeferredDateLoadContext(state, results) {
+    const context = this.getDeferredRecordLoadContext(state);
+    if (!context) return null;
+    const dateIso = results?.linkedDateIso || this.getRecordDateReferenceIso(context.record, context.recordName);
+    return dateIso ? { ...context, dateIso } : null;
+  }
+
+  getDeferredRecordLoadContext(state) {
+    const panel = this.getDeferredPanel(state);
+    const record = this.getPanelActiveRecord(panel);
+    const recordGuid = this.getDeferredRecordGuid(state, record);
+    if (!recordGuid) return null;
+    return {
+      panel,
+      record,
+      recordGuid,
+      recordName: this.getDeferredRecordName(record),
+      seq: state.refreshSeq || 0
+    };
+  }
+
+  getDeferredPanel(state) {
+    return state?.panel || null;
+  }
+
+  getDeferredRecordGuid(state, record) {
+    if (record?.guid) return record.guid;
+    return state?.recordGuid || null;
+  }
+
+  getDeferredRecordName(record) {
+    return (record?.getName?.() || '').trim();
+  }
+
+  isDeferredLoadCurrent(state, results, seq, recordGuid) {
+    if (!this._panelStates.has(state?.panelId)) return false;
+    if (state.lastResults !== results) return false;
+    if (state.refreshSeq !== seq) return false;
+    return (state.recordGuid || '') === recordGuid;
+  }
+
+  applyDeferredDateError(results, error) {
+    results.linkedError = results.linkedError || error;
+    results.linkedDateDeferred = false;
+    results.linkedDateLoading = false;
+  }
+
+  applyDeferredDateResults(results, recordGuid, dateResult, { showSelf } = {}) {
+    const existingLines = this.collectLinkedReferenceLines(results.linkedGroups);
+    const mergedLines = this.mergeLinkedReferenceLines(existingLines, dateResult?.lines || []);
+    results.linkedGroups = this.groupBacklinkLines(mergedLines, recordGuid, { showSelf });
+    results.linkedDateDeferred = false;
+    results.linkedDateLoading = false;
   }
 
   applyRenderedResults(state, results, reason) {
@@ -5576,40 +5723,52 @@ class Plugin extends AppPlugin {
     const limit = this.coerceNonNegativeInt(opts.limit, this._defaultContextPreloadMaxLines);
     if (limit === 0) return out;
 
-    const appendGroups = (groups, sectionId) => {
-      for (const group of groups || []) {
-        const recordGuid = group?.record?.guid || '';
-        if (
-          opts.state
-          && recordGuid
-          && this.isRecordGroupCollapsed(sectionId, opts.state.recordGuid || '', recordGuid)
-        ) {
-          continue;
-        }
-        for (const line of group?.lines || []) {
-          const guid = line?.guid || '';
-          if (!guid || seen.has(guid)) continue;
-          if (typeof line?.getTreeContext !== 'function') continue;
-          seen.add(guid);
-          out.push(line);
-          if (out.length >= limit) return;
-        }
-        if (out.length >= limit) return;
-      }
-    };
-
     if (opts.includeLinked !== false) {
-      appendGroups(results?.linkedGroups || [], 'linked');
+      this.appendContextPreloadGroupLines(out, seen, results?.linkedGroups || [], 'linked', opts, limit);
     }
-    if (
-      out.length < limit
-      && opts.includeUnlinked !== false
-      && results?.unlinkedDeferred !== true
-      && results?.unlinkedLoading !== true
-    ) {
-      appendGroups(results?.unlinkedGroups || [], 'unlinked');
+    if (this.shouldCollectUnlinkedContextPreload(out, results, opts, limit)) {
+      this.appendContextPreloadGroupLines(out, seen, results?.unlinkedGroups || [], 'unlinked', opts, limit);
     }
     return out;
+  }
+
+  shouldCollectUnlinkedContextPreload(out, results, opts, limit) {
+    if (out.length >= limit) return false;
+    if (opts.includeUnlinked === false) return false;
+    if (results?.unlinkedDeferred === true) return false;
+    return results?.unlinkedLoading !== true;
+  }
+
+  appendContextPreloadGroupLines(out, seen, groups, sectionId, opts, limit) {
+    for (const group of groups || []) {
+      if (this.appendContextPreloadGroupLineSet(out, seen, group, sectionId, opts, limit)) return;
+    }
+  }
+
+  appendContextPreloadGroupLineSet(out, seen, group, sectionId, opts, limit) {
+    if (this.shouldSkipContextPreloadGroup(group, sectionId, opts)) return false;
+    for (const line of group?.lines || []) {
+      if (this.appendContextPreloadLine(out, seen, line, limit)) return true;
+    }
+    return out.length >= limit;
+  }
+
+  shouldSkipContextPreloadGroup(group, sectionId, opts) {
+    const recordGuid = group?.record?.guid || '';
+    return Boolean(
+      opts?.state
+      && recordGuid
+      && this.isRecordGroupCollapsed(sectionId, opts.state.recordGuid || '', recordGuid)
+    );
+  }
+
+  appendContextPreloadLine(out, seen, line, limit) {
+    const guid = line?.guid || '';
+    if (!guid || seen.has(guid)) return false;
+    if (typeof line?.getTreeContext !== 'function') return false;
+    seen.add(guid);
+    out.push(line);
+    return out.length >= limit;
   }
 
   async preloadContextAvailability(panelId, seq, results) {
@@ -5646,107 +5805,21 @@ class Plugin extends AppPlugin {
   }
 
   async refreshPanel(panelId, { reason } = {}) {
-    const state = this._panelStates.get(panelId) || null;
-    const panel = state?.panel || null;
-    if (!state || !panel) return;
-
-    const record = panel.getActiveRecord?.() || null;
-    const recordGuid = record?.guid || null;
-    if (!recordGuid) return;
-
-    // Keep state in sync in case of churn.
-    state.recordGuid = recordGuid;
-
-    if (!this.isPanelVisible(panel)) {
-      this.unmountFooterForHiddenPanel(state);
-      return;
-    }
-
-    if (!state.rootEl || !state.rootEl.isConnected) {
-      this.mountFooter(panel, state);
-    }
-
-    if (!state.bodyEl || !state.countEl) return;
-
-    const seq = (state.refreshSeq || 0) + 1;
-    state.refreshSeq = seq;
-    const perf = this.perfCreate('refresh', {
-      reason: reason || '',
-      panelId
-    });
-
-    this.setLoadingState(state, true);
+    const context = this.prepareRefreshPanelContext(panelId, { reason });
+    if (!context) return;
+    const { state, record, recordGuid, seq, perf } = context;
 
     try {
-      const { maxResults, showSelf } = this.getRefreshConfig();
-
-      const recordName = (record?.getName?.() || '').trim();
-      const linkedDateIso = this.getRecordDateReferenceIso(record, recordName);
-      const deferLinkedDateSearch = Boolean(linkedDateIso);
-      const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
-      const linkedStartedAt = this.perfNow();
-      const linkedSearchPromise = this.runLinkedReferenceSearch(recordGuid, maxResults, {
-        targetRecord: record,
-        perf,
-        includeDatetime: !deferLinkedDateSearch
-      });
-      const unlinkedSearchPromise = shouldLoadUnlinked
-        ? this.runUnlinkedReferenceSearch(recordName, maxResults, { perf })
-        : null;
-      const searchSettled = await linkedSearchPromise;
-      this.perfStep(perf, 'linked search total', linkedStartedAt);
+      const plan = this.createRefreshLoadPlan(context);
+      const linkedResults = await this.loadRefreshLinkedResults(recordGuid, plan, perf);
 
       if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
-      const resolveStartedAt = this.perfNow();
-      const { linkedError, linkedGroups } = this.resolveLinkedReferenceSearch(
-        searchSettled,
-        recordGuid,
-        { showSelf }
-      );
-      this.perfStep(perf, 'group linked results', resolveStartedAt, {
-        linkedGroups: linkedGroups.length,
-        linkedRefs: this.countLinkedReferences(linkedGroups)
-      });
-
-      const followupStartedAt = this.perfNow();
-      const followupResults = await this.loadFollowupReferenceResults(state, record, {
-        recordGuid,
-        recordName,
-        maxResults,
-        showSelf,
-        linkedGroups,
-        perf,
-        unlinkedSearchPromise
-      });
-      this.perfStep(perf, 'load followup results', followupStartedAt, {
-        propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
-        unlinkedGroups: Array.isArray(followupResults.unlinkedGroups) ? followupResults.unlinkedGroups.length : 0,
-        unlinkedRefs: this.countLinkedReferences(followupResults.unlinkedGroups || [])
-      });
+      const followupResults = await this.loadRefreshFollowupResults(context, plan, linkedResults.linkedGroups);
 
       if (!this.isRefreshStateCurrent(panelId, state, seq)) return;
 
-      const applyStartedAt = this.perfNow();
-      this.applyRefreshedResults(state, {
-        ...followupResults,
-        linkedGroups,
-        linkedError,
-        linkedDateDeferred: deferLinkedDateSearch,
-        linkedDateLoading: false,
-        linkedDateIso
-      }, { reason: reason || 'refresh' });
-      this.perfStep(perf, 'apply and render results', applyStartedAt);
-      this.perfCount(perf, {
-        linkedGroups: linkedGroups.length,
-        linkedRefs: this.countLinkedReferences(linkedGroups),
-        linkedDateDeferred: deferLinkedDateSearch,
-        propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
-        propertyRefs: (followupResults.propertyGroups || []).reduce((n, group) => n + (group?.records?.length || 0), 0),
-        unlinkedDeferred: followupResults.unlinkedDeferred === true,
-        unlinkedGroups: Array.isArray(followupResults.unlinkedGroups) ? followupResults.unlinkedGroups.length : 0,
-        unlinkedRefs: this.countLinkedReferences(followupResults.unlinkedGroups || [])
-      });
+      this.applyRefreshPanelResults(context, plan, linkedResults, followupResults, { reason });
     } finally {
       if (this.isRefreshStateCurrent(panelId, state, seq)) {
         this.setLoadingState(state, false);
@@ -5755,56 +5828,215 @@ class Plugin extends AppPlugin {
     }
   }
 
-  async ensureDeferredUnlinkedLoaded(state) {
-    const results = state?.lastResults || null;
-    if (!state || !results) return;
-    if (results.unlinkedDeferred !== true) return;
-    if (results.unlinkedLoading === true) return;
-    const perf = this.perfCreate('deferred-unlinked', {
-      panelId: state.panelId || ''
+  prepareRefreshPanelContext(panelId, { reason } = {}) {
+    const panelState = this.getRefreshPanelState(panelId);
+    if (!panelState) return null;
+
+    const recordState = this.getRefreshRecordState(panelState);
+    if (!recordState) return null;
+
+    if (!this.ensureRefreshPanelMounted(panelState)) return null;
+
+    const { state, panel } = panelState;
+    const perf = this.perfCreate('refresh', {
+      reason: reason || '',
+      panelId
     });
+    const seq = this.advanceRefreshSeq(state);
+    this.setLoadingState(state, true);
+    return { panelId, state, panel, ...recordState, seq, perf };
+  }
 
-    const panel = state.panel || null;
-    const record = panel?.getActiveRecord?.() || null;
-    const recordGuid = record?.guid || state.recordGuid || null;
+  getRefreshPanelState(panelId) {
+    const state = this._panelStates.get(panelId) || null;
+    const panel = state?.panel || null;
+    return state && panel ? { state, panel } : null;
+  }
+
+  getRefreshRecordState({ state, panel }) {
+    const record = panel.getActiveRecord?.() || null;
+    const recordGuid = record?.guid || null;
+    if (!recordGuid) return null;
+    state.recordGuid = recordGuid;
+    return { record, recordGuid };
+  }
+
+  ensureRefreshPanelMounted({ state, panel }) {
+    if (!this.isPanelVisible(panel)) {
+      this.unmountFooterForHiddenPanel(state);
+      return false;
+    }
+    if (!state.rootEl || !state.rootEl.isConnected) {
+      this.mountFooter(panel, state);
+    }
+    return Boolean(state.bodyEl && state.countEl);
+  }
+
+  advanceRefreshSeq(state) {
+    const seq = (state.refreshSeq || 0) + 1;
+    state.refreshSeq = seq;
+    return seq;
+  }
+
+  createRefreshLoadPlan({ state, record, recordGuid, perf }) {
+    const { maxResults, showSelf } = this.getRefreshConfig();
     const recordName = (record?.getName?.() || '').trim();
-    if (!recordGuid || !recordName) return;
+    const linkedDateIso = this.getRecordDateReferenceIso(record, recordName);
+    const deferLinkedDateSearch = Boolean(linkedDateIso);
+    const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
+    const linkedStartedAt = this.perfNow();
+    const linkedSearchPromise = this.runLinkedReferenceSearch(recordGuid, maxResults, {
+      targetRecord: record,
+      perf,
+      includeDatetime: !deferLinkedDateSearch
+    });
+    const unlinkedSearchPromise = shouldLoadUnlinked
+      ? this.runUnlinkedReferenceSearch(recordName, maxResults, { perf })
+      : null;
+    return {
+      maxResults,
+      showSelf,
+      recordName,
+      linkedDateIso,
+      deferLinkedDateSearch,
+      shouldLoadUnlinked,
+      linkedStartedAt,
+      linkedSearchPromise,
+      unlinkedSearchPromise
+    };
+  }
 
-    const seq = state.refreshSeq || 0;
+  async loadRefreshLinkedResults(recordGuid, plan, perf) {
+    const searchSettled = await plan.linkedSearchPromise;
+    this.perfStep(perf, 'linked search total', plan.linkedStartedAt);
+
+    const resolveStartedAt = this.perfNow();
+    const linkedResults = this.resolveLinkedReferenceSearch(
+      searchSettled,
+      recordGuid,
+      { showSelf: plan.showSelf }
+    );
+    this.perfStep(perf, 'group linked results', resolveStartedAt, {
+      linkedGroups: linkedResults.linkedGroups.length,
+      linkedRefs: this.countLinkedReferences(linkedResults.linkedGroups)
+    });
+    return linkedResults;
+  }
+
+  async loadRefreshFollowupResults({ state, record, recordGuid, perf }, plan, linkedGroups) {
+    const followupStartedAt = this.perfNow();
+    const followupResults = await this.loadFollowupReferenceResults(state, record, {
+      recordGuid,
+      recordName: plan.recordName,
+      maxResults: plan.maxResults,
+      showSelf: plan.showSelf,
+      linkedGroups,
+      perf,
+      unlinkedSearchPromise: plan.unlinkedSearchPromise
+    });
+    this.perfStep(perf, 'load followup results', followupStartedAt, {
+      propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
+      unlinkedGroups: Array.isArray(followupResults.unlinkedGroups) ? followupResults.unlinkedGroups.length : 0,
+      unlinkedRefs: this.countLinkedReferences(followupResults.unlinkedGroups || [])
+    });
+    return followupResults;
+  }
+
+  applyRefreshPanelResults({ state, perf }, plan, linkedResults, followupResults, { reason } = {}) {
+    const applyStartedAt = this.perfNow();
+    this.applyRefreshedResults(state, {
+      ...followupResults,
+      linkedGroups: linkedResults.linkedGroups,
+      linkedError: linkedResults.linkedError,
+      linkedDateDeferred: plan.deferLinkedDateSearch,
+      linkedDateLoading: false,
+      linkedDateIso: plan.linkedDateIso
+    }, { reason: reason || 'refresh' });
+    this.perfStep(perf, 'apply and render results', applyStartedAt);
+    this.perfCount(perf, {
+      linkedGroups: linkedResults.linkedGroups.length,
+      linkedRefs: this.countLinkedReferences(linkedResults.linkedGroups),
+      linkedDateDeferred: plan.deferLinkedDateSearch,
+      propertyGroups: Array.isArray(followupResults.propertyGroups) ? followupResults.propertyGroups.length : 0,
+      propertyRefs: (followupResults.propertyGroups || []).reduce((n, group) => n + (group?.records?.length || 0), 0),
+      unlinkedDeferred: followupResults.unlinkedDeferred === true,
+      unlinkedGroups: Array.isArray(followupResults.unlinkedGroups) ? followupResults.unlinkedGroups.length : 0,
+      unlinkedRefs: this.countLinkedReferences(followupResults.unlinkedGroups || [])
+    });
+  }
+
+  async ensureDeferredUnlinkedLoaded(state) {
+    const request = this.getDeferredUnlinkedLoadRequest(state);
+    if (!request) return;
+    const { results, context } = request;
+    const perf = this.beginDeferredUnlinkedLoad(state, results);
+
+    const loadResult = await this.loadDeferredUnlinkedGroups(results, context, perf);
+
+    if (!this.isDeferredLoadCurrent(state, results, context.seq, context.recordGuid)) return;
+
+    this.applyDeferredUnlinkedLoadResult(state, results, loadResult);
+    this.perfLog(perf);
+  }
+
+  getDeferredUnlinkedLoadRequest(state) {
+    const results = state?.lastResults || null;
+    if (!state || !this.shouldLoadDeferredUnlinkedReferences(results)) return null;
+    const context = this.getDeferredUnlinkedLoadContext(state);
+    return context ? { results, context } : null;
+  }
+
+  shouldLoadDeferredUnlinkedReferences(results) {
+    return results?.unlinkedDeferred === true && results.unlinkedLoading !== true;
+  }
+
+  beginDeferredUnlinkedLoad(state, results) {
     results.unlinkedLoading = true;
     results.unlinkedError = '';
     this.renderFromCache(state);
+    return this.perfCreate('deferred-unlinked', {
+      panelId: state.panelId || ''
+    });
+  }
 
+  async loadDeferredUnlinkedGroups(results, context, perf) {
     const { maxResults, showSelf } = this.getRefreshConfig();
     const loadStartedAt = this.perfNow();
-    const { unlinkedGroups: nextGroups, unlinkedError: nextError } = await this.loadUnlinkedReferenceGroups(
-      recordName,
+    const loadResult = await this.loadUnlinkedReferenceGroups(
+      context.recordName,
       maxResults,
       {
-        recordGuid,
+        recordGuid: context.recordGuid,
         linkedGroups: Array.isArray(results.linkedGroups) ? results.linkedGroups : [],
         showSelf,
         perf
       }
     );
     this.perfStep(perf, 'load unlinked groups', loadStartedAt, {
-      unlinkedGroups: Array.isArray(nextGroups) ? nextGroups.length : 0,
-      unlinkedRefs: this.countLinkedReferences(nextGroups || [])
+      unlinkedGroups: Array.isArray(loadResult.unlinkedGroups) ? loadResult.unlinkedGroups.length : 0,
+      unlinkedRefs: this.countLinkedReferences(loadResult.unlinkedGroups || [])
     });
+    return loadResult;
+  }
 
-    if (!this._panelStates.has(state.panelId)) return;
-    if (state.lastResults !== results) return;
-    if (state.refreshSeq !== seq) return;
-    if ((state.recordGuid || '') !== recordGuid) return;
+  applyDeferredUnlinkedLoadResult(state, results, { unlinkedGroups, unlinkedError }) {
+    this.applyDeferredUnlinkedResults(results, unlinkedGroups, unlinkedError);
+    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
+    this.renderFromCache(state);
+    this.scheduleContextAvailabilityPreload(state, results, { reason: 'deferred-unlinked-loaded' });
+  }
 
+  getDeferredUnlinkedLoadContext(state) {
+    const context = this.getDeferredRecordLoadContext(state);
+    if (!context?.recordName) return null;
+    return context;
+  }
+
+  applyDeferredUnlinkedResults(results, nextGroups, nextError) {
     results.unlinkedGroups = nextGroups;
     results.unlinkedError = nextError;
     results.unlinkedDeferred = false;
     results.unlinkedLoading = false;
-    this.syncScopedQueryWithCurrentInput(state, { immediate: true, reason: 'deferred-unlinked-loaded' });
-    this.renderFromCache(state);
-    this.scheduleContextAvailabilityPreload(state, results, { reason: 'deferred-unlinked-loaded' });
-    this.perfLog(perf);
   }
 
   setLoadingState(state, isLoading) {

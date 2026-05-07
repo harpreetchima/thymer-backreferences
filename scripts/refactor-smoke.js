@@ -1711,6 +1711,39 @@ test('refresh overlaps linked and unlinked searches but groups after linked resu
   assert.deepEqual(state.lastResults.unlinkedGroups[0].lines.map((line) => line.guid), ['mention-line']);
 });
 
+test('stale refresh sequence does not apply older panel results', async () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source' });
+  const linkedLine = makeLine({
+    guid: 'linked-line',
+    record: source,
+    segments: [{ type: 'ref', text: { guid: target.guid, title: target.getName() } }]
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = attachRefreshPanelState(plugin, panel, target.guid, { collapseUnlinked: true });
+
+  let resolveLinkedSearch;
+  const linkedSearch = new Promise((resolve) => {
+    resolveLinkedSearch = resolve;
+  });
+  let applied = 0;
+  plugin.getRefreshConfig = () => ({ maxResults: 200, showSelf: false });
+  plugin.data.searchByQuery = async () => linkedSearch;
+  plugin.applyRefreshedResults = () => {
+    applied += 1;
+  };
+
+  const refresh = plugin.refreshPanel('panel-1', { reason: 'stale-test' });
+  await Promise.resolve();
+  state.refreshSeq += 1;
+  resolveLinkedSearch({ error: '', records: [source], lines: [linkedLine] });
+  await refresh;
+
+  assert.equal(applied, 0);
+  assert.equal(state.lastResults, null);
+});
+
 test('line event matching catches datetime references to journal pages', () => {
   const plugin = makePlugin();
   const journal = makeRecord({
