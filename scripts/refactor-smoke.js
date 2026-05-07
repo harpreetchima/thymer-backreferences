@@ -456,6 +456,48 @@ test('performance ring buffer keeps bounded structured samples', () => {
   assert.equal(snapshot.samples[0].steps[0].ms, 2.1);
 });
 
+test('copy perf snapshot command writes snapshot JSON to clipboard', async () => {
+  const plugin = makePlugin();
+  const previousNavigatorDescriptor = Object.getOwnPropertyDescriptor(global, 'navigator');
+  let clipboardText = '';
+  Object.defineProperty(global, 'navigator', {
+    configurable: true,
+    value: {
+      clipboard: {
+        async writeText(text) {
+          clipboardText = text;
+        }
+      }
+    }
+  });
+
+  plugin.recordPerfSample({
+    label: 'property-index',
+    totalMs: 12.34,
+    meta: { reason: 'test-copy' },
+    counts: { scannedRecords: 42 },
+    steps: [{ step: 'scan', ms: 12.34 }]
+  });
+
+  try {
+    const result = await plugin.copyPerfSnapshotToClipboard();
+    const parsed = JSON.parse(clipboardText);
+
+    assert.equal(result.copied, true);
+    assert.equal(parsed.plugin, 'Backreferences');
+    assert.equal(parsed.sampleCount, 1);
+    assert.equal(parsed.samples[0].label, 'property-index');
+    assert.equal(parsed.samples[0].counts.scannedRecords, 42);
+    assert.match(plugin.__toasters.at(-1).title, /copied/);
+  } finally {
+    if (previousNavigatorDescriptor) {
+      Object.defineProperty(global, 'navigator', previousNavigatorDescriptor);
+    } else {
+      delete global.navigator;
+    }
+  }
+});
+
 test('onLoad defers initial property indexing instead of scanning synchronously', async () => {
   const plugin = makePlugin();
   installLocalStorage();
@@ -476,8 +518,10 @@ test('onLoad defers initial property indexing instead of scanning synchronously'
   plugin.rebuildPropertyIndex = async ({ reason } = {}) => {
     rebuildReasons.push(reason || '');
   };
+  const commandLabels = [];
   plugin.ui = {
-    addCommandPaletteCommand() {
+    addCommandPaletteCommand(command) {
+      commandLabels.push(command.label);
       return { remove() {} };
     },
     getActivePanel() {
@@ -493,6 +537,7 @@ test('onLoad defers initial property indexing instead of scanning synchronously'
 
   try {
     plugin.onLoad();
+    assert.equal(commandLabels.includes('Backreferences: Copy Perf Snapshot'), true);
     assert.deepEqual(rebuildReasons, []);
     const initialIndexTimer = scheduled.find((timer) => timer.delay === plugin._propertyIndexInitialDelayMs);
     assert.ok(initialIndexTimer);

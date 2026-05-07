@@ -79,6 +79,15 @@ class Plugin extends AppPlugin {
         });
       }
     });
+    this._cmdCopyPerfSnapshot = this.ui.addCommandPaletteCommand({
+      label: 'Backreferences: Copy Perf Snapshot',
+      icon: 'clipboard',
+      onSelected: () => {
+        this.copyPerfSnapshotToClipboard().catch(() => {
+          // The command reports copy failures with a toaster.
+        });
+      }
+    });
     this._cmdToggleDefaultVisibility = this.ui.addCommandPaletteCommand({
       label: 'Backreferences: Toggle Globally',
       icon: 'eye',
@@ -133,6 +142,7 @@ class Plugin extends AppPlugin {
     this._eventHandlerIds = [];
 
     this._cmdRebuildIndex?.remove?.();
+    this._cmdCopyPerfSnapshot?.remove?.();
     this._cmdToggleDefaultVisibility?.remove?.();
     this._cmdToggleCollectionVisibility?.remove?.();
 
@@ -294,6 +304,32 @@ class Plugin extends AppPlugin {
         steps: (sample.steps || []).map((step) => ({ ...step }))
       }))
     };
+  }
+
+  async copyPerfSnapshotToClipboard() {
+    const snapshot = this.getPerfSnapshot();
+    const text = JSON.stringify(snapshot, null, 2);
+    try {
+      if (typeof navigator === 'undefined' || !navigator?.clipboard?.writeText) {
+        throw new Error('Clipboard API unavailable.');
+      }
+      await navigator.clipboard.writeText(text);
+      this.ui.addToaster?.({
+        title: 'Backreferences perf snapshot copied',
+        message: `${snapshot.sampleCount.toLocaleString()} samples copied.`,
+        dismissible: true,
+        autoDestroyTime: 4000
+      });
+      return { copied: true, text, snapshot };
+    } catch (e) {
+      this.ui.addToaster?.({
+        title: 'Could not copy perf snapshot',
+        message: 'Open the browser console and run copy(BackreferencesPerf.report()) as a fallback.',
+        dismissible: true,
+        autoDestroyTime: 7000
+      });
+      return { copied: false, text, snapshot, error: e?.message || 'Clipboard write failed.' };
+    }
   }
 
   async timedSearchByQuery(query, maxResults, perf, label) {
