@@ -303,6 +303,21 @@ function makePlugin() {
   return plugin;
 }
 
+function makeLoadedFocusedPanelFixture({ pendingRemoteSync = false } = {}) {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = 'target-guid';
+  state.lastResults = { propertyGroups: [], linkedGroups: [], unlinkedGroups: [] };
+  state.pendingRemoteSync = pendingRemoteSync;
+  plugin._panelStates.set('panel-1', state);
+  plugin.findMountContainer = () => ({});
+  plugin.mountFooter = () => {};
+
+  return { plugin, panel, state };
+}
+
 const tests = [];
 
 function test(name, fn) {
@@ -2141,18 +2156,9 @@ test('panel lifecycle reuses state and only forces refresh on record changes', (
 });
 
 test('panel focus with loaded same-record results renders from cache without refresh', () => {
-  const plugin = makePlugin();
-  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
-  const { panel } = makePanel({ id: 'panel-1', record: target });
-  const state = plugin.createPanelState('panel-1', panel);
-  state.recordGuid = 'target-guid';
-  state.lastResults = { propertyGroups: [], linkedGroups: [], unlinkedGroups: [] };
-  plugin._panelStates.set('panel-1', state);
-
+  const { plugin, panel, state } = makeLoadedFocusedPanelFixture();
   let refreshCount = 0;
   let cacheRenderCount = 0;
-  plugin.findMountContainer = () => ({});
-  plugin.mountFooter = () => {};
   plugin.scheduleRefreshForPanel = () => {
     refreshCount += 1;
   };
@@ -2168,18 +2174,8 @@ test('panel focus with loaded same-record results renders from cache without ref
 });
 
 test('panel focus refreshes loaded same-record results when remote sync is pending', () => {
-  const plugin = makePlugin();
-  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
-  const { panel } = makePanel({ id: 'panel-1', record: target });
-  const state = plugin.createPanelState('panel-1', panel);
-  state.recordGuid = 'target-guid';
-  state.lastResults = { propertyGroups: [], linkedGroups: [], unlinkedGroups: [] };
-  state.pendingRemoteSync = true;
-  plugin._panelStates.set('panel-1', state);
-
+  const { plugin, panel } = makeLoadedFocusedPanelFixture({ pendingRemoteSync: true });
   const refreshes = [];
-  plugin.findMountContainer = () => ({});
-  plugin.mountFooter = () => {};
   plugin.scheduleRefreshForPanel = (_panel, args) => {
     refreshes.push(args);
   };
