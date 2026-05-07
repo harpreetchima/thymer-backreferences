@@ -50,6 +50,10 @@ class Plugin extends AppPlugin {
     this._queryAutocompleteCatalog = null;
     this._queryAutocompleteCatalogPromise = null;
     this._perfStorageKey = 'thymer_backreferences_perf_v1';
+    this._perfMaxSamples = 120;
+    this._perfSamples = [];
+    this._perfSeq = 0;
+    this._perfSessionStartedAt = new Date();
     this._queryStandaloneFilters = [
       'task', 'todo', 'done', 'due', 'overdue', 'assigned', 'unassigned', 'scheduled',
       'inprogress', 'wip', 'waiting', 'billing', 'important', 'discuss', 'alert', 'starred',
@@ -198,15 +202,20 @@ class Plugin extends AppPlugin {
   }
 
   perfCreate(label, meta = {}) {
-    if (!this.perfEnabled()) return null;
     return { label, meta, start: this.perfNow(), steps: [], counts: {} };
+  }
+
+  roundPerfMs(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.round(n * 10) / 10;
   }
 
   perfStep(perf, label, startedAt, extra = {}) {
     if (!perf) return;
     perf.steps.push({
       step: label,
-      ms: Math.round((this.perfNow() - startedAt) * 10) / 10,
+      ms: this.roundPerfMs(this.perfNow() - startedAt),
       ...extra
     });
   }
@@ -218,7 +227,7 @@ class Plugin extends AppPlugin {
 
   perfLog(perf) {
     if (!perf) return;
-    const totalMs = Math.round((this.perfNow() - perf.start) * 10) / 10;
+    const totalMs = this.roundPerfMs(this.perfNow() - perf.start);
     const report = {
       label: perf.label,
       totalMs,
@@ -226,6 +235,8 @@ class Plugin extends AppPlugin {
       counts: perf.counts || {},
       steps: perf.steps || []
     };
+    this.recordPerfSample(report);
+    if (!this.perfEnabled()) return;
     try {
       if (typeof window !== 'undefined' && window.BackreferencesPerf?.reports) {
         window.BackreferencesPerf.reports.push(report);
@@ -241,6 +252,48 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
+  }
+
+  recordPerfSample(report) {
+    if (!report || typeof report !== 'object') return null;
+    if (!Array.isArray(this._perfSamples)) this._perfSamples = [];
+    const maxSamples = this.coercePositiveInt(this._perfMaxSamples, 120);
+    const sample = {
+      seq: (this._perfSeq || 0) + 1,
+      at: new Date().toISOString(),
+      label: report.label || '',
+      totalMs: this.roundPerfMs(report.totalMs),
+      meta: report.meta && typeof report.meta === 'object' ? { ...report.meta } : {},
+      counts: report.counts && typeof report.counts === 'object' ? { ...report.counts } : {},
+      steps: Array.isArray(report.steps)
+        ? report.steps.map((step) => ({ ...step, ms: this.roundPerfMs(step?.ms) }))
+        : []
+    };
+    this._perfSeq = sample.seq;
+    this._perfSamples.push(sample);
+    while (this._perfSamples.length > maxSamples) this._perfSamples.shift();
+    return sample;
+  }
+
+  getPerfSnapshot() {
+    const samples = Array.isArray(this._perfSamples) ? this._perfSamples : [];
+    return {
+      version: 1,
+      plugin: 'Backreferences',
+      generatedAt: new Date().toISOString(),
+      sessionStartedAt: this._perfSessionStartedAt instanceof Date
+        ? this._perfSessionStartedAt.toISOString()
+        : null,
+      maxSamples: this.coercePositiveInt(this._perfMaxSamples, 120),
+      sampleCount: samples.length,
+      propertyIndex: this.getPropertyIndexSnapshot(),
+      samples: samples.map((sample) => ({
+        ...sample,
+        meta: { ...(sample.meta || {}) },
+        counts: { ...(sample.counts || {}) },
+        steps: (sample.steps || []).map((step) => ({ ...step }))
+      }))
+    };
   }
 
   async timedSearchByQuery(query, maxResults, perf, label) {

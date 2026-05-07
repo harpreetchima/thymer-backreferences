@@ -197,6 +197,10 @@ function makePlugin() {
   plugin._eventHandlerIds = [];
   plugin._lineContentTextCache = new WeakMap();
   plugin._perfStorageKey = 'thymer_backreferences_perf_v1';
+  plugin._perfMaxSamples = 120;
+  plugin._perfSamples = [];
+  plugin._perfSeq = 0;
+  plugin._perfSessionStartedAt = new Date('2026-05-07T00:00:00Z');
   plugin._defaultSortBy = 'page_last_edited';
   plugin._defaultSortDir = 'desc';
   plugin._defaultFilterPreset = 'all';
@@ -397,7 +401,12 @@ test('performance diagnostics are opt-in and omit raw query text', async () => {
   try {
     plugin.installPerfConsoleHelper();
     assert.equal(global.window.BackreferencesPerf.status(), 'disabled');
-    assert.equal(plugin.perfCreate('refresh'), null);
+    assert.equal(plugin.perfEnabled(), false);
+
+    const disabledPerf = plugin.perfCreate('refresh', { reason: 'background' });
+    plugin.perfLog(disabledPerf);
+    assert.equal(plugin.getPerfSnapshot().sampleCount, 1);
+    assert.equal(JSON.parse(global.window.BackreferencesPerf.report()).length, 0);
 
     global.window.BackreferencesPerf.enable();
     assert.equal(store.get(plugin._perfStorageKey), '1');
@@ -410,12 +419,41 @@ test('performance diagnostics are opt-in and omit raw query text', async () => {
     assert.equal(report[0].steps[0].step, 'search: unlinked');
     assert.equal(JSON.stringify(report).includes('Sensitive Note Title'), false);
 
+    const snapshot = plugin.getPerfSnapshot();
+    assert.equal(snapshot.plugin, 'Backreferences');
+    assert.equal(snapshot.sampleCount, 2);
+    assert.equal(snapshot.samples.at(-1).steps[0].step, 'search: unlinked');
+    assert.equal(JSON.stringify(snapshot).includes('Sensitive Note Title'), false);
+
     global.window.BackreferencesPerf.disable();
     assert.equal(store.has(plugin._perfStorageKey), false);
   } finally {
     global.window = previousWindow;
     global.console = previousConsole;
   }
+});
+
+test('performance ring buffer keeps bounded structured samples', () => {
+  const plugin = makePlugin();
+  plugin._perfMaxSamples = 3;
+
+  for (let i = 0; i < 5; i += 1) {
+    plugin.recordPerfSample({
+      label: 'sample',
+      totalMs: i + 0.04,
+      meta: { reason: `reason-${i}` },
+      counts: { scannedRecords: i },
+      steps: [{ step: 'work', ms: i + 0.05 }]
+    });
+  }
+
+  const snapshot = plugin.getPerfSnapshot();
+  assert.equal(snapshot.maxSamples, 3);
+  assert.equal(snapshot.sampleCount, 3);
+  assert.deepEqual(snapshot.samples.map((sample) => sample.seq), [3, 4, 5]);
+  assert.deepEqual(snapshot.samples.map((sample) => sample.meta.reason), ['reason-2', 'reason-3', 'reason-4']);
+  assert.equal(snapshot.samples[0].counts.scannedRecords, 2);
+  assert.equal(snapshot.samples[0].steps[0].ms, 2.1);
 });
 
 test('onLoad defers initial property indexing instead of scanning synchronously', async () => {
