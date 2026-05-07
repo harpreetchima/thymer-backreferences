@@ -183,6 +183,20 @@ function makeDomElement(tagName) {
         const existing = new Set((el.className || '').split(/\s+/).filter(Boolean));
         for (const name of names) existing.add(name);
         el.className = Array.from(existing).join(' ');
+      },
+      remove(...names) {
+        const removeSet = new Set(names);
+        const existing = (el.className || '').split(/\s+/).filter(Boolean)
+          .filter((name) => !removeSet.has(name));
+        el.className = existing.join(' ');
+      },
+      toggle(name, force) {
+        const existing = new Set((el.className || '').split(/\s+/).filter(Boolean));
+        const shouldAdd = force === undefined ? !existing.has(name) : force === true;
+        if (shouldAdd) existing.add(name);
+        else existing.delete(name);
+        el.className = Array.from(existing).join(' ');
+        return shouldAdd;
       }
     }
   };
@@ -2148,6 +2162,56 @@ test('property invalidation updates graph index while line events stay targeted'
   ]);
   assert.equal(stateA.pendingRemoteSync, true);
   assert.equal(stateB.pendingRemoteSync, false);
+
+  const eventSamples = plugin.getPerfSnapshot().samples.filter((sample) => sample.label === 'event-handler');
+  assert.deepEqual(eventSamples.map((sample) => sample.meta.eventName), ['record.updated', 'lineitem.created']);
+  assert.equal(eventSamples[0].counts.updatedIndex, true);
+  assert.equal(eventSamples[1].counts.refreshed, 1);
+  assert.equal(eventSamples[1].counts.segmentCount, 1);
+});
+
+test('render instrumentation records cache and reference render samples', () => {
+  const plugin = makePlugin();
+  const previousDocument = global.document;
+  global.document = {
+    createElement: makeDomElement,
+    createTextNode(text) {
+      return { tagName: '#text', textContent: text };
+    }
+  };
+
+  try {
+    const state = plugin.createPanelState('panel-1', null);
+    state.recordGuid = 'target-guid';
+    state.bodyEl = makeDomElement('div');
+    state.countEl = makeDomElement('span');
+    state.statusSlotEl = makeDomElement('div');
+    state.propertySlotEl = makeDomElement('div');
+    state.linkedSlotEl = makeDomElement('div');
+    state.unlinkedSlotEl = makeDomElement('div');
+    state.lastResults = {
+      propertyGroups: [],
+      propertyError: '',
+      propertyIndexStatus: 'ready',
+      propertyIndexStats: plugin.createEmptyPropertyIndexStats(),
+      propertyIndexError: '',
+      linkedGroups: [],
+      linkedError: '',
+      unlinkedGroups: [],
+      unlinkedError: '',
+      unlinkedDeferred: false,
+      unlinkedLoading: false,
+      maxResults: 200
+    };
+
+    plugin.renderFromCache(state);
+
+    const labels = plugin.getPerfSnapshot().samples.map((sample) => sample.label);
+    assert.equal(labels.includes('renderReferences'), true);
+    assert.equal(labels.includes('renderFromCache'), true);
+  } finally {
+    global.document = previousDocument;
+  }
 });
 
 test('reference render plan skips unchanged sections and isolates linked-context rerenders', () => {

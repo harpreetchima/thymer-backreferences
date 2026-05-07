@@ -54,6 +54,10 @@ class Plugin extends AppPlugin {
     this._perfSamples = [];
     this._perfSeq = 0;
     this._perfSessionStartedAt = new Date();
+    const onLoadPerf = this.perfCreate('onLoad', {
+      pluginVersion: this.getConfiguration?.()?.version || ''
+    });
+    const onLoadStartedAt = this.perfNow();
     this._queryStandaloneFilters = [
       'task', 'todo', 'done', 'due', 'overdue', 'assigned', 'unassigned', 'scheduled',
       'inprogress', 'wip', 'waiting', 'billing', 'important', 'discuss', 'alert', 'starred',
@@ -129,6 +133,14 @@ class Plugin extends AppPlugin {
       const p = this.ui.getActivePanel();
       if (p) this.handlePanelChanged(p, 'initial-delayed');
     }, 250);
+    this.perfStep(onLoadPerf, 'setup', onLoadStartedAt, {
+      initialIndexDelayMs: this._propertyIndexInitialDelayMs
+    });
+    this.perfCount(onLoadPerf, {
+      eventHandlers: this._eventHandlerIds.length,
+      commands: 4
+    });
+    this.perfLog(onLoadPerf);
   }
 
   onUnload() {
@@ -2900,20 +2912,33 @@ class Plugin extends AppPlugin {
     if (!state) return;
     const cached = state.lastResults || null;
     if (!cached) return;
-    this.syncPropertyIndexResultForState(state);
+    const perf = this.perfCreate('renderFromCache', {
+      panelId: state.panelId || '',
+      recordGuid: state.recordGuid || ''
+    });
+    const startedAt = this.perfNow();
+    let rendered = false;
 
-    const panel = state.panel || null;
-    if (panel && !this.isPanelVisible(panel)) {
-      this.unmountFooterForHiddenPanel(state);
-      return;
+    try {
+      this.syncPropertyIndexResultForState(state);
+
+      const panel = state.panel || null;
+      if (panel && !this.isPanelVisible(panel)) {
+        this.unmountFooterForHiddenPanel(state);
+        return;
+      }
+
+      if (panel && (!state.rootEl || !state.rootEl.isConnected)) {
+        this.mountFooter(panel, state);
+      }
+
+      if (!state.bodyEl || !state.countEl) return;
+      this.renderReferences(state, cached);
+      rendered = true;
+    } finally {
+      this.perfStep(perf, 'render cached results', startedAt, { rendered });
+      this.perfLog(perf);
     }
-
-    if (panel && (!state.rootEl || !state.rootEl.isConnected)) {
-      this.mountFooter(panel, state);
-    }
-
-    if (!state.bodyEl || !state.countEl) return;
-    this.renderReferences(state, cached);
   }
 
   readJsonStorage(key) {
@@ -4779,104 +4804,134 @@ class Plugin extends AppPlugin {
     return false;
   }
 
+  createEventPerf(eventName, ev) {
+    return this.perfCreate('event-handler', {
+      eventName,
+      recordGuid: this.getEventRecordGuid(ev),
+      lineItemGuid: typeof ev?.lineItemGuid === 'string' ? ev.lineItemGuid : '',
+      isLocal: ev?.source?.isLocal === true
+    });
+  }
+
   handleRecordUpdated(ev) {
     // Property-based references (record-link fields) do not emit lineitem events.
-    if (!ev) return;
-    if (!ev.properties) return;
+    const perf = this.createEventPerf('record.updated', ev);
+    let updatedIndex = false;
+    let scheduledRebuild = false;
+    try {
+      if (!ev) return;
+      if (!ev.properties) return;
 
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
-    if (!this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord)) {
-      this.schedulePropertyIndexRebuild('record.updated-property-index-rebuild');
+      const sourceRecordGuid = this.getEventRecordGuid(ev);
+      const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+      updatedIndex = this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
+      if (!updatedIndex) {
+        scheduledRebuild = true;
+        this.schedulePropertyIndexRebuild('record.updated-property-index-rebuild');
+      }
+    } finally {
+      this.perfCount(perf, { updatedIndex, scheduledRebuild });
+      this.perfLog(perf);
     }
   }
 
   handleRecordCreated(ev) {
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
-    if (sourceRecordGuid && sourceRecord) {
-      this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
-    } else {
-      this.schedulePropertyIndexRebuild('record.created-property-index-rebuild');
-    }
-    const refreshed = this.refreshMatchingStates(ev, 'record.created', (state) =>
-      this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
-    );
-    if (refreshed === 0 && !sourceRecordGuid) {
-      this.handleWorkspaceInvalidation(ev, 'record.created');
+    const perf = this.createEventPerf('record.created', ev);
+    let refreshed = 0;
+    let scheduledRebuild = false;
+    let workspaceInvalidated = false;
+    try {
+      const sourceRecordGuid = this.getEventRecordGuid(ev);
+      const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+      if (sourceRecordGuid && sourceRecord) {
+        this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
+      } else {
+        scheduledRebuild = true;
+        this.schedulePropertyIndexRebuild('record.created-property-index-rebuild');
+      }
+      refreshed = this.refreshMatchingStates(ev, 'record.created', (state) =>
+        this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
+      );
+      if (refreshed === 0 && !sourceRecordGuid) {
+        workspaceInvalidated = true;
+        this.handleWorkspaceInvalidation(ev, 'record.created');
+      }
+    } finally {
+      this.perfCount(perf, { refreshed, scheduledRebuild, workspaceInvalidated });
+      this.perfLog(perf);
     }
   }
 
   handleRecordMoved(ev) {
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
-    const refreshed = this.refreshMatchingStates(ev, 'record.moved', (state) =>
-      this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
-    );
-    if (refreshed === 0 && !sourceRecordGuid) {
-      this.handleWorkspaceInvalidation(ev, 'record.moved');
+    const perf = this.createEventPerf('record.moved', ev);
+    let refreshed = 0;
+    let workspaceInvalidated = false;
+    try {
+      const sourceRecordGuid = this.getEventRecordGuid(ev);
+      const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
+      refreshed = this.refreshMatchingStates(ev, 'record.moved', (state) =>
+        this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
+      );
+      if (refreshed === 0 && !sourceRecordGuid) {
+        workspaceInvalidated = true;
+        this.handleWorkspaceInvalidation(ev, 'record.moved');
+      }
+    } finally {
+      this.perfCount(perf, { refreshed, workspaceInvalidated });
+      this.perfLog(perf);
     }
   }
 
   handleLineItemUpdated(ev) {
-    if (!ev) return;
-
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const segments = this.getEventLineSegments(ev);
-    const referencedGuids = this.extractReferencedRecordGuids(segments);
-    const refreshed = this.refreshMatchingStates(ev, 'lineitem.updated', (state) =>
-      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
-    );
-    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
-      this.handleWorkspaceInvalidation(ev, 'lineitem.updated');
-    }
+    this.handleLineItemEvent(ev, 'lineitem.updated');
   }
 
   handleLineItemCreated(ev) {
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const segments = this.getEventLineSegments(ev);
-    const referencedGuids = this.extractReferencedRecordGuids(segments);
-    const refreshed = this.refreshMatchingStates(ev, 'lineitem.created', (state) =>
-      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
-    );
-    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
-      this.handleWorkspaceInvalidation(ev, 'lineitem.created');
-    }
+    this.handleLineItemEvent(ev, 'lineitem.created');
   }
 
   handleLineItemMoved(ev) {
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const segments = this.getEventLineSegments(ev);
-    const referencedGuids = this.extractReferencedRecordGuids(segments);
-    const refreshed = this.refreshMatchingStates(ev, 'lineitem.moved', (state) =>
-      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
-    );
-    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
-      this.handleWorkspaceInvalidation(ev, 'lineitem.moved');
-    }
+    this.handleLineItemEvent(ev, 'lineitem.moved');
   }
 
   handleLineItemUndeleted(ev) {
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const segments = this.getEventLineSegments(ev);
-    const referencedGuids = this.extractReferencedRecordGuids(segments);
-    const refreshed = this.refreshMatchingStates(ev, 'lineitem.undeleted', (state) =>
-      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
-    );
-    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
-      this.handleWorkspaceInvalidation(ev, 'lineitem.undeleted');
-    }
+    this.handleLineItemEvent(ev, 'lineitem.undeleted');
   }
 
   handleLineItemDeleted(ev) {
-    const sourceRecordGuid = this.getEventRecordGuid(ev);
-    const segments = this.getEventLineSegments(ev);
-    const referencedGuids = this.extractReferencedRecordGuids(segments);
-    const refreshed = this.refreshMatchingStates(ev, 'lineitem.deleted', (state) =>
-      this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
-    );
-    if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
-      this.handleWorkspaceInvalidation(ev, 'lineitem.deleted');
+    this.handleLineItemEvent(ev, 'lineitem.deleted');
+  }
+
+  handleLineItemEvent(ev, eventName) {
+    const perf = this.createEventPerf(eventName, ev);
+    let refreshed = 0;
+    let segmentCount = 0;
+    let referencedGuidCount = 0;
+    let workspaceInvalidated = false;
+
+    try {
+      if (!ev) return;
+
+      const sourceRecordGuid = this.getEventRecordGuid(ev);
+      const segments = this.getEventLineSegments(ev);
+      const referencedGuids = this.extractReferencedRecordGuids(segments);
+      segmentCount = segments.length;
+      referencedGuidCount = referencedGuids.size;
+      refreshed = this.refreshMatchingStates(ev, eventName, (state) =>
+        this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
+      );
+      if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+        workspaceInvalidated = true;
+        this.handleWorkspaceInvalidation(ev, eventName);
+      }
+    } finally {
+      this.perfCount(perf, {
+        refreshed,
+        segmentCount,
+        referencedGuidCount,
+        workspaceInvalidated
+      });
+      this.perfLog(perf);
     }
   }
 
@@ -6609,6 +6664,11 @@ class Plugin extends AppPlugin {
     if (!state?.bodyEl || !state?.countEl) return;
     if (!state?.statusSlotEl || !state?.propertySlotEl || !state?.linkedSlotEl || !state?.unlinkedSlotEl) return;
 
+    const perf = this.perfCreate('renderReferences', {
+      panelId: state.panelId || '',
+      recordGuid: state.recordGuid || ''
+    });
+    const buildStartedAt = this.perfNow();
     const viewState = this.buildReferenceViewState(state, {
       propertyGroups,
       propertyError,
@@ -6623,12 +6683,18 @@ class Plugin extends AppPlugin {
       unlinkedLoading,
       maxResults
     });
+    this.perfStep(perf, 'build view state', buildStartedAt, {
+      propertyGroups: Array.isArray(propertyGroups) ? propertyGroups.length : 0,
+      linkedGroups: Array.isArray(linkedGroups) ? linkedGroups.length : 0,
+      unlinkedGroups: Array.isArray(unlinkedGroups) ? unlinkedGroups.length : 0
+    });
 
     this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, viewState.collapseMetrics));
 
     state.countEl.textContent = viewState.summaryText;
     const plan = this.buildReferenceRenderPlan(state, viewState);
 
+    const renderStartedAt = this.perfNow();
     if (plan.statusChanged) {
       state.statusSlotEl.innerHTML = '';
       this.appendReferenceStatus(state.statusSlotEl, viewState);
@@ -6647,6 +6713,22 @@ class Plugin extends AppPlugin {
     }
 
     state.renderSectionKeys = plan.nextKeys;
+    this.perfStep(perf, 'render changed sections', renderStartedAt, {
+      statusChanged: plan.statusChanged,
+      propertyChanged: plan.propertyChanged,
+      linkedChanged: plan.linkedChanged,
+      unlinkedChanged: plan.unlinkedChanged
+    });
+    this.perfCount(perf, {
+      propertyGroups: viewState.props.length,
+      propertyRefs: viewState.totalPropRefCount,
+      linkedGroups: viewState.linked.length,
+      linkedRefs: viewState.totalLinkedRefCount,
+      unlinkedGroups: viewState.unlinked.length,
+      unlinkedRefs: viewState.totalUnlinkedRefCount,
+      propertyIndexStatus: viewState.propertyIndexStatus || 'idle'
+    });
+    this.perfLog(perf);
   }
 
   buildChevronIcon(collapsed, extraClass) {
