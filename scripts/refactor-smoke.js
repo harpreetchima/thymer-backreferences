@@ -202,6 +202,10 @@ function makePlugin() {
   plugin._defaultFilterPreset = 'all';
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
   plugin._defaultContextPreloadMaxLines = 30;
+  plugin._propertyIndexInitialDelayMs = 500;
+  plugin._propertyIndexYieldEveryRecords = 25;
+  plugin._propertyIndexYieldBudgetMs = 12;
+  plugin._propertyIndexProgressNotifyMs = 250;
   plugin._defaultQueryFilterMaxResults = 1000;
   plugin._propertyIndexStatus = 'idle';
   plugin._propertyIndexByTargetGuid = new Map();
@@ -412,6 +416,74 @@ test('performance diagnostics are opt-in and omit raw query text', async () => {
     global.window = previousWindow;
     global.console = previousConsole;
   }
+});
+
+test('onLoad defers initial property indexing instead of scanning synchronously', async () => {
+  const plugin = makePlugin();
+  installLocalStorage();
+  const previousSetTimeout = global.setTimeout;
+  const previousClearTimeout = global.clearTimeout;
+  const scheduled = [];
+  const rebuildReasons = [];
+
+  global.setTimeout = (fn, delay) => {
+    scheduled.push({ fn, delay });
+    return scheduled.length;
+  };
+  global.clearTimeout = () => {};
+
+  plugin.injectCss = () => {};
+  plugin.installPerfConsoleHelper = () => {};
+  plugin.handlePanelChanged = () => {};
+  plugin.rebuildPropertyIndex = async ({ reason } = {}) => {
+    rebuildReasons.push(reason || '');
+  };
+  plugin.ui = {
+    addCommandPaletteCommand() {
+      return { remove() {} };
+    },
+    getActivePanel() {
+      return null;
+    }
+  };
+  plugin.events = {
+    on(eventName, callback) {
+      return `${eventName}:${typeof callback}`;
+    },
+    off() {}
+  };
+
+  try {
+    plugin.onLoad();
+    assert.deepEqual(rebuildReasons, []);
+    const initialIndexTimer = scheduled.find((timer) => timer.delay === plugin._propertyIndexInitialDelayMs);
+    assert.ok(initialIndexTimer);
+    assert.equal(plugin.getPropertyIndexDisplayMessage(plugin.getPropertyIndexSnapshot()), 'Property reference indexing is queued in the background.');
+
+    initialIndexTimer.fn();
+    await Promise.resolve();
+    assert.deepEqual(rebuildReasons, ['initial']);
+  } finally {
+    global.setTimeout = previousSetTimeout;
+    global.clearTimeout = previousClearTimeout;
+  }
+});
+
+test('reload schedules property index rebuild and refreshes panels', () => {
+  const plugin = makePlugin();
+  const scheduled = [];
+  const refreshes = [];
+  plugin.schedulePropertyIndexRebuild = (reason, delayMs) => {
+    scheduled.push({ reason, delayMs });
+  };
+  plugin.refreshAllPanels = (args) => {
+    refreshes.push(args);
+  };
+
+  plugin.handlePluginReload();
+
+  assert.deepEqual(scheduled, [{ reason: 'reload-property-index-rebuild', delayMs: 0 }]);
+  assert.deepEqual(refreshes, [{ force: true, reason: 'reload' }]);
 });
 
 test('hidden visible-eligible panel keeps state warm and skips mounting and refresh scheduling', () => {
@@ -775,6 +847,44 @@ test('graph property index dedupes duplicate record objects', async () => {
   assert.equal(groups[0].records.length, 1);
   assert.equal(groups[0].records[0].guid, source.guid);
   assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(staleTargetGuid, { showSelf: false }), []);
+});
+
+test('property index build records reason, property counts, duration, and yields', async () => {
+  const plugin = makePlugin();
+  plugin._propertyIndexYieldEveryRecords = 2;
+  plugin._propertyIndexYieldBudgetMs = 0;
+  plugin._propertyIndexProgressNotifyMs = 0;
+  let yieldCalls = 0;
+  plugin.waitForIndexYield = async () => {
+    yieldCalls += 1;
+  };
+
+  const records = Array.from({ length: 5 }, (_, i) => makeRecord({
+    guid: `source-${i}`,
+    name: `Source ${i}`,
+    properties: [
+      makeProperty('Entity', ['record', 'target-guid']),
+      makeProperty('Topic', ['record', `topic-${i}`])
+    ]
+  }));
+  plugin.data.getAllCollections = async () => [{
+    getAllRecords: async () => records
+  }];
+
+  await plugin.rebuildPropertyIndex({ reason: 'stats-test' });
+
+  assert.equal(plugin._propertyIndexStatus, 'ready');
+  assert.equal(plugin._propertyIndexStats.reason, 'stats-test');
+  assert.equal(plugin._propertyIndexStats.collectionCount, 1);
+  assert.equal(plugin._propertyIndexStats.scannedRecords, 5);
+  assert.equal(plugin._propertyIndexStats.scannedProperties, 10);
+  assert.equal(plugin._propertyIndexStats.indexedReferences, 10);
+  assert.equal(plugin._propertyIndexStats.indexedTargets, 6);
+  assert.equal(plugin._propertyIndexStats.yieldCount, 2);
+  assert.equal(yieldCalls, 2);
+  assert.equal(typeof plugin._propertyIndexStats.durationMs, 'number');
+  assert.ok(plugin._propertyIndexStats.startedAt instanceof Date);
+  assert.ok(plugin._propertyIndexStats.finishedAt instanceof Date);
 });
 
 test('linked and unlinked grouping preserves source grouping rules', () => {

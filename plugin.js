@@ -31,6 +31,10 @@ class Plugin extends AppPlugin {
 
     this._defaultMaxResults = 200;
     this._defaultContextPreloadMaxLines = 30;
+    this._propertyIndexInitialDelayMs = 500;
+    this._propertyIndexYieldEveryRecords = 25;
+    this._propertyIndexYieldBudgetMs = 12;
+    this._propertyIndexProgressNotifyMs = 250;
     this._refreshDebounceMs = 350;
     this._queryFilterDebounceMs = 180;
     this._defaultQueryFilterMaxResults = 1000;
@@ -92,7 +96,7 @@ class Plugin extends AppPlugin {
       this.events.on('panel.closed', (ev) => this.handlePanelClosed(ev.panel))
     );
     this._eventHandlerIds.push(
-      this.events.on('reload', () => this.refreshAllPanels({ force: true, reason: 'reload' }))
+      this.events.on('reload', () => this.handlePluginReload())
     );
 
     // Keep backreferences reasonably fresh when references are created/edited elsewhere.
@@ -107,9 +111,7 @@ class Plugin extends AppPlugin {
 
     const panel = this.ui.getActivePanel();
     if (panel) this.handlePanelChanged(panel, 'initial');
-    this.rebuildPropertyIndex({ reason: 'initial' }).catch(() => {
-      // The error state is rendered in the footer.
-    });
+    this.scheduleInitialPropertyIndexBuild();
     setTimeout(() => {
       const p = this.ui.getActivePanel();
       if (p) this.handlePanelChanged(p, 'initial-delayed');
@@ -139,6 +141,15 @@ class Plugin extends AppPlugin {
       this.disposePanelState(panelId);
     }
     this._panelStates?.clear?.();
+  }
+
+  handlePluginReload() {
+    this.schedulePropertyIndexRebuild('reload-property-index-rebuild', 0);
+    this.refreshAllPanels({ force: true, reason: 'reload' });
+  }
+
+  scheduleInitialPropertyIndexBuild() {
+    this.schedulePropertyIndexRebuild('initial', this._propertyIndexInitialDelayMs);
   }
 
   // ---------- Performance diagnostics ----------
@@ -3457,11 +3468,18 @@ class Plugin extends AppPlugin {
 
   createEmptyPropertyIndexStats() {
     return {
+      reason: '',
+      collectionCount: 0,
       scannedRecords: 0,
+      scannedProperties: 0,
       indexedReferences: 0,
       indexedTargets: 0,
+      yieldCount: 0,
+      durationMs: 0,
+      scheduledAt: null,
       startedAt: null,
-      finishedAt: null
+      finishedAt: null,
+      lastProgressAt: null
     };
   }
 
@@ -3480,6 +3498,9 @@ class Plugin extends AppPlugin {
       return `Indexing backreferences... ${scanned.toLocaleString()} records scanned`;
     }
     if (state.status === 'idle') {
+      if (state?.stats?.scheduledAt) {
+        return 'Property reference indexing is queued in the background.';
+      }
       return 'Property reference index has not been built yet.';
     }
     if (state.status === 'error') {
@@ -3520,13 +3541,21 @@ class Plugin extends AppPlugin {
       return this._propertyIndexPromise;
     }
 
+    if (this._propertyIndexRebuildTimer) {
+      clearTimeout(this._propertyIndexRebuildTimer);
+      this._propertyIndexRebuildTimer = null;
+    }
+
+    const startedAt = new Date();
     const seq = (this._propertyIndexBuildSeq || 0) + 1;
     this._propertyIndexBuildSeq = seq;
     this._propertyIndexStatus = 'indexing';
     this._propertyIndexError = '';
     this._propertyIndexStats = {
       ...this.createEmptyPropertyIndexStats(),
-      startedAt: new Date()
+      reason: reason || '',
+      startedAt,
+      lastProgressAt: startedAt
     };
     this.notifyPropertyIndexChanged(reason || 'property-index-started');
 
@@ -3562,7 +3591,9 @@ class Plugin extends AppPlugin {
       }
 
       let lastNotifyAt = Date.now();
+      let lastYieldAt = lastNotifyAt;
       let collectionCount = 0;
+      this._propertyIndexStats.collectionCount = Array.isArray(collections) ? collections.length : 0;
       for (const collection of collections) {
         if (!collection || typeof collection.getAllRecords !== 'function') continue;
         let records = [];
@@ -3580,47 +3611,69 @@ class Plugin extends AppPlugin {
 
         for (const record of records) {
           if (this._propertyIndexBuildSeq !== seq) return;
-          this.indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid);
+          this.indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid, {
+            stats: this._propertyIndexStats
+          });
           this._propertyIndexStats.scannedRecords += 1;
 
           const now = Date.now();
-          if (
-            this._propertyIndexStats.scannedRecords % 250 === 0 ||
-            now - lastNotifyAt > 300
-          ) {
+          const yieldEveryRecords = this.coercePositiveInt(this._propertyIndexYieldEveryRecords, 25);
+          const yieldBudgetMs = this.coerceNonNegativeInt(this._propertyIndexYieldBudgetMs, 12);
+          const progressNotifyMs = this.coerceNonNegativeInt(this._propertyIndexProgressNotifyMs, 250);
+          const shouldNotify = now - lastNotifyAt >= progressNotifyMs;
+          const shouldYield = this._propertyIndexStats.scannedRecords % yieldEveryRecords === 0
+            || (yieldBudgetMs > 0 && now - lastYieldAt >= yieldBudgetMs);
+
+          if (shouldNotify) {
             lastNotifyAt = now;
+            this._propertyIndexStats.lastProgressAt = new Date(now);
             this.notifyPropertyIndexChanged(reason || 'property-index-progress');
+          }
+
+          if (shouldYield) {
+            this._propertyIndexStats.yieldCount += 1;
             await this.waitForIndexYield();
+            lastYieldAt = Date.now();
           }
         }
       }
 
       if (this._propertyIndexBuildSeq !== seq) return;
 
+      const finishedAt = new Date();
+      const durationMs = this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt);
       this._propertyIndexByTargetGuid = byTargetGuid;
       this._propertyIndexSourceEntriesByRecordGuid = sourceEntriesByRecordGuid;
       this._propertyIndexStats = {
         ...this._propertyIndexStats,
         indexedReferences: this.countPropertyIndexReferences(byTargetGuid),
         indexedTargets: byTargetGuid.size,
-        finishedAt: new Date()
+        durationMs,
+        finishedAt,
+        lastProgressAt: finishedAt
       };
       this._propertyIndexStatus = 'ready';
       this._propertyIndexError = '';
       this.perfCount(perf, {
         collections: collectionCount,
         scannedRecords: this._propertyIndexStats.scannedRecords || 0,
+        scannedProperties: this._propertyIndexStats.scannedProperties || 0,
         indexedReferences: this._propertyIndexStats.indexedReferences || 0,
-        indexedTargets: this._propertyIndexStats.indexedTargets || 0
+        indexedTargets: this._propertyIndexStats.indexedTargets || 0,
+        yieldCount: this._propertyIndexStats.yieldCount || 0,
+        durationMs: this._propertyIndexStats.durationMs || 0
       });
       this.notifyPropertyIndexChanged(reason || 'property-index-ready');
     } catch (e) {
       if (this._propertyIndexBuildSeq !== seq) return;
+      const finishedAt = new Date();
       this._propertyIndexStatus = 'error';
       this._propertyIndexError = e?.message || 'Error indexing property references.';
       this._propertyIndexStats = {
         ...this._propertyIndexStats,
-        finishedAt: new Date()
+        durationMs: this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt),
+        finishedAt,
+        lastProgressAt: finishedAt
       };
       this.notifyPropertyIndexChanged(reason || 'property-index-error');
     } finally {
@@ -3636,6 +3689,13 @@ class Plugin extends AppPlugin {
     return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
+  getPropertyIndexDurationMs(startedAt, finishedAt) {
+    const startTime = startedAt instanceof Date ? startedAt.getTime() : 0;
+    const finishTime = finishedAt instanceof Date ? finishedAt.getTime() : 0;
+    if (!startTime || !finishTime) return 0;
+    return Math.max(0, finishTime - startTime);
+  }
+
   schedulePropertyIndexRebuild(reason, delayMs = 600) {
     if (this._propertyIndexStatus === 'indexing') {
       this._propertyIndexNeedsRebuild = true;
@@ -3645,6 +3705,13 @@ class Plugin extends AppPlugin {
       clearTimeout(this._propertyIndexRebuildTimer);
       this._propertyIndexRebuildTimer = null;
     }
+    const scheduledAt = new Date();
+    this._propertyIndexStats = {
+      ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()),
+      reason: reason || 'scheduled-property-index-rebuild',
+      scheduledAt
+    };
+    this.notifyPropertyIndexChanged(reason || 'scheduled-property-index-rebuild');
     this._propertyIndexRebuildTimer = setTimeout(() => {
       this._propertyIndexRebuildTimer = null;
       this.rebuildPropertyIndex({ reason: reason || 'scheduled-property-index-rebuild' }).catch(() => {
@@ -3677,7 +3744,7 @@ class Plugin extends AppPlugin {
     return out;
   }
 
-  indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid) {
+  indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid, { stats } = {}) {
     const sourceGuid = (record?.guid || '').trim();
     if (!sourceGuid) return 0;
     this.removeSourceRecordFromPropertyIndexMaps(sourceGuid, byTargetGuid, sourceEntriesByRecordGuid);
@@ -3689,6 +3756,9 @@ class Plugin extends AppPlugin {
       props = [];
     }
     if (!Array.isArray(props)) props = [];
+    if (stats && typeof stats === 'object') {
+      stats.scannedProperties = this.coerceNonNegativeInt(stats.scannedProperties, 0) + props.length;
+    }
 
     const entries = [];
     const seenEntries = new Set();
