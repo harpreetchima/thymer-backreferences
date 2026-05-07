@@ -2456,17 +2456,36 @@ test('plain-click line navigation reuses current panel and highlights the line',
     id: 'panel-current',
     record: makeRecord({ guid: 'source-guid', name: 'Source' })
   });
-  const focusedPanels = [];
+  const events = [];
+  let resolveNavigation;
 
   plugin.getWorkspaceGuid = () => 'workspace-guid';
   plugin.ui.setActivePanel = (panel) => {
-    focusedPanels.push(panel.getId());
+    events.push(`focus:${panel.getId()}`);
   };
-  plugin.waitForPanelNavigationFrame = async () => {};
+  current.panel.navigateTo = (payload) => {
+    current.navigateCalls.push(payload);
+    events.push('navigate:start');
+    return new Promise((resolve) => {
+      resolveNavigation = () => {
+        events.push('navigate:resolve');
+        resolve(true);
+      };
+    });
+  };
+  plugin.waitForPanelNavigationFrame = async () => {
+    events.push('frame');
+  };
 
-  await plugin.openRecord(current.panel, 'target-guid', 'line-guid', {});
+  const opened = plugin.openRecord(current.panel, 'target-guid', 'line-guid', {});
+  await Promise.resolve();
+  await Promise.resolve();
 
-  assert.deepEqual(focusedPanels, ['panel-current']);
+  assert.deepEqual(events, ['focus:panel-current', 'frame', 'navigate:start']);
+  resolveNavigation();
+  await opened;
+
+  assert.deepEqual(events, ['focus:panel-current', 'frame', 'navigate:start', 'navigate:resolve', 'frame']);
   assert.deepEqual(current.navigateCalls, [
     {
       itemGuid: 'line-guid',

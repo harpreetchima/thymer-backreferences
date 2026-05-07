@@ -1479,10 +1479,16 @@ class Plugin extends AppPlugin {
       return;
     }
 
+    try {
+      this.ui.setActivePanel(panel);
+    } catch (_err) {
+      // ignore
+    }
+    await this.waitForPanelNavigationFrame();
     await this.navigatePanelToRecord(panel, recordGuid, lineGuid || null, workspaceGuid).catch(() => {
       // ignore
     });
-    this.ui.setActivePanel(panel);
+    if (lineGuid) await this.waitForPanelNavigationFrame();
   }
 
   applyCollapsedState(root, collapsed) {
