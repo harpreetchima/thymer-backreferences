@@ -78,6 +78,7 @@ Built for [Thymer](https://thymer.com/) using the [Thymer Plugin SDK](https://gi
 ## Commands
 
 - `Backreferences: Rebuild Graph Index`
+- `Backreferences: Copy Perf Snapshot`
 - `Backreferences: Toggle Globally`
 - `Backreferences: Toggle in Current Collection`
 
@@ -103,9 +104,15 @@ Edit `custom` in `plugin.json`:
 
 ## Performance Diagnostics
 
-Backreferences includes optional console timing for large workspaces. It is off by default.
+Backreferences keeps a bounded in-memory performance snapshot for large-workspace troubleshooting. It includes refresh timings, search timings, context preload timings, property index timings, cache state, and reference counts. It does not include note text or raw search queries.
 
-To collect a report:
+To collect the current snapshot without using the console:
+
+1. Open Thymer's Command Palette.
+2. Run `Backreferences: Copy Perf Snapshot`.
+3. Paste the copied JSON into the bug report.
+
+For a longer console report:
 
 1. Open browser developer tools.
 2. Run `BackreferencesPerf.enable()` in the console.
@@ -115,13 +122,17 @@ To collect a report:
 6. Paste the copied JSON into the bug report.
 7. Run `BackreferencesPerf.disable()` when finished.
 
-The report contains refresh timings, search timings, context preload timings, property index timings, and reference counts. It does not include note text or raw search queries.
+### Startup Indexing
+
+Property References use a graph-wide index because Thymer does not currently expose an inverse property-link lookup. To avoid blocking startup, the plugin renders first, shows an indexing/queued state in the footer, and builds the property index in background chunks. Completed indexes are cached locally so a reload can hydrate Property References quickly and delay the full refresh scan. Record property updates apply incremental index changes when the index is ready; larger or ambiguous workspace changes schedule a background rebuild.
 
 ## Local Checks
 
 - `node --check plugin.js`
 - `node scripts/refactor-smoke.js`
+- `node scripts/perf-benchmark.js`
 - Or, with npm: `npm run check && npm test`
+- Benchmark: `npm run bench`
 
 ## Verification Checklist
 
