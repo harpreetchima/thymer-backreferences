@@ -3883,6 +3883,53 @@ class Plugin extends AppPlugin {
     return null;
   }
 
+  getPropertyIndexSourceRecord(sourceGuid) {
+    const guid = `${sourceGuid || ''}`.trim();
+    if (!guid) return null;
+    for (const byProp of this._propertyIndexByTargetGuid?.values?.() || []) {
+      for (const bySource of byProp?.values?.() || []) {
+        const record = bySource?.get?.(guid) || null;
+        if (record) return record;
+      }
+    }
+    return null;
+  }
+
+  serializePropertyIndexRecordMeta(record, fallbackGuid) {
+    const guid = `${record?.guid || fallbackGuid || ''}`.trim();
+    const updatedAt = this.parsePropertyIndexCacheDate(record?.getUpdatedAt?.());
+    const createdAt = this.parsePropertyIndexCacheDate(record?.getCreatedAt?.());
+    return {
+      guid,
+      name: (record?.getName?.() || '').trim(),
+      updatedAt: updatedAt ? updatedAt.toISOString() : null,
+      createdAt: createdAt ? createdAt.toISOString() : null
+    };
+  }
+
+  createCachedPropertyIndexRecord(sourceGuid, meta) {
+    const guid = `${sourceGuid || meta?.guid || ''}`.trim();
+    const name = (meta?.name || '').trim() || guid;
+    const updatedAt = this.parsePropertyIndexCacheDate(meta?.updatedAt);
+    const createdAt = this.parsePropertyIndexCacheDate(meta?.createdAt);
+    return {
+      guid,
+      __backreferencesCachedRecord: true,
+      getName() {
+        return name;
+      },
+      getUpdatedAt() {
+        return updatedAt;
+      },
+      getCreatedAt() {
+        return createdAt;
+      },
+      getJournalDetails() {
+        return null;
+      }
+    };
+  }
+
   serializePropertyIndexCache() {
     if (this._propertyIndexStatus !== 'ready') return null;
     const sources = [];
@@ -3902,7 +3949,11 @@ class Plugin extends AppPlugin {
         compact.push([targetGuid, propertyName]);
       }
       if (compact.length === 0) continue;
-      sources.push([guid, compact]);
+      sources.push([
+        guid,
+        this.serializePropertyIndexRecordMeta(this.getPropertyIndexSourceRecord(guid), guid),
+        compact
+      ]);
       referenceCount += compact.length;
     }
 
@@ -3949,7 +4000,6 @@ class Plugin extends AppPlugin {
   hydratePropertyIndexFromCache() {
     const raw = this.readJsonStorage(this._storageKeyPropertyIndexCache);
     if (!raw || raw.version !== 1 || !Array.isArray(raw.sources)) return false;
-    if (raw.sources.length > 0 && typeof this.data?.getRecord !== 'function') return false;
     const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
     const hasStoredScan = raw.sources.length > 0
       || this.coerceNonNegativeInt(stats.scannedRecords, 0) > 0
@@ -3965,10 +4015,13 @@ class Plugin extends AppPlugin {
     for (const source of raw.sources) {
       if (!Array.isArray(source) || source.length < 2) continue;
       const sourceGuid = `${source[0] || ''}`.trim();
-      const rawEntries = Array.isArray(source[1]) ? source[1] : [];
+      const hasMeta = source.length >= 3 && source[1] && typeof source[1] === 'object' && !Array.isArray(source[1]);
+      const meta = hasMeta ? source[1] : null;
+      const rawEntries = hasMeta && Array.isArray(source[2])
+        ? source[2]
+        : (Array.isArray(source[1]) ? source[1] : []);
       if (!sourceGuid || rawEntries.length === 0) continue;
-      const record = this.data.getRecord(sourceGuid) || null;
-      if (!record) continue;
+      const record = this.createCachedPropertyIndexRecord(sourceGuid, meta);
 
       const entries = [];
       const seen = new Set();

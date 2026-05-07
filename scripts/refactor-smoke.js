@@ -1016,7 +1016,9 @@ test('property index cache hydrates ready results and delays startup refresh', (
     name: 'Source',
     updatedAt: makeDate('2026-04-24T09:00:00Z')
   });
-  plugin.__recordsByGuid.set(source.guid, source);
+  plugin.data.getRecord = () => {
+    throw new Error('cache hydration should not synchronously fetch records');
+  };
   installLocalStorage({
     [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
       version: 1,
@@ -1027,7 +1029,10 @@ test('property index cache hydrates ready results and delays startup refresh', (
         indexedReferences: 1,
         indexedTargets: 1
       },
-      sources: [[source.guid, [[target.guid, 'Entity']]]]
+      sources: [[source.guid, {
+        name: source.getName(),
+        updatedAt: source.getUpdatedAt().toISOString()
+      }, [[target.guid, 'Entity']]]]
     })
   });
 
@@ -1035,6 +1040,10 @@ test('property index cache hydrates ready results and delays startup refresh', (
   assert.equal(plugin._propertyIndexStatus, 'ready');
   assert.equal(plugin._propertyIndexStats.cacheState, 'hydrated');
   assert.equal(plugin._propertyIndexStats.cacheSourceCount, 1);
+  assert.equal(
+    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records[0].getName(),
+    'Source'
+  );
   assert.deepEqual(
     plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
     [source.guid]
@@ -1080,21 +1089,31 @@ test('property index cache serializes incremental record updates', async () => {
   await plugin.rebuildPropertyIndex({ reason: 'cache-test' });
   assert.equal(plugin.writePropertyIndexCache(), true);
   let cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
-  assert.deepEqual(cached.sources, [[source.guid, [[oldTarget.guid, 'Entity']]]]);
+  assert.equal(cached.sources[0][0], source.guid);
+  assert.equal(cached.sources[0][1].name, 'Source Record');
+  assert.deepEqual(cached.sources[0][2], [[oldTarget.guid, 'Entity']]);
 
   properties.splice(0, properties.length, makeProperty('Entity', ['record', newTarget.guid]));
   plugin.updatePropertyIndexForRecord(source.guid, source);
   assert.equal(plugin.writePropertyIndexCache(), true);
   cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
-  assert.deepEqual(cached.sources, [[source.guid, [[newTarget.guid, 'Entity']]]]);
+  assert.equal(cached.sources[0][0], source.guid);
+  assert.equal(cached.sources[0][1].name, 'Source Record');
+  assert.deepEqual(cached.sources[0][2], [[newTarget.guid, 'Entity']]);
 
   const hydrated = makePlugin();
-  hydrated.__recordsByGuid.set(source.guid, source);
+  hydrated.data.getRecord = () => {
+    throw new Error('cache hydration should use stored record metadata');
+  };
   installLocalStorage({
     [hydrated._storageKeyPropertyIndexCache]: JSON.stringify(cached)
   });
   assert.equal(hydrated.hydratePropertyIndexFromCache(), true);
   assert.deepEqual(hydrated.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false }), []);
+  assert.equal(
+    hydrated.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records[0].getName(),
+    'Source Record'
+  );
   assert.deepEqual(
     hydrated.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
     [source.guid]
