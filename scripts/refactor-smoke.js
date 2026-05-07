@@ -221,9 +221,12 @@ function makePlugin() {
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
   plugin._defaultContextPreloadMaxLines = 30;
   plugin._propertyIndexInitialDelayMs = 500;
+  plugin._propertyIndexHydratedRefreshDelayMs = 30000;
   plugin._propertyIndexYieldEveryRecords = 25;
   plugin._propertyIndexYieldBudgetMs = 12;
   plugin._propertyIndexProgressNotifyMs = 250;
+  plugin._propertyIndexCacheWriteDebounceMs = 1000;
+  plugin._storageKeyPropertyIndexCache = 'thymer_backreferences_property_index_cache_v1';
   plugin._defaultQueryFilterMaxResults = 1000;
   plugin._propertyIndexStatus = 'idle';
   plugin._propertyIndexByTargetGuid = new Map();
@@ -233,7 +236,9 @@ function makePlugin() {
   plugin._propertyIndexPromise = null;
   plugin._propertyIndexBuildSeq = 0;
   plugin._propertyIndexRebuildTimer = null;
+  plugin._propertyIndexCacheWriteTimer = null;
   plugin._propertyIndexNeedsRebuild = false;
+  plugin._propertyIndexHydratedFromCache = false;
   plugin._maxStoredPageViewRecords = 400;
   plugin._maxStoredSortByRecords = 400;
   plugin._maxStoredPropGroupStates = 160;
@@ -580,6 +585,25 @@ test('reload schedules property index rebuild and refreshes panels', () => {
   plugin.handlePluginReload();
 
   assert.deepEqual(scheduled, [{ reason: 'reload-property-index-rebuild', delayMs: 0 }]);
+  assert.deepEqual(refreshes, [{ force: true, reason: 'reload' }]);
+});
+
+test('reload keeps a ready property index and delays the refresh scan', () => {
+  const plugin = makePlugin();
+  const scheduled = [];
+  const refreshes = [];
+  plugin._propertyIndexStatus = 'ready';
+  plugin._propertyIndexHydratedRefreshDelayMs = 12345;
+  plugin.schedulePropertyIndexRebuild = (reason, delayMs) => {
+    scheduled.push({ reason, delayMs });
+  };
+  plugin.refreshAllPanels = (args) => {
+    refreshes.push(args);
+  };
+
+  plugin.handlePluginReload();
+
+  assert.deepEqual(scheduled, [{ reason: 'reload-property-index-rebuild', delayMs: 12345 }]);
   assert.deepEqual(refreshes, [{ force: true, reason: 'reload' }]);
 });
 
@@ -982,6 +1006,99 @@ test('property index build records reason, property counts, duration, and yields
   assert.equal(typeof plugin._propertyIndexStats.durationMs, 'number');
   assert.ok(plugin._propertyIndexStats.startedAt instanceof Date);
   assert.ok(plugin._propertyIndexStats.finishedAt instanceof Date);
+});
+
+test('property index cache hydrates ready results and delays startup refresh', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const source = makeRecord({
+    guid: 'source-guid',
+    name: 'Source',
+    updatedAt: makeDate('2026-04-24T09:00:00Z')
+  });
+  plugin.__recordsByGuid.set(source.guid, source);
+  installLocalStorage({
+    [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
+      version: 1,
+      savedAt: Date.UTC(2026, 3, 24, 9, 0, 0),
+      stats: {
+        scannedRecords: 200,
+        scannedProperties: 400,
+        indexedReferences: 1,
+        indexedTargets: 1
+      },
+      sources: [[source.guid, [[target.guid, 'Entity']]]]
+    })
+  });
+
+  assert.equal(plugin.hydratePropertyIndexFromCache(), true);
+  assert.equal(plugin._propertyIndexStatus, 'ready');
+  assert.equal(plugin._propertyIndexStats.cacheState, 'hydrated');
+  assert.equal(plugin._propertyIndexStats.cacheSourceCount, 1);
+  assert.deepEqual(
+    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
+
+  const previousSetTimeout = global.setTimeout;
+  const previousClearTimeout = global.clearTimeout;
+  const scheduled = [];
+  global.setTimeout = (fn, delay) => {
+    scheduled.push(delay);
+    return { unref() {} };
+  };
+  global.clearTimeout = () => {};
+
+  try {
+    plugin._propertyIndexHydratedFromCache = true;
+    plugin.scheduleInitialPropertyIndexBuild();
+    assert.deepEqual(scheduled, [plugin._propertyIndexHydratedRefreshDelayMs]);
+    assert.equal(plugin._propertyIndexStats.reason, 'initial-cache-refresh');
+  } finally {
+    global.setTimeout = previousSetTimeout;
+    global.clearTimeout = previousClearTimeout;
+  }
+});
+
+test('property index cache serializes incremental record updates', async () => {
+  const plugin = makePlugin();
+  const store = installLocalStorage();
+  const oldTarget = makeRecord({ guid: 'old-target', name: 'Old Target' });
+  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
+  const properties = [makeProperty('Entity', ['record', oldTarget.guid])];
+  const source = makeRecord({
+    guid: 'source-record',
+    name: 'Source Record',
+    updatedAt: makeDate('2026-04-24T09:00:00Z'),
+    properties
+  });
+
+  plugin.data.getAllCollections = async () => [{
+    getAllRecords: async () => [source]
+  }];
+  plugin.__recordsByGuid.set(source.guid, source);
+  await plugin.rebuildPropertyIndex({ reason: 'cache-test' });
+  assert.equal(plugin.writePropertyIndexCache(), true);
+  let cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
+  assert.deepEqual(cached.sources, [[source.guid, [[oldTarget.guid, 'Entity']]]]);
+
+  properties.splice(0, properties.length, makeProperty('Entity', ['record', newTarget.guid]));
+  plugin.updatePropertyIndexForRecord(source.guid, source);
+  assert.equal(plugin.writePropertyIndexCache(), true);
+  cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
+  assert.deepEqual(cached.sources, [[source.guid, [[newTarget.guid, 'Entity']]]]);
+
+  const hydrated = makePlugin();
+  hydrated.__recordsByGuid.set(source.guid, source);
+  installLocalStorage({
+    [hydrated._storageKeyPropertyIndexCache]: JSON.stringify(cached)
+  });
+  assert.equal(hydrated.hydratePropertyIndexFromCache(), true);
+  assert.deepEqual(hydrated.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false }), []);
+  assert.deepEqual(
+    hydrated.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
 });
 
 test('linked and unlinked grouping preserves source grouping rules', () => {
