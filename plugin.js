@@ -7656,6 +7656,89 @@ class Plugin extends AppPlugin {
     unlinkedLoading,
     maxResults
   }) {
+    const normalized = this.normalizeReferenceViewInput({
+      propertyGroups,
+      propertyError,
+      propertyIndexStatus,
+      propertyIndexStats,
+      propertyIndexError,
+      linkedGroups,
+      linkedError,
+      unlinkedGroups,
+      unlinkedError,
+      unlinkedDeferred,
+      unlinkedLoading,
+      maxResults
+    });
+    const searchState = this.buildReferenceSearchState(state);
+    const totalCounts = this.countReferenceViewGroups(
+      normalized.propsAll,
+      normalized.linkedAll,
+      normalized.unlinkedAll
+    );
+    const collapseMetrics = this.buildReferenceCollapseMetrics(normalized, totalCounts);
+    const filteredGroups = this.filterReferenceGroupsForRender({
+      propsAll: normalized.propsAll,
+      linkedAll: normalized.linkedAll,
+      unlinkedAll: normalized.unlinkedAll,
+      ...searchState
+    });
+    const filteredCounts = this.countReferenceViewGroups(
+      filteredGroups.props,
+      filteredGroups.linked,
+      filteredGroups.unlinked
+    );
+    const visibility = this.buildReferenceViewVisibilityState(
+      state,
+      searchState,
+      totalCounts,
+      filteredCounts,
+      collapseMetrics
+    );
+    const sortedGroups = this.sortReferenceViewGroupsForState(state, filteredGroups, visibility);
+
+    return this.assembleReferenceViewState({
+      normalized,
+      searchState,
+      totalCounts,
+      filteredCounts,
+      collapseMetrics,
+      visibility,
+      sortedGroups
+    });
+  }
+
+  normalizeReferenceViewInput({
+    propertyGroups,
+    propertyError,
+    propertyIndexStatus,
+    propertyIndexStats,
+    propertyIndexError,
+    linkedGroups,
+    linkedError,
+    unlinkedGroups,
+    unlinkedError,
+    unlinkedDeferred,
+    unlinkedLoading,
+    maxResults
+  }) {
+    return {
+      propsAll: Array.isArray(propertyGroups) ? propertyGroups : [],
+      linkedAll: Array.isArray(linkedGroups) ? linkedGroups : [],
+      unlinkedAll: Array.isArray(unlinkedGroups) ? unlinkedGroups : [],
+      propertyError,
+      propertyIndexStatus: propertyIndexStatus || 'ready',
+      propertyIndexStats: propertyIndexStats || this.createEmptyPropertyIndexStats(),
+      propertyIndexError: propertyIndexError || '',
+      linkedError,
+      unlinkedError,
+      unlinkedDeferred,
+      unlinkedLoading,
+      maxResults
+    };
+  }
+
+  buildReferenceSearchState(state) {
     const query = (state.searchQuery || '').trim();
     const searchMode = this.getSearchMode(query);
     const incompleteQueryDraft = searchMode === 'query' && this.isIncompleteQueryDraft(query);
@@ -7666,119 +7749,148 @@ class Plugin extends AppPlugin {
       ? this.shouldIncludeUnlinkedInQueryScope(state, state.lastResults || {})
       : true;
     const highlightQuery = searchMode === 'text' ? query : '';
-    const normalizedPropertyIndexStatus = propertyIndexStatus || 'ready';
-    const normalizedPropertyIndexStats = propertyIndexStats || this.createEmptyPropertyIndexStats();
-    const normalizedPropertyIndexError = propertyIndexError || '';
-
-    const propsAll = Array.isArray(propertyGroups) ? propertyGroups : [];
-    const linkedAll = Array.isArray(linkedGroups) ? linkedGroups : [];
-    const unlinkedAll = Array.isArray(unlinkedGroups) ? unlinkedGroups : [];
-
-    const totalPropRefCount = propsAll.reduce((total, group) => total + (group?.records?.length || 0), 0);
-    const totalLinkedRefCount = this.countLinkedReferences(linkedAll);
-    const totalUnlinkedRefCount = this.countLinkedReferences(unlinkedAll);
-    const collapseMetrics = {
-      ready: true,
-      propertyCount: totalPropRefCount,
-      linkedCount: totalLinkedRefCount,
-      unlinkedCount: totalUnlinkedRefCount,
-      propertyError: Boolean(propertyError),
-      linkedError: Boolean(linkedError),
-      unlinkedError: Boolean(unlinkedError),
-      propertyIndexPending: normalizedPropertyIndexStatus === 'idle' || normalizedPropertyIndexStatus === 'indexing',
-      propertyIndexError: normalizedPropertyIndexStatus === 'error',
-      unlinkedDeferred: unlinkedDeferred === true
-    };
-    const totalUniquePages = this.collectUniquePageGuids(propsAll, linkedAll, []);
-    const filteredGroups = this.filterReferenceGroupsForRender({
-      propsAll,
-      linkedAll,
-      unlinkedAll,
-      searchMode,
-      textQueryLower,
-      queryFilterState,
-      canApplyScopedQuery,
-      shouldScopeUnlinked
-    });
-
-    let { props, linked, unlinked } = filteredGroups;
-    const filteredPropRefCount = props.reduce((total, group) => total + (group?.records?.length || 0), 0);
-    const filteredLinkedRefCount = this.countLinkedReferences(linked);
-    const filteredUnlinkedRefCount = this.countLinkedReferences(unlinked);
-    const hasScopedView = (searchMode === 'text' && Boolean(textQueryLower)) || (searchMode === 'query' && canApplyScopedQuery);
-    const showUnlinkedCounts = searchMode !== 'query' || shouldScopeUnlinked;
-    const showScopedCounts = hasScopedView || (searchMode === 'query' && canApplyScopedQuery);
-    const totalVisibleRefCount = totalPropRefCount + totalLinkedRefCount;
-    const filteredVisibleRefCount = filteredPropRefCount + filteredLinkedRefCount;
-    const filteredUniquePages = this.collectUniquePageGuids(props, linked, []);
-    const propertySectionCollapsed = this.isSectionCollapsed(state, 'property', collapseMetrics);
-    const linkedSectionCollapsed = this.isSectionCollapsed(state, 'linked', collapseMetrics);
-    const unlinkedSectionCollapsed = this.isSectionCollapsed(state, 'unlinked', collapseMetrics);
-
-    const sortSpec = {
-      sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
-      sortDir: this.normalizeSortDir(state?.sortDir) || this._defaultSortDir
-    };
-    const shouldSortAnySection = !propertySectionCollapsed || !linkedSectionCollapsed || !unlinkedSectionCollapsed;
-    const sortMetrics = shouldSortAnySection
-      ? this.computeRecordSortMetrics(props, [...linked, ...unlinked])
-      : null;
-    props = propertySectionCollapsed ? props : this.sortPropertyGroupsForRender(props, sortSpec, sortMetrics);
-    linked = linkedSectionCollapsed ? linked : this.sortLinkedGroupsForRender(linked, sortSpec, sortMetrics);
-    unlinked = unlinkedSectionCollapsed ? unlinked : this.sortLinkedGroupsForRender(unlinked, sortSpec, sortMetrics);
 
     return {
       searchMode,
       incompleteQueryDraft,
+      textQueryLower,
       queryFilterState,
       canApplyScopedQuery,
       shouldScopeUnlinked,
-      highlightQuery,
-      props,
-      linked,
-      unlinked,
-      propertyError,
-      propertyIndexStatus: normalizedPropertyIndexStatus,
-      propertyIndexStats: normalizedPropertyIndexStats,
-      propertyIndexError: normalizedPropertyIndexError,
-      propertyIndexMessage: this.getPropertyIndexDisplayMessage({
-        status: normalizedPropertyIndexStatus,
-        stats: normalizedPropertyIndexStats,
-        error: normalizedPropertyIndexError
-      }),
-      linkedError,
-      unlinkedError,
-      unlinkedDeferred,
-      unlinkedLoading,
-      maxResults,
-      totalPropRefCount,
-      totalLinkedRefCount,
-      totalUnlinkedRefCount,
-      filteredPropRefCount,
-      filteredLinkedRefCount,
-      filteredUnlinkedRefCount,
-      totalVisibleRefCount,
-      filteredVisibleRefCount,
-      totalUniquePagesSize: totalUniquePages.size,
-      filteredUniquePagesSize: filteredUniquePages.size,
-      collapseMetrics,
+      highlightQuery
+    };
+  }
+
+  countReferenceViewGroups(props, linked, unlinked) {
+    return {
+      propRefCount: (props || []).reduce((total, group) => total + (group?.records?.length || 0), 0),
+      linkedRefCount: this.countLinkedReferences(linked),
+      unlinkedRefCount: this.countLinkedReferences(unlinked),
+      uniquePages: this.collectUniquePageGuids(props, linked, [])
+    };
+  }
+
+  buildReferenceCollapseMetrics(normalized, totalCounts) {
+    const collapseMetrics = {
+      ready: true,
+      propertyCount: totalCounts.propRefCount,
+      linkedCount: totalCounts.linkedRefCount,
+      unlinkedCount: totalCounts.unlinkedRefCount,
+      propertyError: Boolean(normalized.propertyError),
+      linkedError: Boolean(normalized.linkedError),
+      unlinkedError: Boolean(normalized.unlinkedError),
+      propertyIndexPending: normalized.propertyIndexStatus === 'idle' || normalized.propertyIndexStatus === 'indexing',
+      propertyIndexError: normalized.propertyIndexStatus === 'error',
+      unlinkedDeferred: normalized.unlinkedDeferred === true
+    };
+    return collapseMetrics;
+  }
+
+  buildReferenceViewVisibilityState(state, searchState, totalCounts, filteredCounts, collapseMetrics) {
+    const hasScopedView = this.hasScopedReferenceView(searchState);
+    const showUnlinkedCounts = searchState.searchMode !== 'query' || searchState.shouldScopeUnlinked;
+    const showScopedCounts = hasScopedView || (searchState.searchMode === 'query' && searchState.canApplyScopedQuery);
+    const propertySectionCollapsed = this.isSectionCollapsed(state, 'property', collapseMetrics);
+    const linkedSectionCollapsed = this.isSectionCollapsed(state, 'linked', collapseMetrics);
+    const unlinkedSectionCollapsed = this.isSectionCollapsed(state, 'unlinked', collapseMetrics);
+    return {
       hasScopedView,
       showUnlinkedCounts,
       showScopedCounts,
+      totalVisibleRefCount: totalCounts.propRefCount + totalCounts.linkedRefCount,
+      filteredVisibleRefCount: filteredCounts.propRefCount + filteredCounts.linkedRefCount,
       propertySectionCollapsed,
       linkedSectionCollapsed,
-      unlinkedSectionCollapsed,
-      summaryText: this.buildReferenceSummaryParts({
-        searchMode,
-        incompleteQueryDraft,
-        queryFilterState,
-        canApplyScopedQuery,
-        hasScopedView,
-        filteredUniquePagesSize: filteredUniquePages.size,
-        totalUniquePagesSize: totalUniquePages.size,
-        filteredVisibleRefCount,
-        totalVisibleRefCount
-      }).join(' | ')
+      unlinkedSectionCollapsed
+    };
+  }
+
+  hasScopedReferenceView({ searchMode, textQueryLower, canApplyScopedQuery }) {
+    if (searchMode === 'text') return Boolean(textQueryLower);
+    return searchMode === 'query' && canApplyScopedQuery === true;
+  }
+
+  getReferenceSortSpec(state) {
+    return {
+      sortBy: this.normalizeSortBy(state?.sortBy) || this._defaultSortBy,
+      sortDir: this.normalizeSortDir(state?.sortDir) || this._defaultSortDir
+    };
+  }
+
+  sortReferenceViewGroupsForState(state, groups, visibility) {
+    const sortSpec = this.getReferenceSortSpec(state);
+    const shouldSortAnySection = !visibility.propertySectionCollapsed
+      || !visibility.linkedSectionCollapsed
+      || !visibility.unlinkedSectionCollapsed;
+    const sortMetrics = shouldSortAnySection
+      ? this.computeRecordSortMetrics(groups.props, [...groups.linked, ...groups.unlinked])
+      : null;
+    return {
+      props: visibility.propertySectionCollapsed
+        ? groups.props
+        : this.sortPropertyGroupsForRender(groups.props, sortSpec, sortMetrics),
+      linked: visibility.linkedSectionCollapsed
+        ? groups.linked
+        : this.sortLinkedGroupsForRender(groups.linked, sortSpec, sortMetrics),
+      unlinked: visibility.unlinkedSectionCollapsed
+        ? groups.unlinked
+        : this.sortLinkedGroupsForRender(groups.unlinked, sortSpec, sortMetrics)
+    };
+  }
+
+  assembleReferenceViewState({
+    normalized,
+    searchState,
+    totalCounts,
+    filteredCounts,
+    collapseMetrics,
+    visibility,
+    sortedGroups
+  }) {
+    const summaryText = this.buildReferenceSummaryParts({
+      searchMode: searchState.searchMode,
+      incompleteQueryDraft: searchState.incompleteQueryDraft,
+      queryFilterState: searchState.queryFilterState,
+      canApplyScopedQuery: searchState.canApplyScopedQuery,
+      hasScopedView: visibility.hasScopedView,
+      filteredUniquePagesSize: filteredCounts.uniquePages.size,
+      totalUniquePagesSize: totalCounts.uniquePages.size,
+      filteredVisibleRefCount: visibility.filteredVisibleRefCount,
+      totalVisibleRefCount: visibility.totalVisibleRefCount
+    }).join(' | ');
+
+    return {
+      ...searchState,
+      props: sortedGroups.props,
+      linked: sortedGroups.linked,
+      unlinked: sortedGroups.unlinked,
+      propertyError: normalized.propertyError,
+      propertyIndexStatus: normalized.propertyIndexStatus,
+      propertyIndexStats: normalized.propertyIndexStats,
+      propertyIndexError: normalized.propertyIndexError,
+      propertyIndexMessage: this.getPropertyIndexDisplayMessage({
+        status: normalized.propertyIndexStatus,
+        stats: normalized.propertyIndexStats,
+        error: normalized.propertyIndexError
+      }),
+      linkedError: normalized.linkedError,
+      unlinkedError: normalized.unlinkedError,
+      unlinkedDeferred: normalized.unlinkedDeferred,
+      unlinkedLoading: normalized.unlinkedLoading,
+      maxResults: normalized.maxResults,
+      totalPropRefCount: totalCounts.propRefCount,
+      totalLinkedRefCount: totalCounts.linkedRefCount,
+      totalUnlinkedRefCount: totalCounts.unlinkedRefCount,
+      filteredPropRefCount: filteredCounts.propRefCount,
+      filteredLinkedRefCount: filteredCounts.linkedRefCount,
+      filteredUnlinkedRefCount: filteredCounts.unlinkedRefCount,
+      totalVisibleRefCount: visibility.totalVisibleRefCount,
+      filteredVisibleRefCount: visibility.filteredVisibleRefCount,
+      totalUniquePagesSize: totalCounts.uniquePages.size,
+      filteredUniquePagesSize: filteredCounts.uniquePages.size,
+      collapseMetrics,
+      ...visibility,
+      summaryText
     };
   }
 
@@ -7892,22 +8004,38 @@ class Plugin extends AppPlugin {
   }
 
   appendReferenceStatus(body, viewState) {
-    if (viewState.searchMode === 'query' && viewState.incompleteQueryDraft) {
-      this.appendNote(body, 'Finish the query to filter the current backreferences.');
-    } else if (viewState.searchMode === 'query' && viewState.queryFilterState?.error) {
-      this.appendError(body, viewState.queryFilterState.error);
-    } else if (viewState.searchMode === 'query' && viewState.queryFilterState?.loading === true) {
-      this.appendNote(
-        body,
-        viewState.canApplyScopedQuery
-          ? 'Refreshing query results...'
-          : 'Applying query to current backreferences...'
-      );
-    } else if (viewState.propertyIndexStatus === 'indexing') {
-      this.appendNote(body, viewState.propertyIndexMessage);
-    } else if (viewState.propertyIndexStatus === 'idle') {
-      this.appendNote(body, viewState.propertyIndexMessage);
+    const status = this.getReferenceStatusMessage(viewState);
+    if (!status) return;
+    if (status.kind === 'error') this.appendError(body, status.message);
+    else this.appendNote(body, status.message);
+  }
+
+  getReferenceStatusMessage(viewState) {
+    const queryStatus = this.getReferenceQueryStatusMessage(viewState);
+    if (queryStatus) return queryStatus;
+    return this.getReferenceIndexStatusMessage(viewState);
+  }
+
+  getReferenceQueryStatusMessage(viewState) {
+    if (viewState.searchMode !== 'query') return null;
+    if (viewState.incompleteQueryDraft) {
+      return { kind: 'note', message: 'Finish the query to filter the current backreferences.' };
     }
+    if (viewState.queryFilterState?.error) {
+      return { kind: 'error', message: viewState.queryFilterState.error };
+    }
+    if (viewState.queryFilterState?.loading !== true) return null;
+    return {
+      kind: 'note',
+      message: viewState.canApplyScopedQuery
+        ? 'Refreshing query results...'
+        : 'Applying query to current backreferences...'
+    };
+  }
+
+  getReferenceIndexStatusMessage(viewState) {
+    if (viewState.propertyIndexStatus !== 'indexing' && viewState.propertyIndexStatus !== 'idle') return null;
+    return { kind: 'note', message: viewState.propertyIndexMessage };
   }
 
   renderPropertyReferenceSection(body, state, viewState) {
@@ -7924,25 +8052,42 @@ class Plugin extends AppPlugin {
           )
     });
 
-    if (viewState.propertyError) {
-      this.appendError(section.bodyEl, viewState.propertyError);
-    } else if (viewState.propertySectionCollapsed) {
-      return;
-    } else if (viewState.propertyIndexStatus === 'indexing' || viewState.propertyIndexStatus === 'idle') {
-      this.appendNote(section.bodyEl, viewState.propertyIndexMessage);
-    } else if (viewState.propertyIndexStatus === 'error') {
-      this.appendPropertyIndexError(section.bodyEl, viewState.propertyIndexError);
-    } else if (viewState.props.length === 0) {
-      this.appendEmpty(
-        section.bodyEl,
-        viewState.hasScopedView ? 'No matching property references.' : 'No property references.'
-      );
-    } else {
-      this.appendPropertyReferenceGroups(section.bodyEl, viewState.props, {
-        query: viewState.highlightQuery,
-        state
-      });
+    this.renderPropertyReferenceSectionBody(section.bodyEl, state, viewState);
+  }
+
+  renderPropertyReferenceSectionBody(bodyEl, state, viewState) {
+    const outcome = this.getPropertyReferenceSectionOutcome(viewState);
+    if (outcome.type === 'none') return;
+    if (outcome.type === 'error') this.appendError(bodyEl, outcome.message);
+    else if (outcome.type === 'note') this.appendNote(bodyEl, outcome.message);
+    else if (outcome.type === 'index-error') this.appendPropertyIndexError(bodyEl, outcome.message);
+    else if (outcome.type === 'empty') this.appendEmpty(bodyEl, outcome.message);
+    else this.appendPropertyReferenceGroups(bodyEl, viewState.props, {
+      query: viewState.highlightQuery,
+      state
+    });
+  }
+
+  getPropertyReferenceSectionOutcome(viewState) {
+    if (viewState.propertyError) return { type: 'error', message: viewState.propertyError };
+    if (viewState.propertySectionCollapsed) return { type: 'none' };
+    if (this.isPropertyIndexPendingForRender(viewState)) {
+      return { type: 'note', message: viewState.propertyIndexMessage };
     }
+    if (viewState.propertyIndexStatus === 'error') {
+      return { type: 'index-error', message: viewState.propertyIndexError };
+    }
+    if (viewState.props.length === 0) {
+      return {
+        type: 'empty',
+        message: viewState.hasScopedView ? 'No matching property references.' : 'No property references.'
+      };
+    }
+    return { type: 'groups' };
+  }
+
+  isPropertyIndexPendingForRender(viewState) {
+    return viewState.propertyIndexStatus === 'indexing' || viewState.propertyIndexStatus === 'idle';
   }
 
   renderLinkedReferenceSection(body, state, viewState) {
@@ -7989,35 +8134,40 @@ class Plugin extends AppPlugin {
         )
     });
 
-    if (viewState.unlinkedLoading) {
-      if (!viewState.unlinkedSectionCollapsed) {
-        this.appendNote(section.bodyEl, 'Loading unlinked references...');
-      }
-      return;
-    }
+    this.renderUnlinkedReferenceSectionBody(section.bodyEl, state, viewState);
+  }
 
-    if (viewState.unlinkedError) {
-      this.appendError(section.bodyEl, viewState.unlinkedError);
-      return;
-    }
-
-    if (viewState.unlinkedSectionCollapsed) {
-      return;
-    }
-
-    if (viewState.unlinkedDeferred) {
-      this.appendNote(section.bodyEl, 'Loading unlinked references...');
-      return;
-    }
-
-    this.appendLinkedReferenceGroups(section.bodyEl, viewState.unlinked, {
+  renderUnlinkedReferenceSectionBody(bodyEl, state, viewState) {
+    const outcome = this.getUnlinkedReferenceSectionOutcome(viewState);
+    if (outcome.type === 'none') return;
+    if (outcome.type === 'note') this.appendNote(bodyEl, outcome.message);
+    else if (outcome.type === 'error') this.appendError(bodyEl, outcome.message);
+    else this.appendLinkedReferenceGroups(bodyEl, viewState.unlinked, {
       groupSectionId: 'unlinked',
       state,
       maxResults: viewState.maxResults,
       query: viewState.highlightQuery,
       totalLineCount: viewState.totalUnlinkedRefCount,
-      emptyMessage: viewState.hasScopedView ? 'No matching unlinked references.' : 'No unlinked references.'
+      emptyMessage: outcome.emptyMessage
     });
+  }
+
+  getUnlinkedReferenceSectionOutcome(viewState) {
+    if (this.shouldShowUnlinkedLoadingNote(viewState)) {
+      return { type: 'note', message: 'Loading unlinked references...' };
+    }
+    if (viewState.unlinkedLoading) return { type: 'none' };
+    if (viewState.unlinkedError) return { type: 'error', message: viewState.unlinkedError };
+    if (viewState.unlinkedSectionCollapsed) return { type: 'none' };
+    if (viewState.unlinkedDeferred) return { type: 'note', message: 'Loading unlinked references...' };
+    return {
+      type: 'groups',
+      emptyMessage: viewState.hasScopedView ? 'No matching unlinked references.' : 'No unlinked references.'
+    };
+  }
+
+  shouldShowUnlinkedLoadingNote(viewState) {
+    return viewState.unlinkedLoading === true && viewState.unlinkedSectionCollapsed !== true;
   }
 
   appendReferenceDivider(container) {
@@ -8040,13 +8190,9 @@ class Plugin extends AppPlugin {
     unlinkedLoading,
     maxResults
   }) {
-    if (!state?.bodyEl || !state?.countEl) return;
-    if (!state?.statusSlotEl || !state?.propertySlotEl || !state?.linkedSlotEl || !state?.unlinkedSlotEl) return;
+    if (!this.hasReferenceRenderSlots(state)) return;
 
-    const perf = this.perfCreate('renderReferences', {
-      panelId: state.panelId || '',
-      recordGuid: state.recordGuid || ''
-    });
+    const perf = this.createReferenceRenderPerf(state);
     const buildStartedAt = this.perfNow();
     const viewState = this.buildReferenceViewState(state, {
       propertyGroups,
@@ -8062,34 +8208,51 @@ class Plugin extends AppPlugin {
       unlinkedLoading,
       maxResults
     });
-    this.perfStep(perf, 'build view state', buildStartedAt, {
+    this.logReferenceViewBuildPerf(perf, buildStartedAt, { propertyGroups, linkedGroups, unlinkedGroups });
+
+    this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, viewState.collapseMetrics));
+    state.countEl.textContent = viewState.summaryText;
+
+    const plan = this.buildReferenceRenderPlan(state, viewState);
+    this.applyReferenceRenderPlan(state, viewState, plan, perf);
+    this.logReferenceRenderCounts(perf, viewState);
+    this.perfLog(perf);
+  }
+
+  hasReferenceRenderSlots(state) {
+    if (!state?.bodyEl || !state?.countEl) return false;
+    return Boolean(state.statusSlotEl && state.propertySlotEl && state.linkedSlotEl && state.unlinkedSlotEl);
+  }
+
+  createReferenceRenderPerf(state) {
+    return this.perfCreate('renderReferences', {
+      panelId: state.panelId || '',
+      recordGuid: state.recordGuid || ''
+    });
+  }
+
+  logReferenceViewBuildPerf(perf, startedAt, { propertyGroups, linkedGroups, unlinkedGroups }) {
+    this.perfStep(perf, 'build view state', startedAt, {
       propertyGroups: Array.isArray(propertyGroups) ? propertyGroups.length : 0,
       linkedGroups: Array.isArray(linkedGroups) ? linkedGroups.length : 0,
       unlinkedGroups: Array.isArray(unlinkedGroups) ? unlinkedGroups.length : 0
     });
+  }
 
-    this.syncFooterCollapsedState(state, this.isFooterCollapsed(state, viewState.collapseMetrics));
-
-    state.countEl.textContent = viewState.summaryText;
-    const plan = this.buildReferenceRenderPlan(state, viewState);
-
+  applyReferenceRenderPlan(state, viewState, plan, perf) {
     const renderStartedAt = this.perfNow();
-    if (plan.statusChanged) {
-      state.statusSlotEl.innerHTML = '';
+    this.renderReferenceSlotIfChanged(state.statusSlotEl, plan.statusChanged, () => {
       this.appendReferenceStatus(state.statusSlotEl, viewState);
-    }
-    if (plan.propertyChanged) {
-      state.propertySlotEl.innerHTML = '';
+    });
+    this.renderReferenceSlotIfChanged(state.propertySlotEl, plan.propertyChanged, () => {
       this.renderPropertyReferenceSection(state.propertySlotEl, state, viewState);
-    }
-    if (plan.linkedChanged) {
-      state.linkedSlotEl.innerHTML = '';
+    });
+    this.renderReferenceSlotIfChanged(state.linkedSlotEl, plan.linkedChanged, () => {
       this.renderLinkedReferenceSection(state.linkedSlotEl, state, viewState);
-    }
-    if (plan.unlinkedChanged) {
-      state.unlinkedSlotEl.innerHTML = '';
+    });
+    this.renderReferenceSlotIfChanged(state.unlinkedSlotEl, plan.unlinkedChanged, () => {
       this.renderUnlinkedReferenceSection(state.unlinkedSlotEl, state, viewState);
-    }
+    });
 
     state.renderSectionKeys = plan.nextKeys;
     this.perfStep(perf, 'render changed sections', renderStartedAt, {
@@ -8098,6 +8261,15 @@ class Plugin extends AppPlugin {
       linkedChanged: plan.linkedChanged,
       unlinkedChanged: plan.unlinkedChanged
     });
+  }
+
+  renderReferenceSlotIfChanged(slotEl, changed, render) {
+    if (changed !== true || !slotEl) return;
+    slotEl.innerHTML = '';
+    render();
+  }
+
+  logReferenceRenderCounts(perf, viewState) {
     this.perfCount(perf, {
       propertyGroups: viewState.props.length,
       propertyRefs: viewState.totalPropRefCount,
@@ -8107,7 +8279,6 @@ class Plugin extends AppPlugin {
       unlinkedRefs: viewState.totalUnlinkedRefCount,
       propertyIndexStatus: viewState.propertyIndexStatus || 'idle'
     });
-    this.perfLog(perf);
   }
 
   buildChevronIcon(collapsed, extraClass) {
@@ -8208,216 +8379,285 @@ class Plugin extends AppPlugin {
   appendPropertyReferenceGroups(container, groups, opts) {
     if (!container) return;
 
-    const query = (opts?.query || '').trim();
-    const state = opts?.state || null;
-
+    const context = {
+      query: (opts?.query || '').trim(),
+      state: opts?.state || null
+    };
     for (const g of groups || []) {
-      const propName = (g?.propertyName || '').trim();
-      if (!propName) continue;
-
-      const isCollapsed = this.isPropGroupCollapsed(propName);
-
-      const groupEl = document.createElement('div');
-      groupEl.className = 'tlr-prop-group';
-
-      if (isCollapsed) groupEl.classList.add('tlr-prop-collapsed');
-
-      const rowEl = document.createElement('div');
-      rowEl.className = 'tlr-prop-row';
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.type = 'button';
-      toggleBtn.className = 'tlr-btn tlr-prop-toggle button-none button-small button-minimal-hover';
-      toggleBtn.dataset.action = 'toggle-prop-group';
-      toggleBtn.dataset.propName = propName;
-      toggleBtn.title = isCollapsed ? 'Expand' : 'Collapse';
-      toggleBtn.setAttribute('aria-label', isCollapsed ? 'Expand' : 'Collapse');
-      toggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-      toggleBtn.appendChild(this.buildChevronIcon(isCollapsed, 'tlr-prop-caret'));
-
-      const header = document.createElement('button');
-      header.type = 'button';
-      header.className = 'tlr-prop-header button-normal button-normal-hover';
-      header.dataset.action = 'toggle-prop-group';
-      header.dataset.propName = propName;
-      header.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-
-      const title = document.createElement('div');
-      title.className = 'tlr-prop-title';
-      title.textContent = `${propName} in...`;
-
-      const meta = document.createElement('div');
-      meta.className = 'tlr-prop-meta text-details';
-      meta.textContent = `${g?.records?.length || 0}`;
-
-      header.appendChild(title);
-      header.appendChild(meta);
-
-      rowEl.appendChild(toggleBtn);
-      rowEl.appendChild(header);
-
-      const recsEl = document.createElement('div');
-      recsEl.className = 'tlr-prop-records';
-
-      for (const r of g?.records || []) {
-        const guid = r?.guid || null;
-        if (!guid) continue;
-
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'tlr-prop-record button-none button-minimal-hover';
-        btn.dataset.action = 'open-record';
-        btn.dataset.recordGuid = guid;
-        const name = r.getName?.() || 'Untitled';
-        btn.textContent = '';
-        this.appendHighlightedText(btn, name, query);
-        this.appendLiveBadges(btn, state, this.getPropertySnapshotKey(propName, guid));
-        recsEl.appendChild(btn);
-      }
-
-      groupEl.appendChild(rowEl);
-      groupEl.appendChild(recsEl);
-      container.appendChild(groupEl);
+      this.appendPropertyReferenceGroup(container, g, context);
     }
+  }
+
+  appendPropertyReferenceGroup(container, group, context) {
+    const propName = (group?.propertyName || '').trim();
+    if (!propName) return;
+
+    const records = Array.isArray(group?.records) ? group.records : [];
+    const isCollapsed = this.isPropGroupCollapsed(propName);
+    const groupEl = this.createPropertyGroupElement(isCollapsed);
+    groupEl.appendChild(this.buildPropertyGroupRow(propName, records.length, isCollapsed));
+    groupEl.appendChild(this.buildPropertyRecordList(propName, records, context));
+    container.appendChild(groupEl);
+  }
+
+  createPropertyGroupElement(isCollapsed) {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'tlr-prop-group';
+    if (isCollapsed) groupEl.classList.add('tlr-prop-collapsed');
+    return groupEl;
+  }
+
+  buildPropertyGroupRow(propName, count, isCollapsed) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'tlr-prop-row';
+    rowEl.appendChild(this.buildPropertyGroupToggle(propName, isCollapsed));
+    rowEl.appendChild(this.buildPropertyGroupHeader(propName, count, isCollapsed));
+    return rowEl;
+  }
+
+  buildPropertyGroupToggle(propName, isCollapsed) {
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'tlr-btn tlr-prop-toggle button-none button-small button-minimal-hover';
+    toggleBtn.dataset.action = 'toggle-prop-group';
+    toggleBtn.dataset.propName = propName;
+    toggleBtn.title = isCollapsed ? 'Expand' : 'Collapse';
+    toggleBtn.setAttribute('aria-label', isCollapsed ? 'Expand' : 'Collapse');
+    toggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    toggleBtn.appendChild(this.buildChevronIcon(isCollapsed, 'tlr-prop-caret'));
+    return toggleBtn;
+  }
+
+  buildPropertyGroupHeader(propName, count, isCollapsed) {
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'tlr-prop-header button-normal button-normal-hover';
+    header.dataset.action = 'toggle-prop-group';
+    header.dataset.propName = propName;
+    header.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    header.appendChild(this.buildTextDiv('tlr-prop-title', `${propName} in...`));
+    header.appendChild(this.buildTextDiv('tlr-prop-meta text-details', `${count || 0}`));
+    return header;
+  }
+
+  buildPropertyRecordList(propName, records, { query, state }) {
+    const recsEl = document.createElement('div');
+    recsEl.className = 'tlr-prop-records';
+    for (const record of records || []) {
+      const btn = this.buildPropertyRecordButton(propName, record, { query, state });
+      if (btn) recsEl.appendChild(btn);
+    }
+    return recsEl;
+  }
+
+  buildPropertyRecordButton(propName, record, { query, state }) {
+    const guid = record?.guid || null;
+    if (!guid) return null;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tlr-prop-record button-none button-minimal-hover';
+    btn.dataset.action = 'open-record';
+    btn.dataset.recordGuid = guid;
+    btn.textContent = '';
+    this.appendHighlightedText(btn, record.getName?.() || 'Untitled', query);
+    this.appendLiveBadges(btn, state, this.getPropertySnapshotKey(propName, guid));
+    return btn;
+  }
+
+  buildTextDiv(className, text) {
+    const el = document.createElement('div');
+    el.className = className || '';
+    el.textContent = text || '';
+    return el;
   }
 
   appendLinkedReferenceGroups(container, groups, opts) {
     if (!container) return;
 
-    const groupSectionId = this.normalizeRecordGroupSectionId(opts?.groupSectionId) || 'linked';
-    const state = opts?.state || null;
-    const maxResults = opts?.maxResults || 0;
-    const query = (opts?.query || '').trim();
-    const totalLineCount = typeof opts?.totalLineCount === 'number' ? opts.totalLineCount : null;
-    const emptyMessage = (opts?.emptyMessage || '').trim() || 'No linked references.';
+    const renderGroups = Array.isArray(groups) ? groups : [];
+    const context = this.normalizeLinkedReferenceGroupRenderContext(opts);
+    const refCount = renderGroups.reduce((n, g) => n + (g?.lines?.length || 0), 0);
 
-    const pageCount = groups.length;
-    const refCount = groups.reduce((n, g) => n + (g?.lines?.length || 0), 0);
-
-    if (pageCount === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'tlr-empty';
-      empty.textContent = emptyMessage;
-      container.appendChild(empty);
+    if (renderGroups.length === 0) {
+      this.appendEmpty(container, context.emptyMessage);
       return;
     }
 
-    for (const g of groups) {
-      const record = g.record || null;
-      const recordGuid = record?.guid || null;
-      if (!recordGuid) continue;
-      const lines = Array.isArray(g.lines) ? g.lines : [];
-      const singleRefGroup = lines.length === 1;
-      const targetRecordGuid = state?.recordGuid || '';
-      const groupCollapsed = this.isRecordGroupCollapsed(groupSectionId, targetRecordGuid, recordGuid);
-
-      const groupEl = document.createElement('div');
-      groupEl.className = 'tlr-group';
-      groupEl.classList.add(`tlr-group-${groupSectionId}`);
-      if (singleRefGroup) groupEl.classList.add('tlr-group-single');
-      if (groupCollapsed) groupEl.classList.add('tlr-group-collapsed');
-
-      const rowEl = document.createElement('div');
-      rowEl.className = 'tlr-group-row';
-
-      const toggleBtn = document.createElement('button');
-      toggleBtn.type = 'button';
-      toggleBtn.className = 'tlr-btn tlr-group-toggle button-none button-small button-minimal-hover';
-      toggleBtn.dataset.action = 'toggle-record-group';
-      toggleBtn.dataset.groupSectionId = groupSectionId;
-      toggleBtn.dataset.targetRecordGuid = targetRecordGuid;
-      toggleBtn.dataset.recordGuid = recordGuid;
-      toggleBtn.title = groupCollapsed ? 'Expand' : 'Collapse';
-      toggleBtn.setAttribute('aria-label', groupCollapsed ? 'Expand' : 'Collapse');
-      toggleBtn.setAttribute('aria-expanded', groupCollapsed ? 'false' : 'true');
-      toggleBtn.appendChild(this.buildChevronIcon(groupCollapsed, 'tlr-group-caret'));
-
-      const header = document.createElement('button');
-      header.type = 'button';
-      header.className = 'tlr-group-header button-normal button-normal-hover';
-      header.dataset.action = 'open-record';
-      header.dataset.recordGuid = recordGuid;
-
-      const title = document.createElement('div');
-      title.className = 'tlr-group-title';
-      title.textContent = record.getName?.() || 'Untitled';
-
-      const meta = document.createElement('div');
-      meta.className = 'tlr-group-meta text-details';
-      meta.textContent = `${lines.length}`;
-
-      header.appendChild(title);
-      header.appendChild(meta);
-
-      rowEl.appendChild(toggleBtn);
-      rowEl.appendChild(header);
-
-      const linesEl = document.createElement('div');
-      linesEl.className = 'tlr-lines';
-
-      if (!groupCollapsed) {
-        for (const line of lines) {
-          const entryEl = document.createElement('div');
-          entryEl.className = 'tlr-line-entry';
-
-          const ctx = state ? this.getLinkedContextState(state, line.guid) : null;
-          if (state && ctx && this.hasRequestedLinkedContext(ctx) && ctx.loaded !== true && ctx.loading !== true) {
-            this.ensureLinkedContextLoaded(state, line).catch(() => {
-              // ignore
-            });
-          }
-
-          this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'top');
-
-          const lineEl = document.createElement('button');
-          lineEl.type = 'button';
-          lineEl.className = 'tlr-line button-none button-minimal-hover';
-          lineEl.dataset.action = 'open-line';
-          lineEl.dataset.recordGuid = recordGuid;
-          lineEl.dataset.lineGuid = line.guid;
-          this.appendLineText(lineEl, line, query);
-          this.appendLiveBadges(lineEl, state, this.getLinkedSnapshotKey(line.guid));
-          const mainRowEl = document.createElement('div');
-          mainRowEl.className = 'tlr-line-main';
-          mainRowEl.appendChild(lineEl);
-          entryEl.appendChild(mainRowEl);
-
-          if (state && ctx) {
-            if (ctx.showMoreContext === true) mainRowEl.classList.add('is-context-open');
-            const controlsEl = this.buildLinkedContextControls(line.guid, ctx, {
-              showLinkAction: groupSectionId === 'unlinked'
-            });
-            if (controlsEl) mainRowEl.appendChild(controlsEl);
-
-            if (ctx.loading === true && ctx.backgroundLoading !== true) {
-              const loadingEl = document.createElement('div');
-              loadingEl.className = 'tlr-note tlr-context-note';
-              loadingEl.textContent = 'Loading context...';
-              entryEl.appendChild(loadingEl);
-            } else if (ctx.error) {
-              const errorEl = document.createElement('div');
-              errorEl.className = 'tlr-error tlr-context-note';
-              errorEl.textContent = ctx.error;
-              entryEl.appendChild(errorEl);
-            }
-          }
-
-          this.appendLinkedContextRows(entryEl, recordGuid, ctx, query, 'bottom');
-          linesEl.appendChild(entryEl);
-        }
-      }
-
-      groupEl.appendChild(rowEl);
-      groupEl.appendChild(linesEl);
-      container.appendChild(groupEl);
+    for (const group of renderGroups) {
+      this.appendLinkedReferenceGroup(container, group, context);
     }
 
-    if (maxResults > 0 && (totalLineCount ?? refCount) >= maxResults) {
-      const note = document.createElement('div');
-      note.className = 'tlr-note';
-      note.textContent = `Showing first ${maxResults} matches.`;
-      container.appendChild(note);
+    this.appendReferenceLimitNote(container, context.maxResults, context.totalLineCount ?? refCount);
+  }
+
+  normalizeLinkedReferenceGroupRenderContext(opts) {
+    return {
+      groupSectionId: this.normalizeRecordGroupSectionId(opts?.groupSectionId) || 'linked',
+      state: opts?.state || null,
+      maxResults: opts?.maxResults || 0,
+      query: (opts?.query || '').trim(),
+      totalLineCount: typeof opts?.totalLineCount === 'number' ? opts.totalLineCount : null,
+      emptyMessage: (opts?.emptyMessage || '').trim() || 'No linked references.'
+    };
+  }
+
+  appendLinkedReferenceGroup(container, group, context) {
+    const model = this.getLinkedReferenceGroupRenderModel(group, context);
+    if (!model) return;
+
+    const groupEl = this.createLinkedReferenceGroupElement(model, context.groupSectionId);
+    groupEl.appendChild(this.buildLinkedReferenceGroupRow(model, context));
+    groupEl.appendChild(this.buildLinkedReferenceLineList(model, context));
+    container.appendChild(groupEl);
+  }
+
+  getLinkedReferenceGroupRenderModel(group, { state, groupSectionId }) {
+    const record = group?.record || null;
+    const recordGuid = record?.guid || null;
+    if (!recordGuid) return null;
+
+    const lines = Array.isArray(group?.lines) ? group.lines : [];
+    const targetRecordGuid = state?.recordGuid || '';
+    return {
+      record,
+      recordGuid,
+      lines,
+      targetRecordGuid,
+      singleRefGroup: lines.length === 1,
+      groupCollapsed: this.isRecordGroupCollapsed(groupSectionId, targetRecordGuid, recordGuid)
+    };
+  }
+
+  createLinkedReferenceGroupElement({ singleRefGroup, groupCollapsed }, groupSectionId) {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'tlr-group';
+    groupEl.classList.add(`tlr-group-${groupSectionId}`);
+    if (singleRefGroup) groupEl.classList.add('tlr-group-single');
+    if (groupCollapsed) groupEl.classList.add('tlr-group-collapsed');
+    return groupEl;
+  }
+
+  buildLinkedReferenceGroupRow(model, context) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'tlr-group-row';
+    rowEl.appendChild(this.buildLinkedReferenceGroupToggle(model, context));
+    rowEl.appendChild(this.buildLinkedReferenceGroupHeader(model));
+    return rowEl;
+  }
+
+  buildLinkedReferenceGroupToggle({ recordGuid, targetRecordGuid, groupCollapsed }, { groupSectionId }) {
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = 'tlr-btn tlr-group-toggle button-none button-small button-minimal-hover';
+    toggleBtn.dataset.action = 'toggle-record-group';
+    toggleBtn.dataset.groupSectionId = groupSectionId;
+    toggleBtn.dataset.targetRecordGuid = targetRecordGuid;
+    toggleBtn.dataset.recordGuid = recordGuid;
+    toggleBtn.title = groupCollapsed ? 'Expand' : 'Collapse';
+    toggleBtn.setAttribute('aria-label', groupCollapsed ? 'Expand' : 'Collapse');
+    toggleBtn.setAttribute('aria-expanded', groupCollapsed ? 'false' : 'true');
+    toggleBtn.appendChild(this.buildChevronIcon(groupCollapsed, 'tlr-group-caret'));
+    return toggleBtn;
+  }
+
+  buildLinkedReferenceGroupHeader({ record, recordGuid, lines }) {
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'tlr-group-header button-normal button-normal-hover';
+    header.dataset.action = 'open-record';
+    header.dataset.recordGuid = recordGuid;
+    header.appendChild(this.buildTextDiv('tlr-group-title', record.getName?.() || 'Untitled'));
+    header.appendChild(this.buildTextDiv('tlr-group-meta text-details', `${lines.length}`));
+    return header;
+  }
+
+  buildLinkedReferenceLineList(model, context) {
+    const linesEl = document.createElement('div');
+    linesEl.className = 'tlr-lines';
+    if (model.groupCollapsed) return linesEl;
+
+    for (const line of model.lines) {
+      const entry = this.buildLinkedReferenceLineEntry(line, model, context);
+      if (entry) linesEl.appendChild(entry);
     }
+    return linesEl;
+  }
+
+  buildLinkedReferenceLineEntry(line, { recordGuid }, context) {
+    if (!line) return null;
+
+    const entryEl = document.createElement('div');
+    entryEl.className = 'tlr-line-entry';
+    const ctx = context.state ? this.getLinkedContextState(context.state, line.guid) : null;
+
+    this.ensureLinkedContextRequestedForRender(context.state, line, ctx);
+    this.appendLinkedContextRows(entryEl, recordGuid, ctx, context.query, 'top');
+    entryEl.appendChild(this.buildLinkedReferenceLineMain(line, recordGuid, ctx, context));
+    this.appendLinkedContextStatus(entryEl, ctx);
+    this.appendLinkedContextRows(entryEl, recordGuid, ctx, context.query, 'bottom');
+    return entryEl;
+  }
+
+  ensureLinkedContextRequestedForRender(state, line, ctx) {
+    if (!state || !ctx || !this.hasRequestedLinkedContext(ctx)) return;
+    if (ctx.loaded === true || ctx.loading === true) return;
+    this.ensureLinkedContextLoaded(state, line).catch(() => {
+      // ignore
+    });
+  }
+
+  buildLinkedReferenceLineMain(line, recordGuid, ctx, context) {
+    const mainRowEl = document.createElement('div');
+    mainRowEl.className = 'tlr-line-main';
+    mainRowEl.appendChild(this.buildLinkedReferenceLineButton(line, recordGuid, context));
+    this.appendLinkedContextControlsForLine(mainRowEl, line.guid, ctx, context);
+    return mainRowEl;
+  }
+
+  buildLinkedReferenceLineButton(line, recordGuid, { state, query }) {
+    const lineEl = document.createElement('button');
+    lineEl.type = 'button';
+    lineEl.className = 'tlr-line button-none button-minimal-hover';
+    lineEl.dataset.action = 'open-line';
+    lineEl.dataset.recordGuid = recordGuid;
+    lineEl.dataset.lineGuid = line.guid;
+    this.appendLineText(lineEl, line, query);
+    this.appendLiveBadges(lineEl, state, this.getLinkedSnapshotKey(line.guid));
+    return lineEl;
+  }
+
+  appendLinkedContextControlsForLine(mainRowEl, lineGuid, ctx, { state, groupSectionId }) {
+    if (!state || !ctx) return;
+    if (ctx.showMoreContext === true) mainRowEl.classList.add('is-context-open');
+    const controlsEl = this.buildLinkedContextControls(lineGuid, ctx, {
+      showLinkAction: groupSectionId === 'unlinked'
+    });
+    if (controlsEl) mainRowEl.appendChild(controlsEl);
+  }
+
+  appendLinkedContextStatus(entryEl, ctx) {
+    if (!ctx) return;
+    if (ctx.loading === true && ctx.backgroundLoading !== true) {
+      this.appendContextNote(entryEl, 'tlr-note tlr-context-note', 'Loading context...');
+    } else if (ctx.error) {
+      this.appendContextNote(entryEl, 'tlr-error tlr-context-note', ctx.error);
+    }
+  }
+
+  appendContextNote(container, className, text) {
+    const el = document.createElement('div');
+    el.className = className;
+    el.textContent = text || '';
+    container.appendChild(el);
+  }
+
+  appendReferenceLimitNote(container, maxResults, totalLineCount) {
+    if (maxResults <= 0 || totalLineCount < maxResults) return;
+    const note = document.createElement('div');
+    note.className = 'tlr-note';
+    note.textContent = `Showing first ${maxResults} matches.`;
+    container.appendChild(note);
   }
 
   buildLinkedContextControls(lineGuid, ctx, opts = {}) {
@@ -8427,48 +8667,67 @@ class Plugin extends AppPlugin {
     const group = document.createElement('div');
     group.className = 'tlr-line-actions-group';
 
-    if (opts.showLinkAction === true) {
-      group.appendChild(this.buildUnlinkedLinkButton(lineGuid));
-    }
-
-    if (ctx?.showMoreContext === true) {
-      const availableAbove = this.getAvailableAboveContextCount(ctx);
-      const availableBelow = this.getAvailableBelowContextCount(ctx);
-      const showingAbove = (ctx?.siblingAboveCount || 0) > 0;
-      const showingBelow = (ctx?.siblingBelowCount || 0) > 0;
-
-      if (showingAbove || availableAbove > 0) {
-        group.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
-          icon: 'up',
-          label: this.getAboveToggleLabel(ctx),
-          disabled: ctx?.loaded === true && availableAbove === 0,
-          active: showingAbove
-        }));
-      }
-      if (showingBelow || availableBelow > 0) {
-        group.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, {
-          icon: 'down',
-          label: this.getBelowToggleLabel(ctx),
-          disabled: ctx?.loaded === true && availableBelow === 0,
-          active: showingBelow
-        }));
-      }
-    }
-
-    const shouldShowContextToggle = ctx?.showMoreContext === true
-      || this.hasAnyLinkedContext(ctx);
-    if (shouldShowContextToggle) {
-      group.appendChild(this.buildLinkedContextButton('toggle-context-more', lineGuid, {
-        icon: 'toggle',
-        label: ctx?.showMoreContext === true ? 'Hide context' : 'Show more context',
-        disabled: ctx?.showMoreContext !== true && ctx?.loaded === true && !this.hasAnyLinkedContext(ctx),
-        active: ctx?.showMoreContext === true
-      }));
-    }
+    this.appendUnlinkedContextAction(group, lineGuid, opts);
+    this.appendExpandedContextRangeActions(group, lineGuid, ctx);
+    this.appendContextToggleAction(group, lineGuid, ctx);
 
     if (group.children.length === 0) controls.classList.add('is-empty');
     controls.appendChild(group);
     return controls;
+  }
+
+  appendUnlinkedContextAction(group, lineGuid, opts) {
+    if (opts?.showLinkAction === true) group.appendChild(this.buildUnlinkedLinkButton(lineGuid));
+  }
+
+  appendExpandedContextRangeActions(group, lineGuid, ctx) {
+    if (ctx?.showMoreContext !== true) return;
+
+    const rangeState = this.getLinkedContextRangeState(ctx);
+    if (rangeState.showingAbove || rangeState.availableAbove > 0) {
+      group.appendChild(this.buildLinkedContextButton('toggle-context-above', lineGuid, {
+        icon: 'up',
+        label: this.getAboveToggleLabel(ctx),
+        disabled: ctx?.loaded === true && rangeState.availableAbove === 0,
+        active: rangeState.showingAbove
+      }));
+    }
+    if (rangeState.showingBelow || rangeState.availableBelow > 0) {
+      group.appendChild(this.buildLinkedContextButton('toggle-context-below', lineGuid, {
+        icon: 'down',
+        label: this.getBelowToggleLabel(ctx),
+        disabled: ctx?.loaded === true && rangeState.availableBelow === 0,
+        active: rangeState.showingBelow
+      }));
+    }
+  }
+
+  getLinkedContextRangeState(ctx) {
+    return {
+      availableAbove: this.getAvailableAboveContextCount(ctx),
+      availableBelow: this.getAvailableBelowContextCount(ctx),
+      showingAbove: (ctx?.siblingAboveCount || 0) > 0,
+      showingBelow: (ctx?.siblingBelowCount || 0) > 0
+    };
+  }
+
+  appendContextToggleAction(group, lineGuid, ctx) {
+    if (!this.shouldShowLinkedContextToggle(ctx)) return;
+    group.appendChild(this.buildLinkedContextButton('toggle-context-more', lineGuid, {
+      icon: 'toggle',
+      label: ctx?.showMoreContext === true ? 'Hide context' : 'Show more context',
+      disabled: this.isLinkedContextToggleDisabled(ctx),
+      active: ctx?.showMoreContext === true
+    }));
+  }
+
+  shouldShowLinkedContextToggle(ctx) {
+    return ctx?.showMoreContext === true || this.hasAnyLinkedContext(ctx);
+  }
+
+  isLinkedContextToggleDisabled(ctx) {
+    if (ctx?.showMoreContext === true) return false;
+    return ctx?.loaded === true && !this.hasAnyLinkedContext(ctx);
   }
 
   buildUnlinkedLinkButton(lineGuid) {
@@ -8576,56 +8835,72 @@ class Plugin extends AppPlugin {
   appendLinkedContextRows(container, recordGuid, ctx, query, position) {
     if (!container || !ctx || ctx.loaded !== true) return;
 
-    const items = [];
-    if (position === 'top') {
-      for (const line of this.getVisibleAboveContextItems(ctx)) {
-        items.push({
-          line,
-          indent: Number(ctx.relativeDepthByGuid?.[line?.guid] || 0)
-        });
-      }
-    } else {
-      if (ctx.showMoreContext === true) {
-        for (const line of ctx.descendants || []) {
-          items.push({
-            line,
-            indent: Number(ctx.relativeDepthByGuid?.[line?.guid] || ctx.depthByGuid?.[line?.guid] || 1)
-          });
-        }
-      }
-
-      for (const line of this.getVisibleBelowContextItems(ctx)) {
-        items.push({
-          line,
-          indent: Number(ctx.relativeDepthByGuid?.[line?.guid] || 0)
-        });
-      }
-    }
-
+    const items = this.getLinkedContextRowItems(ctx, position);
     if (items.length === 0) return;
 
     const list = document.createElement('div');
     list.className = `tlr-context-list tlr-context-list-${position}`;
 
     for (const item of items) {
-      const line = item.line || null;
-      const guid = line?.guid || null;
-      if (!guid) continue;
-      if (!this.hasRenderableLineContent(line)) continue;
-
-      const row = document.createElement('button');
-      row.type = 'button';
-      row.className = 'tlr-context-line button-none button-minimal-hover';
-      row.dataset.action = 'open-line';
-      row.dataset.recordGuid = recordGuid || '';
-      row.dataset.lineGuid = guid;
-      row.style.setProperty('--tlr-context-indent', `${Math.max(0, item.indent || 0) * 12}px`);
-
-      this.appendLineText(row, line, query);
-      list.appendChild(row);
+      const row = this.buildLinkedContextRow(recordGuid, item, query);
+      if (row) list.appendChild(row);
     }
 
     if (list.childElementCount > 0) container.appendChild(list);
+  }
+
+  getLinkedContextRowItems(ctx, position) {
+    if (position === 'top') return this.getAboveLinkedContextRowItems(ctx);
+    return [
+      ...this.getDescendantLinkedContextRowItems(ctx),
+      ...this.getBelowLinkedContextRowItems(ctx)
+    ];
+  }
+
+  getAboveLinkedContextRowItems(ctx) {
+    return this.getVisibleAboveContextItems(ctx).map((line) => ({
+      line,
+      indent: this.getLinkedContextLineIndent(ctx, line, 0)
+    }));
+  }
+
+  getDescendantLinkedContextRowItems(ctx) {
+    if (ctx?.showMoreContext !== true) return [];
+    return (ctx.descendants || []).map((line) => ({
+      line,
+      indent: this.getLinkedContextLineIndent(ctx, line, this.getLinkedContextDepth(ctx, line, 1))
+    }));
+  }
+
+  getBelowLinkedContextRowItems(ctx) {
+    return this.getVisibleBelowContextItems(ctx).map((line) => ({
+      line,
+      indent: this.getLinkedContextLineIndent(ctx, line, 0)
+    }));
+  }
+
+  getLinkedContextLineIndent(ctx, line, fallback) {
+    return Number(ctx?.relativeDepthByGuid?.[line?.guid] || fallback || 0);
+  }
+
+  getLinkedContextDepth(ctx, line, fallback) {
+    return Number(ctx?.depthByGuid?.[line?.guid] || fallback || 0);
+  }
+
+  buildLinkedContextRow(recordGuid, item, query) {
+    const line = item?.line || null;
+    const guid = line?.guid || null;
+    if (!guid || !this.hasRenderableLineContent(line)) return null;
+
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'tlr-context-line button-none button-minimal-hover';
+    row.dataset.action = 'open-line';
+    row.dataset.recordGuid = recordGuid || '';
+    row.dataset.lineGuid = guid;
+    row.style.setProperty('--tlr-context-indent', `${Math.max(0, item.indent || 0) * 12}px`);
+    this.appendLineText(row, line, query);
+    return row;
   }
 
   getLinePrefix(line) {
@@ -8645,37 +8920,63 @@ class Plugin extends AppPlugin {
 
   getSegmentDisplayText(seg) {
     if (!seg) return '';
+    const resolver = this.getSegmentDisplayTextResolver(seg.type);
+    return resolver ? resolver.call(this, seg) : this.getFallbackSegmentDisplayText(seg);
+  }
 
-    if (seg.type === 'text' || seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code' || seg.type === 'link') {
-      return typeof seg.text === 'string' ? seg.text : '';
-    }
+  getSegmentDisplayTextResolver(type) {
+    return {
+      text: this.getPlainSegmentDisplayText,
+      bold: this.getPlainSegmentDisplayText,
+      italic: this.getPlainSegmentDisplayText,
+      code: this.getPlainSegmentDisplayText,
+      link: this.getPlainSegmentDisplayText,
+      linkobj: this.getLinkObjectDisplayText,
+      hashtag: this.getHashtagDisplayText,
+      datetime: this.getDateTimeSegmentDisplayText,
+      mention: this.getMentionSegmentDisplayText,
+      ref: this.getReferenceSegmentDisplayText
+    }[type] || null;
+  }
 
-    if (seg.type === 'linkobj') {
-      const link = seg.text?.link || '';
-      return seg.text?.title || link || '';
-    }
-
-    if (seg.type === 'hashtag') {
-      const text = typeof seg.text === 'string' ? seg.text : '';
-      if (!text) return '';
-      return text.startsWith('#') ? text : `#${text}`;
-    }
-
-    if (seg.type === 'datetime') {
-      return this.formatDateTimeSegment(seg.text);
-    }
-
-    if (seg.type === 'mention') {
-      return this.formatMention(typeof seg.text === 'string' ? seg.text : '');
-    }
-
-    if (seg.type === 'ref') {
-      const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
-      const guid = textObj.guid || null;
-      return textObj.title || (guid ? this.resolveRecordName(guid) : '') || '';
-    }
-
+  getPlainSegmentDisplayText(seg) {
     return typeof seg.text === 'string' ? seg.text : '';
+  }
+
+  getFallbackSegmentDisplayText(seg) {
+    return typeof seg?.text === 'string' ? seg.text : '';
+  }
+
+  getLinkObjectDisplayText(seg) {
+    const link = seg?.text?.link || '';
+    return seg?.text?.title || link || '';
+  }
+
+  getHashtagDisplayText(seg) {
+    const text = typeof seg?.text === 'string' ? seg.text : '';
+    if (!text) return '';
+    return text.startsWith('#') ? text : `#${text}`;
+  }
+
+  getDateTimeSegmentDisplayText(seg) {
+    return this.formatDateTimeSegment(seg.text);
+  }
+
+  getMentionSegmentDisplayText(seg) {
+    return this.formatMention(typeof seg.text === 'string' ? seg.text : '');
+  }
+
+  getReferenceSegmentParts(seg) {
+    const textObj = typeof seg?.text === 'string' ? { guid: seg.text } : (seg?.text || {});
+    return {
+      guid: textObj.guid || null,
+      title: textObj.title || ''
+    };
+  }
+
+  getReferenceSegmentDisplayText(seg) {
+    const { guid, title } = this.getReferenceSegmentParts(seg);
+    return title || (guid ? this.resolveRecordName(guid) : '') || '';
   }
 
   getSegmentHref(seg) {
@@ -8778,83 +9079,66 @@ class Plugin extends AppPlugin {
     }
 
     for (const seg of segments) {
-      if (!seg) continue;
-      const text = this.getSegmentDisplayText(seg);
-
-      if (seg.type === 'text') {
-        this.appendHighlightedText(container, text, query);
-        continue;
-      }
-
-      if (seg.type === 'bold' || seg.type === 'italic' || seg.type === 'code') {
-        this.appendSegmentTextElement(
-          container,
-          seg.type === 'bold' ? 'tlr-seg-bold' : seg.type === 'italic' ? 'tlr-seg-italic' : 'tlr-seg-code',
-          text,
-          query
-        );
-        continue;
-      }
-
-      if (seg.type === 'link') {
-        const url = this.getSegmentHref(seg);
-        if (!url) continue;
-        const a = document.createElement('a');
-        a.href = url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.className = 'tlr-seg-link';
-        a.textContent = '';
-        this.appendHighlightedText(a, text, query);
-        container.appendChild(a);
-        continue;
-      }
-
-      if (seg.type === 'linkobj') {
-        const link = this.getSegmentHref(seg);
-        if (!link) continue;
-        const a = document.createElement('a');
-        a.href = link;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.className = 'tlr-seg-link';
-        a.textContent = '';
-        this.appendHighlightedText(a, text, query);
-        container.appendChild(a);
-        continue;
-      }
-
-      if (seg.type === 'hashtag') {
-        this.appendSegmentTextElement(container, 'tlr-seg-hashtag', text, query);
-        continue;
-      }
-
-      if (seg.type === 'datetime') {
-        this.appendSegmentTextElement(container, 'tlr-seg-datetime', text, query);
-        continue;
-      }
-
-      if (seg.type === 'mention') {
-        this.appendSegmentTextElement(container, 'tlr-seg-mention', text, query);
-        continue;
-      }
-
-      if (seg.type === 'ref') {
-        const textObj = typeof seg.text === 'string' ? { guid: seg.text } : (seg.text || {});
-        const guid = textObj.guid || null;
-        if (!guid) continue;
-        const el = document.createElement('span');
-        el.className = 'tlr-seg-ref';
-        el.dataset.action = 'open-ref';
-        el.dataset.refGuid = guid;
-        el.textContent = '';
-        this.appendHighlightedText(el, text || '[link]', query);
-        container.appendChild(el);
-        continue;
-      }
-
-      if (text) this.appendHighlightedText(container, text, query);
+      this.appendSegment(container, seg, query);
     }
+  }
+
+  appendSegment(container, seg, query) {
+    if (!seg) return;
+    const text = this.getSegmentDisplayText(seg);
+
+    if (seg.type === 'text') {
+      this.appendHighlightedText(container, text, query);
+    } else if (this.isStyledTextSegmentType(seg.type)) {
+      this.appendSegmentTextElement(container, this.getStyledSegmentClass(seg.type), text, query);
+    } else if (seg.type === 'link' || seg.type === 'linkobj') {
+      this.appendExternalLinkSegment(container, seg, text, query);
+    } else if (seg.type === 'hashtag') {
+      this.appendSegmentTextElement(container, 'tlr-seg-hashtag', text, query);
+    } else if (seg.type === 'datetime') {
+      this.appendSegmentTextElement(container, 'tlr-seg-datetime', text, query);
+    } else if (seg.type === 'mention') {
+      this.appendSegmentTextElement(container, 'tlr-seg-mention', text, query);
+    } else if (seg.type === 'ref') {
+      this.appendReferenceSegment(container, seg, text, query);
+    } else if (text) {
+      this.appendHighlightedText(container, text, query);
+    }
+  }
+
+  isStyledTextSegmentType(type) {
+    return type === 'bold' || type === 'italic' || type === 'code';
+  }
+
+  getStyledSegmentClass(type) {
+    if (type === 'bold') return 'tlr-seg-bold';
+    if (type === 'italic') return 'tlr-seg-italic';
+    return 'tlr-seg-code';
+  }
+
+  appendExternalLinkSegment(container, seg, text, query) {
+    const href = this.getSegmentHref(seg);
+    if (!href) return;
+    const a = document.createElement('a');
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.className = 'tlr-seg-link';
+    a.textContent = '';
+    this.appendHighlightedText(a, text, query);
+    container.appendChild(a);
+  }
+
+  appendReferenceSegment(container, seg, text, query) {
+    const { guid } = this.getReferenceSegmentParts(seg);
+    if (!guid) return;
+    const el = document.createElement('span');
+    el.className = 'tlr-seg-ref';
+    el.dataset.action = 'open-ref';
+    el.dataset.refGuid = guid;
+    el.textContent = '';
+    this.appendHighlightedText(el, text || '[link]', query);
+    container.appendChild(el);
   }
 
   resolveRecordName(guid) {

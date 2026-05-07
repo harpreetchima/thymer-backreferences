@@ -313,6 +313,15 @@ function makeDomElement(tagName) {
   return el;
 }
 
+function getDomText(el) {
+  if (!el || typeof el !== 'object') return '';
+  let text = typeof el.textContent === 'string' ? el.textContent : '';
+  for (const child of el.children || []) {
+    text += getDomText(child);
+  }
+  return text;
+}
+
 function attachRefreshPanelState(plugin, panel, recordGuid, { collapseUnlinked = false } = {}) {
   const panelId = panel.getId();
   const state = plugin.createPanelState(panelId, panel);
@@ -323,6 +332,16 @@ function attachRefreshPanelState(plugin, panel, recordGuid, { collapseUnlinked =
   state.bodyEl = makeDomElement('div');
   state.countEl = makeDomElement('span');
   plugin._panelStates.set(panelId, state);
+  return state;
+}
+
+function attachRenderSlots(state) {
+  state.bodyEl = makeDomElement('div');
+  state.countEl = makeDomElement('span');
+  state.statusSlotEl = makeDomElement('div');
+  state.propertySlotEl = makeDomElement('div');
+  state.linkedSlotEl = makeDomElement('div');
+  state.unlinkedSlotEl = makeDomElement('div');
   return state;
 }
 
@@ -521,6 +540,9 @@ function installDomDocument() {
   return {
     eventListeners: listeners,
     createElement: makeDomElement,
+    createTextNode(text) {
+      return { tagName: '#text', textContent: String(text || ''), children: [] };
+    },
     addEventListener(type, handler) {
       if (!listeners[type]) listeners[type] = [];
       listeners[type].push(handler);
@@ -2576,6 +2598,104 @@ test('property index loading and error states keep the footer recoverable', () =
   }
 });
 
+test('reference sections render property linked and unlinked rows with highlights', () => withDomDocument(() => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  const propertyRecord = makeRecord({ guid: 'property-record', name: 'Alpha Property' });
+  const linkedRecord = makeRecord({ guid: 'linked-record', name: 'Linked Source' });
+  const unlinkedRecord = makeRecord({ guid: 'unlinked-record', name: 'Unlinked Source' });
+
+  state.recordGuid = 'target-record';
+  state.searchQuery = 'Alpha';
+  state.sectionCollapsed.unlinked = false;
+  attachRenderSlots(state);
+  state.lastResults = {};
+
+  plugin.renderReferences(state, {
+    propertyGroups: [{ propertyName: 'Owner', records: [propertyRecord] }],
+    propertyError: '',
+    propertyIndexStatus: 'ready',
+    propertyIndexStats: plugin.createEmptyPropertyIndexStats(),
+    propertyIndexError: '',
+    linkedGroups: [{
+      record: linkedRecord,
+      lines: [makeLine({
+        guid: 'linked-line',
+        record: linkedRecord,
+        segments: [{ type: 'text', text: 'Alpha linked text' }]
+      })]
+    }],
+    linkedError: '',
+    unlinkedGroups: [{
+      record: unlinkedRecord,
+      lines: [makeLine({
+        guid: 'unlinked-line',
+        record: unlinkedRecord,
+        segments: [{ type: 'text', text: 'Alpha loose text' }]
+      })]
+    }],
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
+  });
+
+  const propertyRows = state.propertySlotEl.querySelectorAll('.tlr-prop-record');
+  const linkedGroups = state.linkedSlotEl.querySelectorAll('.tlr-group-linked');
+  const unlinkedGroups = state.unlinkedSlotEl.querySelectorAll('.tlr-group-unlinked');
+  const linkedLines = state.linkedSlotEl.querySelectorAll('.tlr-line');
+  const unlinkedLines = state.unlinkedSlotEl.querySelectorAll('.tlr-line');
+
+  assert.equal(getDomText(state.countEl), '2 pages | 2 refs');
+  assert.equal(propertyRows.length, 1);
+  assert.equal(propertyRows[0].dataset.recordGuid, 'property-record');
+  assert.equal(propertyRows[0].querySelectorAll('.tlr-search-mark').length, 1);
+  assert.equal(linkedGroups.length, 1);
+  assert.equal(unlinkedGroups.length, 1);
+  assert.equal(linkedLines[0].dataset.lineGuid, 'linked-line');
+  assert.equal(unlinkedLines[0].dataset.lineGuid, 'unlinked-line');
+  assert.equal(linkedLines[0].querySelectorAll('.tlr-search-mark').length, 1);
+  assert.equal(unlinkedLines[0].querySelectorAll('.tlr-search-mark').length, 1);
+}));
+
+test('segment rendering covers links hashtags refs and query highlighting', () => withDomDocument(() => {
+  const plugin = makePlugin();
+  plugin.data.getRecord = (guid) => makeRecord({ guid, name: 'Alpha Resolved' });
+
+  const container = makeDomElement('span');
+  const segments = [
+    { type: 'link', text: 'https://example.com/alpha' },
+    { type: 'text', text: ' ' },
+    { type: 'linkobj', text: { link: 'https://docs.example/alpha', title: 'Alpha Docs' } },
+    { type: 'text', text: ' ' },
+    { type: 'hashtag', text: 'alpha' },
+    { type: 'text', text: ' ' },
+    { type: 'ref', text: { guid: 'target-guid' } }
+  ];
+
+  assert.equal(
+    plugin.segmentsToPlainText(segments),
+    'https://example.com/alpha Alpha Docs #alpha Alpha Resolved'
+  );
+
+  plugin.appendSegments(container, segments, 'Alpha');
+
+  const links = container.querySelectorAll('.tlr-seg-link');
+  const hashtags = container.querySelectorAll('.tlr-seg-hashtag');
+  const refs = container.querySelectorAll('.tlr-seg-ref');
+  const marks = container.querySelectorAll('.tlr-search-mark');
+
+  assert.equal(links.length, 2);
+  assert.equal(links[0].href, 'https://example.com/alpha');
+  assert.equal(links[1].href, 'https://docs.example/alpha');
+  assert.equal(hashtags.length, 1);
+  assert.equal(getDomText(hashtags[0]), '#alpha');
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].dataset.action, 'open-ref');
+  assert.equal(refs[0].dataset.refGuid, 'target-guid');
+  assert.equal(marks.length, 4);
+}));
+
 test('page view preferences round-trip footer and section state through storage helpers', () => {
   const plugin = makePlugin();
   const previousLocalStorage = global.localStorage;
@@ -3359,49 +3479,31 @@ test('segmentless moved line events invalidate visible panels', () => {
   assert.equal(eventSamples[0].counts.segmentCount, 0);
 });
 
-test('render instrumentation records cache and reference render samples', () => {
+test('render instrumentation records cache and reference render samples', () => withDomDocument(() => {
   const plugin = makePlugin();
-  const previousDocument = global.document;
-  global.document = {
-    createElement: makeDomElement,
-    createTextNode(text) {
-      return { tagName: '#text', textContent: text };
-    }
+  const state = attachRenderSlots(plugin.createPanelState('panel-1', null));
+  state.recordGuid = 'target-guid';
+  state.lastResults = {
+    propertyGroups: [],
+    propertyError: '',
+    propertyIndexStatus: 'ready',
+    propertyIndexStats: plugin.createEmptyPropertyIndexStats(),
+    propertyIndexError: '',
+    linkedGroups: [],
+    linkedError: '',
+    unlinkedGroups: [],
+    unlinkedError: '',
+    unlinkedDeferred: false,
+    unlinkedLoading: false,
+    maxResults: 200
   };
 
-  try {
-    const state = plugin.createPanelState('panel-1', null);
-    state.recordGuid = 'target-guid';
-    state.bodyEl = makeDomElement('div');
-    state.countEl = makeDomElement('span');
-    state.statusSlotEl = makeDomElement('div');
-    state.propertySlotEl = makeDomElement('div');
-    state.linkedSlotEl = makeDomElement('div');
-    state.unlinkedSlotEl = makeDomElement('div');
-    state.lastResults = {
-      propertyGroups: [],
-      propertyError: '',
-      propertyIndexStatus: 'ready',
-      propertyIndexStats: plugin.createEmptyPropertyIndexStats(),
-      propertyIndexError: '',
-      linkedGroups: [],
-      linkedError: '',
-      unlinkedGroups: [],
-      unlinkedError: '',
-      unlinkedDeferred: false,
-      unlinkedLoading: false,
-      maxResults: 200
-    };
+  plugin.renderFromCache(state);
 
-    plugin.renderFromCache(state);
-
-    const labels = plugin.getPerfSnapshot().samples.map((sample) => sample.label);
-    assert.equal(labels.includes('renderReferences'), true);
-    assert.equal(labels.includes('renderFromCache'), true);
-  } finally {
-    global.document = previousDocument;
-  }
-});
+  const labels = plugin.getPerfSnapshot().samples.map((sample) => sample.label);
+  assert.equal(labels.includes('renderReferences'), true);
+  assert.equal(labels.includes('renderFromCache'), true);
+}));
 
 test('reference render plan skips unchanged sections and isolates linked-context rerenders', () => {
   const plugin = makePlugin();
