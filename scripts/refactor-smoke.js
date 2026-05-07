@@ -206,6 +206,7 @@ function makeDomElement(tagName) {
 function makePlugin() {
   const Plugin = loadPluginClass();
   const plugin = new Plugin();
+  plugin.getWorkspaceGuid = () => 'test-workspace-guid';
 
   plugin._panelStates = new Map();
   plugin._eventHandlerIds = [];
@@ -316,6 +317,55 @@ function makeLoadedFocusedPanelFixture({ pendingRemoteSync = false } = {}) {
   plugin.mountFooter = () => {};
 
   return { plugin, panel, state };
+}
+
+async function makeIndexedPropertyFixture({
+  targetGuid = 'target-guid',
+  targetName = 'Target',
+  sourceGuid = 'source-record',
+  sourceName = 'Source Record',
+  reason = 'test'
+} = {}) {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: targetGuid, name: targetName });
+  const properties = [makeProperty('Entity', ['record', target.guid])];
+  const source = makeRecord({
+    guid: sourceGuid,
+    name: sourceName,
+    updatedAt: makeDate('2026-04-24T09:00:00Z'),
+    properties
+  });
+
+  plugin.data.getAllCollections = async () => [{
+    getAllRecords: async () => [source]
+  }];
+  plugin.__recordsByGuid.set(source.guid, source);
+  await plugin.rebuildPropertyIndex({ reason });
+
+  return { plugin, target, source, properties };
+}
+
+function attachTwoPanelStates(plugin, {
+  targetAName = 'Target A',
+  targetBName = 'Target B'
+} = {}) {
+  const targetA = makeRecord({ guid: 'target-a', name: targetAName });
+  const targetB = makeRecord({ guid: 'target-b', name: targetBName });
+  const panelA = makePanel({ id: 'panel-a', record: targetA });
+  const panelB = makePanel({ id: 'panel-b', record: targetB });
+  const stateA = plugin.createPanelState('panel-a', panelA.panel);
+  const stateB = plugin.createPanelState('panel-b', panelB.panel);
+  stateA.recordGuid = targetA.guid;
+  stateB.recordGuid = targetB.guid;
+  plugin._panelStates.set('panel-a', stateA);
+  plugin._panelStates.set('panel-b', stateB);
+
+  const refreshes = [];
+  plugin.scheduleRefreshForPanel = (panel, args) => {
+    refreshes.push({ id: panel.getId(), reason: args.reason });
+  };
+
+  return { targetA, targetB, stateA, stateB, refreshes };
 }
 
 const tests = [];
@@ -918,22 +968,16 @@ test('graph property index serves target pages without per-page discovery', asyn
 });
 
 test('record property updates move index entries between old and new targets', async () => {
-  const plugin = makePlugin();
-  const oldTarget = makeRecord({ guid: 'old-target', name: 'Old Target' });
-  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
-  const properties = [makeProperty('Entity', ['record', oldTarget.guid])];
-  const source = makeRecord({
-    guid: 'source-record',
-    name: 'Source Record',
-    updatedAt: makeDate('2026-04-24T09:00:00Z'),
+  const {
+    plugin,
+    target: oldTarget,
+    source,
     properties
+  } = await makeIndexedPropertyFixture({
+    targetGuid: 'old-target',
+    targetName: 'Old Target'
   });
-
-  plugin.data.getAllCollections = async () => [{
-    getAllRecords: async () => [source]
-  }];
-  plugin.__recordsByGuid.set(source.guid, source);
-  await plugin.rebuildPropertyIndex({ reason: 'test' });
+  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
 
   assert.deepEqual(
     plugin.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
@@ -953,6 +997,36 @@ test('record property updates move index entries between old and new targets', a
   plugin.updatePropertyIndexForRecord(source.guid, source);
 
   assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false }), []);
+});
+
+test('record trash and untrash updates remove and restore property index entries', async () => {
+  const { plugin, target, source } = await makeIndexedPropertyFixture({ reason: 'trash-test' });
+
+  assert.deepEqual(
+    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
+
+  plugin.handleRecordUpdated({
+    recordGuid: source.guid,
+    trashed: true,
+    source: { isLocal: false }
+  });
+  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false }), []);
+
+  plugin.handleRecordUpdated({
+    recordGuid: source.guid,
+    trashed: false,
+    source: { isLocal: false }
+  });
+  assert.deepEqual(
+    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
+    [source.guid]
+  );
+
+  const eventSamples = plugin.getPerfSnapshot().samples.filter((sample) => sample.label === 'event-handler');
+  assert.equal(eventSamples[0].counts.removedIndex, true);
+  assert.equal(eventSamples[1].counts.updatedIndex, true);
 });
 
 test('graph property index dedupes duplicate record objects', async () => {
@@ -1037,6 +1111,7 @@ test('property index cache hydrates ready results and delays startup refresh', (
   installLocalStorage({
     [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
       version: 1,
+      workspaceGuid: 'test-workspace-guid',
       savedAt: Date.UTC(2026, 3, 24, 9, 0, 0),
       stats: {
         scannedRecords: 200,
@@ -1084,26 +1159,44 @@ test('property index cache hydrates ready results and delays startup refresh', (
   }
 });
 
-test('property index cache serializes incremental record updates', async () => {
+test('property index cache rejects other workspaces', () => {
   const plugin = makePlugin();
-  const store = installLocalStorage();
-  const oldTarget = makeRecord({ guid: 'old-target', name: 'Old Target' });
-  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
-  const properties = [makeProperty('Entity', ['record', oldTarget.guid])];
-  const source = makeRecord({
-    guid: 'source-record',
-    name: 'Source Record',
-    updatedAt: makeDate('2026-04-24T09:00:00Z'),
-    properties
+  installLocalStorage({
+    [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
+      version: 1,
+      workspaceGuid: 'other-workspace-guid',
+      savedAt: Date.UTC(2026, 3, 24, 9, 0, 0),
+      stats: {
+        scannedRecords: 1,
+        scannedProperties: 1,
+        indexedReferences: 1,
+        indexedTargets: 1
+      },
+      sources: [['source-guid', { name: 'Wrong Workspace' }, [['target-guid', 'Entity']]]]
+    })
   });
 
-  plugin.data.getAllCollections = async () => [{
-    getAllRecords: async () => [source]
-  }];
-  plugin.__recordsByGuid.set(source.guid, source);
-  await plugin.rebuildPropertyIndex({ reason: 'cache-test' });
+  assert.equal(plugin.hydratePropertyIndexFromCache(), false);
+  assert.equal(plugin._propertyIndexStatus, 'idle');
+  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex('target-guid', { showSelf: false }), []);
+});
+
+test('property index cache serializes incremental record updates', async () => {
+  const store = installLocalStorage();
+  const {
+    plugin,
+    target: oldTarget,
+    source,
+    properties
+  } = await makeIndexedPropertyFixture({
+    targetGuid: 'old-target',
+    targetName: 'Old Target',
+    reason: 'cache-test'
+  });
+  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
   assert.equal(plugin.writePropertyIndexCache(), true);
   let cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
+  assert.equal(cached.workspaceGuid, 'test-workspace-guid');
   assert.equal(cached.sources[0][0], source.guid);
   assert.equal(cached.sources[0][1].name, 'Source Record');
   assert.deepEqual(cached.sources[0][2], [[oldTarget.guid, 'Entity']]);
@@ -2280,8 +2373,10 @@ test('deferred unlinked loading hydrates cached state for the current panel only
 
 test('property invalidation updates graph index while line events stay targeted', () => {
   const plugin = makePlugin();
-  const targetA = makeRecord({ guid: 'target-a', name: 'Thymer / Backreferences (TBR)' });
-  const targetB = makeRecord({ guid: 'target-b', name: 'Something Else' });
+  const { targetA, targetB, stateA, stateB, refreshes } = attachTwoPanelStates(plugin, {
+    targetAName: 'Thymer / Backreferences (TBR)',
+    targetBName: 'Something Else'
+  });
   const sourceProperties = [makeProperty('Entity', ['record', targetA.guid])];
   const source = makeRecord({
     guid: 'source-guid',
@@ -2295,20 +2390,6 @@ test('property invalidation updates graph index while line events stay targeted'
     plugin._propertyIndexByTargetGuid,
     plugin._propertyIndexSourceEntriesByRecordGuid
   );
-
-  const panelA = makePanel({ id: 'panel-a', record: targetA });
-  const panelB = makePanel({ id: 'panel-b', record: targetB });
-  const stateA = plugin.createPanelState('panel-a', panelA.panel);
-  const stateB = plugin.createPanelState('panel-b', panelB.panel);
-  stateA.recordGuid = targetA.guid;
-  stateB.recordGuid = targetB.guid;
-  plugin._panelStates.set('panel-a', stateA);
-  plugin._panelStates.set('panel-b', stateB);
-
-  const refreshes = [];
-  plugin.scheduleRefreshForPanel = (panel, args) => {
-    refreshes.push({ id: panel.getId(), reason: args.reason });
-  };
 
   sourceProperties.splice(0, sourceProperties.length, makeProperty('Entity', ['record', targetB.guid]));
   plugin.handleRecordUpdated({
@@ -2354,6 +2435,27 @@ test('property invalidation updates graph index while line events stay targeted'
   assert.equal(eventSamples[0].counts.updatedIndex, true);
   assert.equal(eventSamples[1].counts.refreshed, 1);
   assert.equal(eventSamples[1].counts.segmentCount, 1);
+});
+
+test('segmentless moved line events invalidate visible panels', () => {
+  const plugin = makePlugin();
+  const { stateA, stateB, refreshes } = attachTwoPanelStates(plugin);
+
+  plugin.handleLineItemMoved({
+    recordGuid: 'destination-record',
+    source: { isLocal: false }
+  });
+
+  assert.deepEqual(refreshes, [
+    { id: 'panel-a', reason: 'lineitem.moved' },
+    { id: 'panel-b', reason: 'lineitem.moved' }
+  ]);
+  assert.equal(stateA.pendingRemoteSync, true);
+  assert.equal(stateB.pendingRemoteSync, true);
+
+  const eventSamples = plugin.getPerfSnapshot().samples.filter((sample) => sample.label === 'event-handler');
+  assert.equal(eventSamples[0].counts.workspaceInvalidated, true);
+  assert.equal(eventSamples[0].counts.segmentCount, 0);
 });
 
 test('render instrumentation records cache and reference render samples', () => {

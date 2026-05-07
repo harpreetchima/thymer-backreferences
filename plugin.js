@@ -3935,6 +3935,8 @@ class Plugin extends AppPlugin {
 
   serializePropertyIndexCache() {
     if (this._propertyIndexStatus !== 'ready') return null;
+    const workspaceGuid = this.getPropertyIndexCacheWorkspaceGuid();
+    if (!workspaceGuid) return null;
     const sources = [];
     let referenceCount = 0;
     for (const [sourceGuid, entries] of this._propertyIndexSourceEntriesByRecordGuid?.entries?.() || []) {
@@ -3963,6 +3965,7 @@ class Plugin extends AppPlugin {
     const stats = this._propertyIndexStats || this.createEmptyPropertyIndexStats();
     return {
       version: 1,
+      workspaceGuid,
       savedAt: Date.now(),
       stats: {
         reason: stats.reason || '',
@@ -3975,6 +3978,21 @@ class Plugin extends AppPlugin {
       },
       sources
     };
+  }
+
+  getPropertyIndexCacheWorkspaceGuid() {
+    try {
+      const workspaceGuid = this.getWorkspaceGuid?.();
+      return typeof workspaceGuid === 'string' ? workspaceGuid.trim() : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  isPropertyIndexCacheForCurrentWorkspace(raw) {
+    const currentWorkspaceGuid = this.getPropertyIndexCacheWorkspaceGuid();
+    const cachedWorkspaceGuid = typeof raw?.workspaceGuid === 'string' ? raw.workspaceGuid.trim() : '';
+    return Boolean(currentWorkspaceGuid && cachedWorkspaceGuid && currentWorkspaceGuid === cachedWorkspaceGuid);
   }
 
   writePropertyIndexCache() {
@@ -4003,6 +4021,7 @@ class Plugin extends AppPlugin {
   hydratePropertyIndexFromCache() {
     const raw = this.readJsonStorage(this._storageKeyPropertyIndexCache);
     if (!raw || raw.version !== 1 || !Array.isArray(raw.sources)) return false;
+    if (!this.isPropertyIndexCacheForCurrentWorkspace(raw)) return false;
     const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
     const hasStoredScan = raw.sources.length > 0
       || this.coerceNonNegativeInt(stats.scannedRecords, 0) > 0
@@ -4164,6 +4183,28 @@ class Plugin extends AppPlugin {
       this._propertyIndexByTargetGuid,
       this._propertyIndexSourceEntriesByRecordGuid
     );
+  }
+
+  removePropertyIndexForRecord(sourceRecordGuid) {
+    const sourceGuid = ((sourceRecordGuid || '') + '').trim();
+    if (!sourceGuid) return false;
+    if (this._propertyIndexStatus !== 'ready') {
+      this.schedulePropertyIndexRebuild('record-removed-during-index-build');
+      return false;
+    }
+
+    const removed = this.removeSourceRecordFromPropertyIndex(sourceGuid);
+    if (!removed) return false;
+
+    this._propertyIndexStats = {
+      ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()),
+      indexedReferences: this.countPropertyIndexReferences(),
+      indexedTargets: this._propertyIndexByTargetGuid.size,
+      cacheState: 'updated'
+    };
+    this.schedulePropertyIndexCacheWrite();
+    this.notifyPropertyIndexChanged('record-property-index-removed');
+    return true;
   }
 
   updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord) {
@@ -5049,20 +5090,35 @@ class Plugin extends AppPlugin {
     // Property-based references (record-link fields) do not emit lineitem events.
     const perf = this.createEventPerf('record.updated', ev);
     let updatedIndex = false;
+    let removedIndex = false;
     let scheduledRebuild = false;
     try {
       if (!ev) return;
-      if (!ev.properties) return;
 
       const sourceRecordGuid = this.getEventRecordGuid(ev);
+      if (ev.trashed === true) {
+        removedIndex = this.removePropertyIndexForRecord(sourceRecordGuid);
+        if (!removedIndex) {
+          scheduledRebuild = true;
+          this.schedulePropertyIndexRebuild('record.trashed-property-index-rebuild');
+        }
+        return;
+      }
+
+      if (!ev.properties && ev.trashed !== false) return;
+
       const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
       updatedIndex = this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
       if (!updatedIndex) {
         scheduledRebuild = true;
-        this.schedulePropertyIndexRebuild('record.updated-property-index-rebuild');
+        this.schedulePropertyIndexRebuild(
+          ev.trashed === false
+            ? 'record.untrashed-property-index-rebuild'
+            : 'record.updated-property-index-rebuild'
+        );
       }
     } finally {
-      this.perfCount(perf, { updatedIndex, scheduledRebuild });
+      this.perfCount(perf, { updatedIndex, removedIndex, scheduledRebuild });
       this.perfLog(perf);
     }
   }
@@ -5152,7 +5208,7 @@ class Plugin extends AppPlugin {
       refreshed = this.refreshMatchingStates(ev, eventName, (state) =>
         this.lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids })
       );
-      if (refreshed === 0 && !sourceRecordGuid && segments.length === 0) {
+      if (segments.length === 0 && (eventName === 'lineitem.moved' || (!sourceRecordGuid && refreshed === 0))) {
         workspaceInvalidated = true;
         this.handleWorkspaceInvalidation(ev, eventName);
       }
