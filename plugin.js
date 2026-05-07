@@ -740,8 +740,7 @@ class Plugin extends AppPlugin {
     };
   }
 
-  disposePanelState(panelId) {
-    const state = this._panelStates.get(panelId) || null;
+  detachPanelStateDom(state) {
     if (!state) return;
 
     if (state.refreshTimer) {
@@ -775,44 +774,18 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
+    return true;
+  }
+
+  disposePanelState(panelId) {
+    const state = this._panelStates.get(panelId) || null;
+    if (!this.detachPanelStateDom(state)) return;
 
     this._panelStates.delete(panelId);
   }
 
   unmountFooterForHiddenPanel(state) {
-    if (!state) return;
-
-    if (state.refreshTimer) {
-      clearTimeout(state.refreshTimer);
-      state.refreshTimer = null;
-    }
-
-    if (state.queryFilterTimer) {
-      clearTimeout(state.queryFilterTimer);
-      state.queryFilterTimer = null;
-    }
-
-    if (state.contextPreloadTimer) {
-      clearTimeout(state.contextPreloadTimer);
-      state.contextPreloadTimer = null;
-    }
-    state.contextPreloadSeq = (state.contextPreloadSeq || 0) + 1;
-
-    try {
-      state.observer?.disconnect?.();
-    } catch (e) {
-      // ignore
-    }
-    state.observer = null;
-
-    this.setSortMenuOpen(state, false);
-    this.setSearchAutocompleteOpen(state, false);
-
-    try {
-      state.rootEl?.remove?.();
-    } catch (e) {
-      // ignore
-    }
+    if (!this.detachPanelStateDom(state)) return;
 
     state.mountedIn = null;
     state.rootEl = null;
@@ -3930,6 +3903,20 @@ class Plugin extends AppPlugin {
     };
   }
 
+  putPropertyIndexReference(byTargetGuid, targetGuid, propertyName, sourceGuid, record) {
+    let byProp = byTargetGuid.get(targetGuid) || null;
+    if (!byProp) {
+      byProp = new Map();
+      byTargetGuid.set(targetGuid, byProp);
+    }
+    let bySource = byProp.get(propertyName) || null;
+    if (!bySource) {
+      bySource = new Map();
+      byProp.set(propertyName, bySource);
+    }
+    bySource.set(sourceGuid, record);
+  }
+
   serializePropertyIndexCache() {
     if (this._propertyIndexStatus !== 'ready') return null;
     const sources = [];
@@ -4033,17 +4020,7 @@ class Plugin extends AppPlugin {
         if (seen.has(key)) continue;
         seen.add(key);
 
-        let byProp = byTargetGuid.get(targetGuid) || null;
-        if (!byProp) {
-          byProp = new Map();
-          byTargetGuid.set(targetGuid, byProp);
-        }
-        let bySource = byProp.get(propertyName) || null;
-        if (!bySource) {
-          bySource = new Map();
-          byProp.set(propertyName, bySource);
-        }
-        bySource.set(sourceGuid, record);
+        this.putPropertyIndexReference(byTargetGuid, targetGuid, propertyName, sourceGuid, record);
         entries.push({ targetGuid, propertyName });
         cachedReferenceCount += 1;
       }
@@ -4134,17 +4111,7 @@ class Plugin extends AppPlugin {
         if (seenEntries.has(entryKey)) continue;
         seenEntries.add(entryKey);
 
-        let byProp = byTargetGuid.get(guid) || null;
-        if (!byProp) {
-          byProp = new Map();
-          byTargetGuid.set(guid, byProp);
-        }
-        let bySource = byProp.get(propertyName) || null;
-        if (!bySource) {
-          bySource = new Map();
-          byProp.set(propertyName, bySource);
-        }
-        bySource.set(sourceGuid, record);
+        this.putPropertyIndexReference(byTargetGuid, guid, propertyName, sourceGuid, record);
         entries.push({ targetGuid: guid, propertyName });
       }
     }
