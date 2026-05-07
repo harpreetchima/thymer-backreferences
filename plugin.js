@@ -2537,17 +2537,7 @@ class Plugin extends AppPlugin {
     const items = Array.isArray(state.searchAutocompleteItems) ? state.searchAutocompleteItems : [];
     if (state.searchAutocompleteOpen !== true || items.length === 0) return;
 
-    const list = document.createElement('div');
-    list.className = 'autocomplete clickable';
-    const scroll = document.createElement('div');
-    scroll.className = 'vscroll-node';
-    const content = document.createElement('div');
-    content.className = 'vcontent';
-    const scrollbar = document.createElement('div');
-    scrollbar.className = 'vscrollbar scrollbar';
-    const thumb = document.createElement('div');
-    thumb.className = 'vscrollbar-thumb scrollbar-thumb clickable';
-    thumb.innerHTML = '&nbsp;';
+    const shell = this.createVirtualMenuShell();
 
     items.forEach((item, index) => {
       const row = document.createElement('div');
@@ -2594,48 +2584,87 @@ class Plugin extends AppPlugin {
         this.applySelectedSearchAutocompleteItem(state);
       });
 
-      content.appendChild(row);
+      shell.content.appendChild(row);
     });
 
-    scroll.appendChild(content);
-    scroll.addEventListener('scroll', () => {
+    this.bindVirtualMenuScrollbar(shell, () => {
       this.syncSearchAutocompleteScrollbar(state);
     });
 
-    thumb.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      const startY = e.clientY;
-      const startScrollTop = scroll.scrollTop;
-      const onMouseMove = (moveEvent) => {
-        const trackHeight = scrollbar.clientHeight || scroll.clientHeight || 0;
-        const thumbHeight = thumb.clientHeight || 0;
-        const maxThumbTop = Math.max(1, trackHeight - thumbHeight);
-        const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-        if (maxScrollTop <= 0) return;
-        const deltaRatio = (moveEvent.clientY - startY) / maxThumbTop;
-        scroll.scrollTop = Math.max(0, Math.min(maxScrollTop, startScrollTop + (deltaRatio * maxScrollTop)));
-      };
-
-      const onMouseUp = () => {
-        document.removeEventListener('mousemove', onMouseMove, true);
-        document.removeEventListener('mouseup', onMouseUp, true);
-      };
-
-      document.addEventListener('mousemove', onMouseMove, true);
-      document.addEventListener('mouseup', onMouseUp, true);
-    });
-
-    list.appendChild(scroll);
-    scrollbar.appendChild(thumb);
-    list.appendChild(scrollbar);
-    menu.appendChild(list);
+    this.mountVirtualMenuShell(menu, shell);
 
     const sync = () => {
       this.scrollSelectedSearchAutocompleteItemIntoView(state);
       this.syncSearchAutocompleteScrollbar(state);
     };
+    this.scheduleVirtualMenuSync(sync);
+  }
+
+  createVirtualMenuShell() {
+    const list = document.createElement('div');
+    list.className = 'autocomplete clickable';
+    const scroll = document.createElement('div');
+    scroll.className = 'vscroll-node';
+    const content = document.createElement('div');
+    content.className = 'vcontent';
+    const scrollbar = document.createElement('div');
+    scrollbar.className = 'vscrollbar scrollbar';
+    const thumb = document.createElement('div');
+    thumb.className = 'vscrollbar-thumb scrollbar-thumb clickable';
+    thumb.innerHTML = '&nbsp;';
+
+    return { list, scroll, content, scrollbar, thumb };
+  }
+
+  mountVirtualMenuShell(menu, shell) {
+    if (!menu || !shell) return;
+    shell.scroll.appendChild(shell.content);
+    shell.list.appendChild(shell.scroll);
+    shell.scrollbar.appendChild(shell.thumb);
+    shell.list.appendChild(shell.scrollbar);
+    menu.appendChild(shell.list);
+  }
+
+  bindVirtualMenuScrollbar(shell, syncScrollbar) {
+    if (!shell) return;
+    shell.scroll.addEventListener('scroll', syncScrollbar);
+    shell.thumb.addEventListener('mousedown', (e) => {
+      this.startVirtualMenuThumbDrag(e, shell);
+    });
+  }
+
+  startVirtualMenuThumbDrag(e, shell) {
+    const scroll = shell?.scroll || null;
+    const scrollbar = shell?.scrollbar || null;
+    const thumb = shell?.thumb || null;
+    if (!scroll || !scrollbar || !thumb) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const startY = e.clientY;
+    const startScrollTop = scroll.scrollTop;
+    const onMouseMove = (moveEvent) => {
+      const trackHeight = scrollbar.clientHeight || scroll.clientHeight || 0;
+      const thumbHeight = thumb.clientHeight || 0;
+      const maxThumbTop = Math.max(1, trackHeight - thumbHeight);
+      const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      if (maxScrollTop <= 0) return;
+      const deltaRatio = (moveEvent.clientY - startY) / maxThumbTop;
+      scroll.scrollTop = Math.max(0, Math.min(maxScrollTop, startScrollTop + (deltaRatio * maxScrollTop)));
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove, true);
+      document.removeEventListener('mouseup', onMouseUp, true);
+    };
+
+    document.addEventListener('mousemove', onMouseMove, true);
+    document.addEventListener('mouseup', onMouseUp, true);
+  }
+
+  scheduleVirtualMenuSync(sync) {
+    if (typeof sync !== 'function') return;
     sync();
     if (typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(sync);
@@ -2674,9 +2703,21 @@ class Plugin extends AppPlugin {
 
   syncSearchAutocompleteScrollbar(state) {
     const menu = state?.searchAutocompleteEl || null;
-    const scroll = menu?.querySelector?.('.vscroll-node') || null;
-    const scrollbar = menu?.querySelector?.('.vscrollbar') || null;
-    const thumb = menu?.querySelector?.('.vscrollbar-thumb') || null;
+    this.syncVirtualMenuScrollbarForMenu(menu);
+  }
+
+  syncVirtualMenuScrollbarForMenu(menu) {
+    this.syncVirtualMenuScrollbar({
+      scroll: menu?.querySelector?.('.vscroll-node') || null,
+      scrollbar: menu?.querySelector?.('.vscrollbar') || null,
+      thumb: menu?.querySelector?.('.vscrollbar-thumb') || null
+    });
+  }
+
+  syncVirtualMenuScrollbar(shell) {
+    const scroll = shell?.scroll || null;
+    const scrollbar = shell?.scrollbar || null;
+    const thumb = shell?.thumb || null;
     if (!scroll || !scrollbar || !thumb) return;
 
     const viewportHeight = scroll.clientHeight || 0;
@@ -3322,26 +3363,12 @@ class Plugin extends AppPlugin {
 
     menu.innerHTML = '';
 
-    const list = document.createElement('div');
-    list.className = 'autocomplete clickable';
-
-    const scroll = document.createElement('div');
-    scroll.className = 'vscroll-node';
-
-    const content = document.createElement('div');
-    content.className = 'vcontent';
-
-    const scrollbar = document.createElement('div');
-    scrollbar.className = 'vscrollbar scrollbar';
-
-    const thumb = document.createElement('div');
-    thumb.className = 'vscrollbar-thumb scrollbar-thumb clickable';
-    thumb.innerHTML = '&nbsp;';
+    const shell = this.createVirtualMenuShell();
 
     const title = document.createElement('div');
     title.className = 'tlr-sort-menu-title text-details';
     title.textContent = 'Sort by';
-    content.appendChild(title);
+    shell.content.appendChild(title);
 
     for (const option of this.getSortOptions()) {
       const row = document.createElement('button');
@@ -3358,17 +3385,17 @@ class Plugin extends AppPlugin {
       label.textContent = option.label;
 
       row.appendChild(label);
-      content.appendChild(row);
+      shell.content.appendChild(row);
     }
 
     const divider = document.createElement('div');
     divider.className = 'tlr-sort-menu-divider';
-    content.appendChild(divider);
+    shell.content.appendChild(divider);
 
     const directionTitle = document.createElement('div');
     directionTitle.className = 'tlr-sort-menu-title text-details';
     directionTitle.textContent = 'Direction';
-    content.appendChild(directionTitle);
+    shell.content.appendChild(directionTitle);
 
     const ascBtn = document.createElement('button');
     ascBtn.type = 'button';
@@ -3390,53 +3417,19 @@ class Plugin extends AppPlugin {
     descBtn.textContent = 'Descending';
     if (sortDir === 'desc') descBtn.classList.add('autocomplete--option-selected');
 
-    content.appendChild(ascBtn);
-    content.appendChild(descBtn);
+    shell.content.appendChild(ascBtn);
+    shell.content.appendChild(descBtn);
 
-    scroll.appendChild(content);
-    scroll.addEventListener('scroll', () => {
+    this.bindVirtualMenuScrollbar(shell, () => {
       this.syncSortMenuScrollbar(state);
     });
 
-    thumb.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      const startY = e.clientY;
-      const startScrollTop = scroll.scrollTop;
-      const onMouseMove = (moveEvent) => {
-        const trackHeight = scrollbar.clientHeight || scroll.clientHeight || 0;
-        const thumbHeight = thumb.clientHeight || 0;
-        const maxThumbTop = Math.max(1, trackHeight - thumbHeight);
-        const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-        if (maxScrollTop <= 0) return;
-        const deltaRatio = (moveEvent.clientY - startY) / maxThumbTop;
-        scroll.scrollTop = Math.max(0, Math.min(maxScrollTop, startScrollTop + (deltaRatio * maxScrollTop)));
-      };
-
-      const onMouseUp = () => {
-        document.removeEventListener('mousemove', onMouseMove, true);
-        document.removeEventListener('mouseup', onMouseUp, true);
-      };
-
-      document.addEventListener('mousemove', onMouseMove, true);
-      document.addEventListener('mouseup', onMouseUp, true);
-    });
-
-    list.appendChild(scroll);
-    scrollbar.appendChild(thumb);
-    list.appendChild(scrollbar);
-    menu.appendChild(list);
+    this.mountVirtualMenuShell(menu, shell);
 
     const sync = () => {
       this.syncSortMenuScrollbar(state);
     };
-    sync();
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(sync);
-    } else {
-      setTimeout(sync, 0);
-    }
+    this.scheduleVirtualMenuSync(sync);
   }
 
   syncSortControlState(state) {
@@ -3515,29 +3508,7 @@ class Plugin extends AppPlugin {
 
   syncSortMenuScrollbar(state) {
     const menu = state?.sortMenuEl || null;
-    const scroll = menu?.querySelector?.('.vscroll-node') || null;
-    const scrollbar = menu?.querySelector?.('.vscrollbar') || null;
-    const thumb = menu?.querySelector?.('.vscrollbar-thumb') || null;
-    if (!scroll || !scrollbar || !thumb) return;
-
-    const viewportHeight = scroll.clientHeight || 0;
-    const scrollHeight = scroll.scrollHeight || 0;
-    const trackHeight = scrollbar.clientHeight || viewportHeight;
-    if (!viewportHeight || !scrollHeight || !trackHeight || scrollHeight <= viewportHeight + 1) {
-      scrollbar.classList.remove('has-thumb');
-      thumb.style.height = '0px';
-      thumb.style.transform = 'translateY(0px)';
-      return;
-    }
-
-    const thumbHeight = Math.max(16, Math.round((viewportHeight / scrollHeight) * trackHeight));
-    const maxScrollTop = Math.max(1, scrollHeight - viewportHeight);
-    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-    const thumbTop = maxThumbTop * (scroll.scrollTop / maxScrollTop);
-
-    scrollbar.classList.add('has-thumb');
-    thumb.style.height = `${thumbHeight}px`;
-    thumb.style.transform = `translateY(${thumbTop}px)`;
+    this.syncVirtualMenuScrollbarForMenu(menu);
   }
 
   renderFromCache(state) {

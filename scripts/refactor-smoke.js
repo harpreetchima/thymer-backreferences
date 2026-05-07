@@ -187,7 +187,51 @@ function installLocalStorage(initial = {}) {
   return store;
 }
 
+function datasetKeyFromAttribute(name) {
+  return String(name || '').replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+}
+
+function getDomClassSet(el) {
+  return new Set((el?.className || '').split(/\s+/).filter(Boolean));
+}
+
+function domElementMatches(el, selector) {
+  const text = String(selector || '').trim();
+  if (!el || !text) return false;
+
+  const classDataMatch = text.match(/^\.([A-Za-z0-9_-]+)(?:\[data-([A-Za-z0-9_-]+)(?:="([^"]*)")?\])?$/);
+  if (classDataMatch) {
+    if (!getDomClassSet(el).has(classDataMatch[1])) return false;
+    if (!classDataMatch[2]) return true;
+    const key = datasetKeyFromAttribute(classDataMatch[2]);
+    if (!(key in (el.dataset || {}))) return false;
+    return classDataMatch[3] === undefined || String(el.dataset[key]) === classDataMatch[3];
+  }
+
+  const dataMatch = text.match(/^\[data-([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
+  if (dataMatch) {
+    const key = datasetKeyFromAttribute(dataMatch[1]);
+    if (!(key in (el.dataset || {}))) return false;
+    return dataMatch[2] === undefined || String(el.dataset[key]) === dataMatch[2];
+  }
+
+  return false;
+}
+
+function queryDomElements(root, selector, firstOnly = false, out = []) {
+  for (const child of root?.children || []) {
+    if (domElementMatches(child, selector)) {
+      out.push(child);
+      if (firstOnly) return out;
+    }
+    queryDomElements(child, selector, firstOnly, out);
+    if (firstOnly && out.length > 0) return out;
+  }
+  return out;
+}
+
 function makeDomElement(tagName) {
+  const listeners = {};
   const el = {
     tagName,
     children: [],
@@ -196,14 +240,42 @@ function makeDomElement(tagName) {
     className: '',
     textContent: '',
     disabled: false,
+    parentNode: null,
+    eventListeners: listeners,
+    style: {
+      setProperty(name, value) {
+        this[name] = String(value);
+      }
+    },
     appendChild(child) {
+      if (child && typeof child === 'object') child.parentNode = this;
       this.children.push(child);
       return child;
+    },
+    addEventListener(type, handler) {
+      if (!listeners[type]) listeners[type] = [];
+      listeners[type].push(handler);
+    },
+    removeEventListener(type, handler) {
+      listeners[type] = (listeners[type] || []).filter((fn) => fn !== handler);
+    },
+    contains(target) {
+      if (target === this) return true;
+      return this.children.some((child) => child?.contains?.(target));
+    },
+    querySelector(selector) {
+      return queryDomElements(this, selector, true)[0] || null;
+    },
+    querySelectorAll(selector) {
+      return queryDomElements(this, selector);
     },
     setAttribute(name, value) {
       this.attributes[name] = String(value);
     },
     classList: {
+      contains(name) {
+        return getDomClassSet(el).has(name);
+      },
       add(...names) {
         const existing = new Set((el.className || '').split(/\s+/).filter(Boolean));
         for (const name of names) existing.add(name);
@@ -225,6 +297,19 @@ function makeDomElement(tagName) {
       }
     }
   };
+  Object.defineProperty(el, 'innerHTML', {
+    get() {
+      return '';
+    },
+    set(value) {
+      if (String(value || '') === '') {
+        for (const child of this.children) {
+          if (child && typeof child === 'object') child.parentNode = null;
+        }
+        this.children = [];
+      }
+    }
+  });
   return el;
 }
 
@@ -429,6 +514,39 @@ function clickFooterAction(plugin, panelId, actionEl, event = {}) {
     target,
     ...event
   });
+}
+
+function installDomDocument() {
+  const listeners = {};
+  return {
+    eventListeners: listeners,
+    createElement: makeDomElement,
+    addEventListener(type, handler) {
+      if (!listeners[type]) listeners[type] = [];
+      listeners[type].push(handler);
+    },
+    removeEventListener(type, handler) {
+      listeners[type] = (listeners[type] || []).filter((fn) => fn !== handler);
+    }
+  };
+}
+
+function withDomDocument(fn) {
+  const previousDocument = global.document;
+  const previousRequestAnimationFrame = global.requestAnimationFrame;
+  const doc = installDomDocument();
+  global.document = doc;
+  global.requestAnimationFrame = (handler) => {
+    handler();
+    return 1;
+  };
+
+  try {
+    return fn(doc);
+  } finally {
+    global.document = previousDocument;
+    global.requestAnimationFrame = previousRequestAnimationFrame;
+  }
 }
 
 const tests = [];
@@ -2841,6 +2959,136 @@ test('footer click dispatches sort, rebuild, and context controls', () => {
     { type: 'link-unlinked', lineGuid: 'line-guid' }
   ]);
 });
+
+test('autocomplete and sort menus share a virtual scrollbar shell', () => withDomDocument(() => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  state.searchAutocompleteEl = makeDomElement('div');
+  state.searchAutocompleteOpen = true;
+  state.searchAutocompleteSelectedIndex = 1;
+  state.searchAutocompleteItems = [
+    plugin.buildSearchAutocompleteItem({
+      label: '@created_at',
+      icon: 'ti-at',
+      detail: 'Built-in key',
+      insertText: 'created_at',
+      replaceStart: 0,
+      replaceEnd: 0
+    }),
+    plugin.buildSearchAutocompleteItem({
+      label: '@modified_at',
+      icon: 'ti-at',
+      detail: 'Built-in key',
+      insertText: 'modified_at',
+      replaceStart: 0,
+      replaceEnd: 0
+    })
+  ];
+
+  plugin.renderSearchAutocomplete(state);
+
+  const autocompleteScroll = state.searchAutocompleteEl.querySelector('.vscroll-node');
+  const autocompleteScrollbar = state.searchAutocompleteEl.querySelector('.vscrollbar');
+  const autocompleteThumb = state.searchAutocompleteEl.querySelector('.vscrollbar-thumb');
+  assert.equal(state.searchAutocompleteEl.querySelectorAll('.autocomplete--option[data-index]').length, 2);
+  assert.ok(autocompleteScroll);
+  assert.ok(autocompleteScrollbar);
+  assert.ok(autocompleteThumb);
+  assert.equal((autocompleteScroll.eventListeners.scroll || []).length, 1);
+  assert.equal((autocompleteThumb.eventListeners.mousedown || []).length, 1);
+
+  autocompleteScroll.clientHeight = 50;
+  autocompleteScroll.scrollHeight = 200;
+  autocompleteScroll.scrollTop = 50;
+  autocompleteScrollbar.clientHeight = 100;
+  autocompleteThumb.clientHeight = 25;
+  plugin.syncSearchAutocompleteScrollbar(state);
+  assert.equal(autocompleteScrollbar.classList.contains('has-thumb'), true);
+  assert.equal(autocompleteThumb.style.height, '25px');
+  assert.equal(autocompleteThumb.style.transform, 'translateY(25px)');
+
+  state.sortMenuEl = makeDomElement('div');
+  state.sortBy = 'reference_count';
+  state.sortDir = 'asc';
+
+  plugin.renderSortMenu(state);
+
+  const sortScroll = state.sortMenuEl.querySelector('.vscroll-node');
+  const sortScrollbar = state.sortMenuEl.querySelector('.vscrollbar');
+  const sortThumb = state.sortMenuEl.querySelector('.vscrollbar-thumb');
+  assert.equal(state.sortMenuEl.querySelectorAll('.tlr-sort-option').length, plugin.getSortOptions().length + 2);
+  assert.ok(sortScroll);
+  assert.ok(sortScrollbar);
+  assert.ok(sortThumb);
+  assert.equal((sortScroll.eventListeners.scroll || []).length, 1);
+  assert.equal((sortThumb.eventListeners.mousedown || []).length, 1);
+
+  sortScroll.clientHeight = 80;
+  sortScroll.scrollHeight = 240;
+  sortScroll.scrollTop = 80;
+  sortScrollbar.clientHeight = 120;
+  sortThumb.clientHeight = 40;
+  plugin.syncSortMenuScrollbar(state);
+  assert.equal(sortScrollbar.classList.contains('has-thumb'), true);
+  assert.equal(sortThumb.style.height, '40px');
+  assert.equal(sortThumb.style.transform, 'translateY(40px)');
+}));
+
+test('autocomplete and sort menu dismiss handlers still close on outside input', () => withDomDocument((doc) => {
+  const plugin = makePlugin();
+  const state = plugin.createPanelState('panel-1', null);
+  state.rootEl = makeDomElement('div');
+  state.searchAutocompleteEl = makeDomElement('div');
+  state.searchAutocompleteEl.isConnected = true;
+  state.searchInputEl = makeDomElement('input');
+  state.searchInputEl.isConnected = true;
+  state.searchAutocompleteItems = [
+    plugin.buildSearchAutocompleteItem({
+      label: '@created_at',
+      icon: 'ti-at',
+      detail: 'Built-in key',
+      insertText: 'created_at',
+      replaceStart: 0,
+      replaceEnd: 0
+    })
+  ];
+
+  plugin.setSearchAutocompleteOpen(state, true);
+  assert.equal(state.searchAutocompleteOpen, true);
+  assert.equal(typeof state.searchAutocompleteDismissHandler, 'function');
+  assert.equal((doc.eventListeners.pointerdown || []).length, 1);
+
+  state.searchAutocompleteDismissHandler({ target: makeDomElement('span') });
+  assert.equal(state.searchAutocompleteOpen, false);
+  assert.equal(state.searchAutocompleteDismissHandler, null);
+
+  state.sortMenuEl = makeDomElement('div');
+  state.sortMenuEl.isConnected = true;
+  state.sortToggleEl = makeDomElement('button');
+  let focused = false;
+  state.sortToggleEl.focus = () => {
+    focused = true;
+  };
+
+  plugin.setSortMenuOpen(state, true);
+  assert.equal(state.sortMenuOpen, true);
+  assert.equal(typeof state.sortMenuDismissHandler, 'function');
+  assert.equal(typeof state.sortMenuKeyHandler, 'function');
+
+  let prevented = false;
+  state.sortMenuKeyHandler({
+    key: 'Escape',
+    preventDefault() {
+      prevented = true;
+    }
+  });
+
+  assert.equal(prevented, true);
+  assert.equal(focused, true);
+  assert.equal(state.sortMenuOpen, false);
+  assert.equal(state.sortMenuDismissHandler, null);
+  assert.equal(state.sortMenuKeyHandler, null);
+}));
 
 test('deferred unlinked loading hydrates cached state for the current panel only', async () => {
   const plugin = makePlugin();
