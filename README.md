@@ -122,6 +122,17 @@ For a longer console report:
 6. Paste the copied JSON into the bug report.
 7. Run `BackreferencesPerf.disable()` when finished.
 
+### Live Navigation Diagnostic
+
+When a backreference appears highlighted but the destination page does not visibly scroll to it, run the live navigation diagnostic from the browser console while the source Backreferences footer is visible:
+
+```js
+await BackreferencesNavTest.run({ text: "On Hillary Lane", mode: "same" })
+await BackreferencesNavTest.run({ text: "On Hillary Lane", mode: "new" })
+```
+
+The diagnostic logs a pass/fail summary and a table of matching destination elements. A passing result means the expected source-line text is visible outside the Backreferences footer after navigation. A failing result means the plugin found and navigated from the footer row, but the expected source-line text was not visible in the destination viewport.
+
 ### Startup Indexing
 
 Property References use a graph-wide index because Thymer does not currently expose an inverse property-link lookup. To avoid blocking startup, the plugin renders first, shows an indexing/queued state in the footer, and builds the property index in background chunks. Completed indexes are cached locally so a reload can hydrate Property References quickly and delay the full refresh scan. Record property updates apply incremental index changes when the index is ready; larger or ambiguous workspace changes schedule a background rebuild.

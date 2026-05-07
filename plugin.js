@@ -78,6 +78,7 @@ class Plugin extends AppPlugin {
     ];
 
     this.installPerfConsoleHelper();
+    this.installNavigationTestConsoleHelper();
     this.injectCss();
 
     this._cmdRebuildIndex = this.ui.addCommandPaletteCommand({
@@ -198,7 +199,7 @@ class Plugin extends AppPlugin {
     this.schedulePropertyIndexRebuild('initial', this._propertyIndexInitialDelayMs);
   }
 
-  // ---------- Performance diagnostics ----------
+  // ---------- Diagnostics ----------
 
   installPerfConsoleHelper() {
     try {
@@ -228,6 +229,251 @@ class Plugin extends AppPlugin {
     } catch (e) {
       // ignore
     }
+  }
+
+  installNavigationTestConsoleHelper() {
+    try {
+      if (typeof window === 'undefined') return;
+      const plugin = this;
+      window.BackreferencesNavTest = {
+        plugin: 'Backreferences',
+        help() {
+          return 'Run BackreferencesNavTest.run({ text: "On Hillary Lane", mode: "same" }) or mode: "new". Use runBoth(opts) to try new-panel first, then same-panel.';
+        },
+        find(opts = {}) {
+          return plugin.findNavigationDiagnosticRow(opts);
+        },
+        async run(opts = {}) {
+          return plugin.runNavigationDiagnostic(opts);
+        },
+        async runBoth(opts = {}) {
+          const first = await plugin.runNavigationDiagnostic({ ...opts, mode: 'new' });
+          const second = await plugin.runNavigationDiagnostic({ ...opts, mode: 'same' });
+          const results = [first, second];
+          try {
+            console.table(results.map((result) => plugin.summarizeNavigationDiagnosticResult(result)));
+          } catch (e) {
+            // ignore
+          }
+          return results;
+        }
+      };
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  normalizeDiagnosticText(value) {
+    return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  }
+
+  getDiagnosticElementText(el) {
+    return this.normalizeDiagnosticText(el?.innerText || el?.textContent || '');
+  }
+
+  elementMatchesDiagnosticText(el, expectedText) {
+    const haystack = this.getDiagnosticElementText(el).toLowerCase();
+    const needle = this.normalizeDiagnosticText(expectedText).toLowerCase();
+    if (!needle) return false;
+    if (haystack.includes(needle)) return true;
+    const prefix = needle.slice(0, 80);
+    return prefix.length >= 20 && haystack.includes(prefix);
+  }
+
+  isDiagnosticElementInViewport(el) {
+    if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+    const rect = el.getBoundingClientRect();
+    const width = typeof window !== 'undefined' ? window.innerWidth || 0 : 0;
+    const height = typeof window !== 'undefined' ? window.innerHeight || 0 : 0;
+    return rect.width > 0
+      && rect.height > 0
+      && rect.bottom > 0
+      && rect.right > 0
+      && rect.top < height
+      && rect.left < width;
+  }
+
+  getDiagnosticRect(el) {
+    if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+    const rect = el.getBoundingClientRect();
+    return {
+      x: this.roundPerfMs(rect.x),
+      y: this.roundPerfMs(rect.y),
+      width: this.roundPerfMs(rect.width),
+      height: this.roundPerfMs(rect.height),
+      top: this.roundPerfMs(rect.top),
+      bottom: this.roundPerfMs(rect.bottom)
+    };
+  }
+
+  findNavigationDiagnosticRow(opts = {}) {
+    if (typeof document === 'undefined') {
+      return { found: false, reason: 'document is unavailable.' };
+    }
+    const lineGuid = this.normalizeDiagnosticText(opts.lineGuid || '');
+    const text = this.normalizeDiagnosticText(opts.text || '');
+    const rows = Array.from(document.querySelectorAll?.('[data-action="open-line"]') || []);
+
+    let row = null;
+    if (lineGuid) {
+      row = rows.find((candidate) => (candidate?.dataset?.lineGuid || '') === lineGuid) || null;
+    }
+    if (!row && text) {
+      const needle = text.toLowerCase();
+      row = rows.find((candidate) => this.getDiagnosticElementText(candidate).toLowerCase().includes(needle)) || null;
+    }
+    if (!row && rows.length === 1 && opts.allowSingle !== false) row = rows[0];
+    if (!row) {
+      return {
+        found: false,
+        reason: text || lineGuid ? 'No matching Backreferences open-line row found.' : 'No row selected. Pass text or lineGuid.',
+        availableRows: rows.slice(0, 20).map((candidate) => ({
+          text: this.getDiagnosticElementText(candidate).slice(0, 160),
+          recordGuid: candidate?.dataset?.recordGuid || '',
+          lineGuid: candidate?.dataset?.lineGuid || ''
+        }))
+      };
+    }
+
+    const root = row.closest?.('.tlr-footer') || null;
+    const panelId = root?.dataset?.panelId || '';
+    const state = panelId ? this._panelStates?.get?.(panelId) || null : null;
+    return {
+      found: true,
+      row,
+      root,
+      panelId,
+      hasPanelState: Boolean(state?.panel),
+      recordGuid: row?.dataset?.recordGuid || '',
+      lineGuid: row?.dataset?.lineGuid || '',
+      text: this.getDiagnosticElementText(row),
+      state
+    };
+  }
+
+  getNavigationDiagnosticMatches(expectedText) {
+    if (typeof document === 'undefined') return [];
+    const out = [];
+    for (const el of Array.from(document.querySelectorAll?.('body *') || [])) {
+      if (el.closest?.('.tlr-footer')) continue;
+      if (!this.elementMatchesDiagnosticText(el, expectedText)) continue;
+      const matchingChild = Array.from(el.children || [])
+        .some((child) => this.elementMatchesDiagnosticText(child, expectedText));
+      if (matchingChild) continue;
+      const className = String(el.className || '');
+      out.push({
+        tag: el.tagName || '',
+        className: className.slice(0, 180),
+        inViewport: this.isDiagnosticElementInViewport(el),
+        highlighted: /highlight|selected|focus|target/i.test(className),
+        rect: this.getDiagnosticRect(el),
+        text: this.getDiagnosticElementText(el).slice(0, 220)
+      });
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+
+  getNavigationDiagnosticScrollContainers() {
+    if (typeof document === 'undefined') return [];
+    return Array.from(document.querySelectorAll?.('.panel, .panel-scroller-y, .page-content, [data-panel-id]') || [])
+      .map((el) => ({
+        tag: el.tagName || '',
+        className: String(el.className || '').slice(0, 160),
+        scrollTop: Math.round(el.scrollTop || 0),
+        scrollHeight: Math.round(el.scrollHeight || 0),
+        clientHeight: Math.round(el.clientHeight || 0),
+        text: this.getDiagnosticElementText(el).slice(0, 160)
+      }))
+      .filter((item) => item.scrollHeight > item.clientHeight || item.text);
+  }
+
+  summarizeNavigationDiagnosticResult(result) {
+    return {
+      mode: result?.mode || '',
+      ok: result?.ok === true,
+      reason: result?.reason || '',
+      title: result?.title || '',
+      visibleMatchCount: result?.visibleMatchCount || 0,
+      highlightedVisible: result?.highlightedVisible === true,
+      lineGuid: result?.lineGuid || ''
+    };
+  }
+
+  async runNavigationDiagnostic(opts = {}) {
+    const mode = opts.mode === 'new' || opts.newPanel === true ? 'new' : 'same';
+    const waitMs = this.coerceNonNegativeInt(opts.waitMs, 1800);
+    const found = this.findNavigationDiagnosticRow(opts);
+    if (!found.found) {
+      const result = {
+        mode,
+        ok: false,
+        reason: found.reason,
+        availableRows: found.availableRows || []
+      };
+      console.warn?.('[Backreferences nav test] row not found', result);
+      return result;
+    }
+    if (!found.state?.panel) {
+      const result = {
+        mode,
+        ok: false,
+        reason: 'Matched row has no live panel state.',
+        panelId: found.panelId,
+        lineGuid: found.lineGuid,
+        recordGuid: found.recordGuid
+      };
+      console.warn?.('[Backreferences nav test] missing panel state', result);
+      return result;
+    }
+
+    const expectedText = this.normalizeDiagnosticText(opts.expectedText || found.text);
+    const startedAt = this.perfNow();
+    const beforeTitle = typeof document !== 'undefined' ? document.title || '' : '';
+    await this.openRecord(found.state.panel, found.recordGuid, found.lineGuid || null, {
+      ctrlKey: mode === 'new',
+      metaKey: false
+    });
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+    const matches = this.getNavigationDiagnosticMatches(expectedText);
+    const visibleMatches = matches.filter((match) => match.inViewport === true);
+    const highlightedVisible = visibleMatches.some((match) => match.highlighted === true)
+      || matches.some((match) => match.highlighted === true && match.inViewport === true);
+    const result = {
+      mode,
+      ok: visibleMatches.length > 0,
+      reason: visibleMatches.length > 0 ? 'Expected line text is visible outside the Backreferences footer.' : 'Expected line text was not visible outside the Backreferences footer after navigation.',
+      durationMs: this.roundPerfMs(this.perfNow() - startedAt),
+      waitMs,
+      beforeTitle,
+      title: typeof document !== 'undefined' ? document.title || '' : '',
+      recordGuid: found.recordGuid,
+      lineGuid: found.lineGuid,
+      expectedText,
+      visibleMatchCount: visibleMatches.length,
+      highlightedVisible,
+      matches,
+      scrollContainers: this.getNavigationDiagnosticScrollContainers().slice(0, 8)
+    };
+
+    try {
+      const summary = this.summarizeNavigationDiagnosticResult(result);
+      if (result.ok) console.info('[Backreferences nav test] PASS', summary);
+      else console.warn('[Backreferences nav test] FAIL', summary);
+      if (console.table) console.table(matches.map((match) => ({
+        inViewport: match.inViewport,
+        highlighted: match.highlighted,
+        y: match.rect?.y,
+        height: match.rect?.height,
+        className: match.className,
+        text: match.text
+      })));
+      console.log('[Backreferences nav test] Full result', result);
+    } catch (e) {
+      // ignore
+    }
+    return result;
   }
 
   perfEnabled() {

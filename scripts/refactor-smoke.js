@@ -556,6 +556,84 @@ test('performance diagnostics are opt-in and omit raw query text', async () => {
   }
 });
 
+test('navigation diagnostic helper reports live line visibility evidence', async () => {
+  const plugin = makePlugin();
+  const previousWindow = global.window;
+  const previousDocument = global.document;
+  const previousConsole = global.console;
+  const rows = [];
+  const targetEl = {
+    tagName: 'DIV',
+    className: 'line-item is-highlighted',
+    innerText: 'On Hillary Lane in conversation with Tony Chamas',
+    closest() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { x: 10, y: 120, width: 600, height: 24, top: 120, bottom: 144, left: 10, right: 610 };
+    }
+  };
+
+  global.window = { innerWidth: 1000, innerHeight: 800 };
+  global.document = {
+    title: 'Thymer :: chima :: Benjamin Studebaker',
+    querySelectorAll(selector) {
+      if (selector === '[data-action="open-line"]') return rows;
+      if (selector === 'body *') return [targetEl];
+      return [];
+    }
+  };
+  global.console = {
+    info() {},
+    warn() {},
+    log() {},
+    table() {}
+  };
+
+  try {
+    plugin.installNavigationTestConsoleHelper();
+    assert.equal(typeof global.window.BackreferencesNavTest.run, 'function');
+    assert.match(global.window.BackreferencesNavTest.help(), /BackreferencesNavTest\.run/);
+
+    const missing = await global.window.BackreferencesNavTest.run({ text: 'Missing', waitMs: 0 });
+    assert.equal(missing.ok, false);
+    assert.match(missing.reason, /No matching/);
+
+    const root = { dataset: { panelId: 'panel-1' } };
+    const row = {
+      dataset: {
+        action: 'open-line',
+        recordGuid: 'record-guid',
+        lineGuid: 'line-guid'
+      },
+      innerText: 'On Hillary Lane in conversation with Tony Chamas',
+      closest(selector) {
+        return selector === '.tlr-footer' ? root : null;
+      }
+    };
+    const calls = [];
+    rows.push(row);
+    plugin._panelStates.set('panel-1', { panel: { getId: () => 'panel-1' } });
+    plugin.openRecord = async (_panel, recordGuid, lineGuid, event) => {
+      calls.push({ recordGuid, lineGuid, ctrlKey: event.ctrlKey === true });
+    };
+
+    const found = global.window.BackreferencesNavTest.find({ text: 'Hillary Lane' });
+    assert.equal(found.found, true);
+    assert.equal(found.lineGuid, 'line-guid');
+
+    const result = await global.window.BackreferencesNavTest.run({ text: 'Hillary Lane', mode: 'new', waitMs: 0 });
+    assert.equal(result.ok, true);
+    assert.equal(result.visibleMatchCount, 1);
+    assert.equal(result.highlightedVisible, true);
+    assert.deepEqual(calls, [{ recordGuid: 'record-guid', lineGuid: 'line-guid', ctrlKey: true }]);
+  } finally {
+    global.window = previousWindow;
+    global.document = previousDocument;
+    global.console = previousConsole;
+  }
+});
+
 test('performance ring buffer keeps bounded structured samples', () => {
   const plugin = makePlugin();
   plugin._perfMaxSamples = 3;
