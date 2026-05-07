@@ -1,6 +1,7 @@
 {
   "private": true,
   "scripts": {
+    "bench": "node scripts/perf-benchmark.js",
     "check": "node --check plugin.js",
     "test": "node scripts/refactor-smoke.js"
   }
