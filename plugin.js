@@ -4317,108 +4317,29 @@ class Plugin extends AppPlugin {
     });
 
     try {
-      if (typeof this.data?.getAllCollections !== 'function') {
-        throw new Error('Thymer graph collections are unavailable.');
-      }
-
-      const collectionsStartedAt = this.perfNow();
-      const collections = await this.data.getAllCollections();
-      this.perfStep(perf, 'get all collections', collectionsStartedAt, {
-        collections: Array.isArray(collections) ? collections.length : 0
+      const collections = await this.loadPropertyIndexCollections(perf);
+      const { collectionCount } = await this.scanPropertyIndexCollections({
+        collections,
+        seq,
+        reason,
+        byTargetGuid,
+        sourceEntriesByRecordGuid,
+        perf
       });
-      if (!Array.isArray(collections)) {
-        throw new Error('Thymer graph collections could not be read.');
-      }
-
-      let lastNotifyAt = Date.now();
-      let lastYieldAt = lastNotifyAt;
-      let collectionCount = 0;
-      this._propertyIndexStats.collectionCount = Array.isArray(collections) ? collections.length : 0;
-      for (const collection of collections) {
-        if (!collection || typeof collection.getAllRecords !== 'function') continue;
-        let records = [];
-        try {
-          const recordsStartedAt = this.perfNow();
-          records = await collection.getAllRecords();
-          collectionCount += 1;
-          this.perfStep(perf, 'get collection records', recordsStartedAt, {
-            records: Array.isArray(records) ? records.length : 0
-          });
-        } catch (e) {
-          continue;
-        }
-        if (!Array.isArray(records)) continue;
-
-        for (const record of records) {
-          if (this._propertyIndexBuildSeq !== seq) return;
-          this.indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid, {
-            stats: this._propertyIndexStats
-          });
-          this._propertyIndexStats.scannedRecords += 1;
-
-          const now = Date.now();
-          const yieldEveryRecords = this.coercePositiveInt(this._propertyIndexYieldEveryRecords, 25);
-          const yieldBudgetMs = this.coerceNonNegativeInt(this._propertyIndexYieldBudgetMs, 12);
-          const progressNotifyMs = this.coerceNonNegativeInt(this._propertyIndexProgressNotifyMs, 250);
-          const shouldNotify = now - lastNotifyAt >= progressNotifyMs;
-          const shouldYield = this._propertyIndexStats.scannedRecords % yieldEveryRecords === 0
-            || (yieldBudgetMs > 0 && now - lastYieldAt >= yieldBudgetMs);
-
-          if (shouldNotify) {
-            lastNotifyAt = now;
-            this._propertyIndexStats.lastProgressAt = new Date(now);
-            this.notifyPropertyIndexChanged(reason || 'property-index-progress');
-          }
-
-          if (shouldYield) {
-            this._propertyIndexStats.yieldCount += 1;
-            await this.waitForIndexYield();
-            lastYieldAt = Date.now();
-          }
-        }
-      }
 
       if (this._propertyIndexBuildSeq !== seq) return;
 
-      const finishedAt = new Date();
-      const durationMs = this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt);
-      this._propertyIndexByTargetGuid = byTargetGuid;
-      this._propertyIndexSourceEntriesByRecordGuid = sourceEntriesByRecordGuid;
-      this._propertyIndexStats = {
-        ...this._propertyIndexStats,
-        indexedReferences: this.countPropertyIndexReferences(byTargetGuid),
-        indexedTargets: byTargetGuid.size,
-        cacheState: 'rebuilt',
-        durationMs,
-        finishedAt,
-        lastProgressAt: finishedAt
-      };
-      this._propertyIndexStatus = 'ready';
-      this._propertyIndexError = '';
-      this.perfCount(perf, {
-        collections: collectionCount,
-        scannedRecords: this._propertyIndexStats.scannedRecords || 0,
-        scannedProperties: this._propertyIndexStats.scannedProperties || 0,
-        indexedReferences: this._propertyIndexStats.indexedReferences || 0,
-        indexedTargets: this._propertyIndexStats.indexedTargets || 0,
-        yieldCount: this._propertyIndexStats.yieldCount || 0,
-        cacheState: this._propertyIndexStats.cacheState || '',
-        durationMs: this._propertyIndexStats.durationMs || 0
+      this.finishPropertyIndexBuild({
+        byTargetGuid,
+        sourceEntriesByRecordGuid,
+        collectionCount,
+        reason,
+        perf
       });
       this.schedulePropertyIndexCacheWrite(0);
       this.notifyPropertyIndexChanged(reason || 'property-index-ready');
     } catch (e) {
-      if (this._propertyIndexBuildSeq !== seq) return;
-      const finishedAt = new Date();
-      this._propertyIndexStatus = 'error';
-      this._propertyIndexError = e?.message || 'Error indexing property references.';
-      this._propertyIndexStats = {
-        ...this._propertyIndexStats,
-        durationMs: this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt),
-        finishedAt,
-        lastProgressAt: finishedAt
-      };
-      this.notifyPropertyIndexChanged(reason || 'property-index-error');
+      this.failPropertyIndexBuild(seq, reason, e);
     } finally {
       this.perfLog(perf);
       if (this._propertyIndexBuildSeq === seq && this._propertyIndexNeedsRebuild) {
@@ -4426,6 +4347,135 @@ class Plugin extends AppPlugin {
         this.schedulePropertyIndexRebuild('queued-property-index-rebuild', 0);
       }
     }
+  }
+
+  async loadPropertyIndexCollections(perf) {
+    if (typeof this.data?.getAllCollections !== 'function') {
+      throw new Error('Thymer graph collections are unavailable.');
+    }
+
+    const collectionsStartedAt = this.perfNow();
+    const collections = await this.data.getAllCollections();
+    this.perfStep(perf, 'get all collections', collectionsStartedAt, {
+      collections: Array.isArray(collections) ? collections.length : 0
+    });
+    if (!Array.isArray(collections)) {
+      throw new Error('Thymer graph collections could not be read.');
+    }
+    return collections;
+  }
+
+  getPropertyIndexProgressConfig() {
+    return {
+      yieldEveryRecords: this.coercePositiveInt(this._propertyIndexYieldEveryRecords, 25),
+      yieldBudgetMs: this.coerceNonNegativeInt(this._propertyIndexYieldBudgetMs, 12),
+      progressNotifyMs: this.coerceNonNegativeInt(this._propertyIndexProgressNotifyMs, 250)
+    };
+  }
+
+  async readPropertyIndexCollectionRecords(collection, perf) {
+    if (!collection || typeof collection.getAllRecords !== 'function') return null;
+    try {
+      const recordsStartedAt = this.perfNow();
+      const records = await collection.getAllRecords();
+      this.perfStep(perf, 'get collection records', recordsStartedAt, {
+        records: Array.isArray(records) ? records.length : 0
+      });
+      return Array.isArray(records) ? records : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async scanPropertyIndexCollections({ collections, seq, reason, byTargetGuid, sourceEntriesByRecordGuid, perf }) {
+    const progress = {
+      ...this.getPropertyIndexProgressConfig(),
+      lastNotifyAt: Date.now(),
+      lastYieldAt: Date.now()
+    };
+    let collectionCount = 0;
+    this._propertyIndexStats.collectionCount = collections.length;
+
+    for (const collection of collections) {
+      const records = await this.readPropertyIndexCollectionRecords(collection, perf);
+      if (!records) continue;
+      collectionCount += 1;
+      for (const record of records) {
+        if (this._propertyIndexBuildSeq !== seq) return { collectionCount };
+        await this.scanPropertyIndexRecord(record, {
+          byTargetGuid,
+          sourceEntriesByRecordGuid,
+          progress,
+          reason
+        });
+      }
+    }
+
+    return { collectionCount };
+  }
+
+  async scanPropertyIndexRecord(record, { byTargetGuid, sourceEntriesByRecordGuid, progress, reason }) {
+    this.indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid, {
+      stats: this._propertyIndexStats
+    });
+    this._propertyIndexStats.scannedRecords += 1;
+
+    const now = Date.now();
+    if (now - progress.lastNotifyAt >= progress.progressNotifyMs) {
+      progress.lastNotifyAt = now;
+      this._propertyIndexStats.lastProgressAt = new Date(now);
+      this.notifyPropertyIndexChanged(reason || 'property-index-progress');
+    }
+
+    const shouldYield = this._propertyIndexStats.scannedRecords % progress.yieldEveryRecords === 0
+      || (progress.yieldBudgetMs > 0 && now - progress.lastYieldAt >= progress.yieldBudgetMs);
+    if (!shouldYield) return;
+
+    this._propertyIndexStats.yieldCount += 1;
+    await this.waitForIndexYield();
+    progress.lastYieldAt = Date.now();
+  }
+
+  finishPropertyIndexBuild({ byTargetGuid, sourceEntriesByRecordGuid, collectionCount, perf }) {
+    const finishedAt = new Date();
+    const durationMs = this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt);
+    this._propertyIndexByTargetGuid = byTargetGuid;
+    this._propertyIndexSourceEntriesByRecordGuid = sourceEntriesByRecordGuid;
+    this._propertyIndexStats = {
+      ...this._propertyIndexStats,
+      indexedReferences: this.countPropertyIndexReferences(byTargetGuid),
+      indexedTargets: byTargetGuid.size,
+      cacheState: 'rebuilt',
+      durationMs,
+      finishedAt,
+      lastProgressAt: finishedAt
+    };
+    this._propertyIndexStatus = 'ready';
+    this._propertyIndexError = '';
+    this.perfCount(perf, {
+      collections: collectionCount,
+      scannedRecords: this._propertyIndexStats.scannedRecords || 0,
+      scannedProperties: this._propertyIndexStats.scannedProperties || 0,
+      indexedReferences: this._propertyIndexStats.indexedReferences || 0,
+      indexedTargets: this._propertyIndexStats.indexedTargets || 0,
+      yieldCount: this._propertyIndexStats.yieldCount || 0,
+      cacheState: this._propertyIndexStats.cacheState || '',
+      durationMs: this._propertyIndexStats.durationMs || 0
+    });
+  }
+
+  failPropertyIndexBuild(seq, reason, error) {
+    if (this._propertyIndexBuildSeq !== seq) return;
+    const finishedAt = new Date();
+    this._propertyIndexStatus = 'error';
+    this._propertyIndexError = error?.message || 'Error indexing property references.';
+    this._propertyIndexStats = {
+      ...this._propertyIndexStats,
+      durationMs: this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt),
+      finishedAt,
+      lastProgressAt: finishedAt
+    };
+    this.notifyPropertyIndexChanged(reason || 'property-index-error');
   }
 
   waitForIndexYield() {
@@ -4533,6 +4583,33 @@ class Plugin extends AppPlugin {
     };
   }
 
+  compactPropertyIndexCacheEntries(entries) {
+    const compact = [];
+    const seen = new Set();
+    for (const entry of entries || []) {
+      const targetGuid = `${entry?.targetGuid || ''}`.trim();
+      const propertyName = `${entry?.propertyName || ''}`.trim();
+      if (!targetGuid || !propertyName) continue;
+      const key = `${targetGuid}\u0000${propertyName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      compact.push([targetGuid, propertyName]);
+    }
+    return compact;
+  }
+
+  serializePropertyIndexCacheStats(stats, referenceCount) {
+    return {
+      reason: stats?.reason || '',
+      collectionCount: this.coerceNonNegativeInt(stats?.collectionCount, 0),
+      scannedRecords: this.coerceNonNegativeInt(stats?.scannedRecords, 0),
+      scannedProperties: this.coerceNonNegativeInt(stats?.scannedProperties, 0),
+      indexedReferences: referenceCount,
+      indexedTargets: this.coerceNonNegativeInt(stats?.indexedTargets, this._propertyIndexByTargetGuid?.size || 0),
+      finishedAt: this.parsePropertyIndexCacheDate(stats?.finishedAt)?.toISOString?.() || null
+    };
+  }
+
   putPropertyIndexReference(byTargetGuid, targetGuid, propertyName, sourceGuid, record) {
     let byProp = byTargetGuid.get(targetGuid) || null;
     if (!byProp) {
@@ -4551,22 +4628,25 @@ class Plugin extends AppPlugin {
     if (this._propertyIndexStatus !== 'ready') return null;
     const workspaceGuid = this.getPropertyIndexCacheWorkspaceGuid();
     if (!workspaceGuid) return null;
+
+    const { sources, referenceCount } = this.serializePropertyIndexCacheSources();
+    const stats = this._propertyIndexStats || this.createEmptyPropertyIndexStats();
+    return {
+      version: 1,
+      workspaceGuid,
+      savedAt: Date.now(),
+      stats: this.serializePropertyIndexCacheStats(stats, referenceCount),
+      sources
+    };
+  }
+
+  serializePropertyIndexCacheSources() {
     const sources = [];
     let referenceCount = 0;
     for (const [sourceGuid, entries] of this._propertyIndexSourceEntriesByRecordGuid?.entries?.() || []) {
       const guid = `${sourceGuid || ''}`.trim();
       if (!guid || !Array.isArray(entries) || entries.length === 0) continue;
-      const compact = [];
-      const seen = new Set();
-      for (const entry of entries) {
-        const targetGuid = `${entry?.targetGuid || ''}`.trim();
-        const propertyName = `${entry?.propertyName || ''}`.trim();
-        if (!targetGuid || !propertyName) continue;
-        const key = `${targetGuid}\u0000${propertyName}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        compact.push([targetGuid, propertyName]);
-      }
+      const compact = this.compactPropertyIndexCacheEntries(entries);
       if (compact.length === 0) continue;
       sources.push([
         guid,
@@ -4575,23 +4655,7 @@ class Plugin extends AppPlugin {
       ]);
       referenceCount += compact.length;
     }
-
-    const stats = this._propertyIndexStats || this.createEmptyPropertyIndexStats();
-    return {
-      version: 1,
-      workspaceGuid,
-      savedAt: Date.now(),
-      stats: {
-        reason: stats.reason || '',
-        collectionCount: this.coerceNonNegativeInt(stats.collectionCount, 0),
-        scannedRecords: this.coerceNonNegativeInt(stats.scannedRecords, 0),
-        scannedProperties: this.coerceNonNegativeInt(stats.scannedProperties, 0),
-        indexedReferences: referenceCount,
-        indexedTargets: this.coerceNonNegativeInt(stats.indexedTargets, this._propertyIndexByTargetGuid?.size || 0),
-        finishedAt: this.parsePropertyIndexCacheDate(stats.finishedAt)?.toISOString?.() || null
-      },
-      sources
-    };
+    return { sources, referenceCount };
   }
 
   getPropertyIndexCacheWorkspaceGuid() {
@@ -4607,6 +4671,22 @@ class Plugin extends AppPlugin {
     const currentWorkspaceGuid = this.getPropertyIndexCacheWorkspaceGuid();
     const cachedWorkspaceGuid = typeof raw?.workspaceGuid === 'string' ? raw.workspaceGuid.trim() : '';
     return Boolean(currentWorkspaceGuid && cachedWorkspaceGuid && currentWorkspaceGuid === cachedWorkspaceGuid);
+  }
+
+  hasUsablePropertyIndexCacheScan(sources, stats) {
+    return sources.length > 0
+      || this.coerceNonNegativeInt(stats.scannedRecords, 0) > 0
+      || this.coerceNonNegativeInt(stats.scannedProperties, 0) > 0
+      || this.coerceNonNegativeInt(stats.indexedReferences, 0) > 0;
+  }
+
+  getUsablePropertyIndexCache(raw) {
+    if (!raw || raw.version !== 1 || !Array.isArray(raw.sources)) return null;
+    if (!this.isPropertyIndexCacheForCurrentWorkspace(raw)) return null;
+
+    const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
+    if (!this.hasUsablePropertyIndexCacheScan(raw.sources, stats)) return null;
+    return { sources: raw.sources, stats, savedAt: raw.savedAt };
   }
 
   writePropertyIndexCache() {
@@ -4633,52 +4713,79 @@ class Plugin extends AppPlugin {
   }
 
   hydratePropertyIndexFromCache() {
-    const raw = this.readJsonStorage(this._storageKeyPropertyIndexCache);
-    if (!raw || raw.version !== 1 || !Array.isArray(raw.sources)) return false;
-    if (!this.isPropertyIndexCacheForCurrentWorkspace(raw)) return false;
-    const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
-    const hasStoredScan = raw.sources.length > 0
-      || this.coerceNonNegativeInt(stats.scannedRecords, 0) > 0
-      || this.coerceNonNegativeInt(stats.scannedProperties, 0) > 0
-      || this.coerceNonNegativeInt(stats.indexedReferences, 0) > 0;
-    if (!hasStoredScan) return false;
+    const cache = this.getUsablePropertyIndexCache(
+      this.readJsonStorage(this._storageKeyPropertyIndexCache)
+    );
+    if (!cache) return false;
 
     const startedAt = this.perfNow();
     const byTargetGuid = new Map();
     const sourceEntriesByRecordGuid = new Map();
     let cachedReferenceCount = 0;
 
-    for (const source of raw.sources) {
-      if (!Array.isArray(source) || source.length < 2) continue;
-      const sourceGuid = `${source[0] || ''}`.trim();
-      const hasMeta = source.length >= 3 && source[1] && typeof source[1] === 'object' && !Array.isArray(source[1]);
-      const meta = hasMeta ? source[1] : null;
-      const rawEntries = hasMeta && Array.isArray(source[2])
-        ? source[2]
-        : (Array.isArray(source[1]) ? source[1] : []);
-      if (!sourceGuid || rawEntries.length === 0) continue;
-      const record = this.createCachedPropertyIndexRecord(sourceGuid, meta);
-
-      const entries = [];
-      const seen = new Set();
-      for (const rawEntry of rawEntries) {
-        const targetGuid = `${Array.isArray(rawEntry) ? rawEntry[0] : rawEntry?.targetGuid || ''}`.trim();
-        const propertyName = `${Array.isArray(rawEntry) ? rawEntry[1] : rawEntry?.propertyName || ''}`.trim();
-        if (!targetGuid || !propertyName) continue;
-        const key = `${targetGuid}\u0000${propertyName}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        this.putPropertyIndexReference(byTargetGuid, targetGuid, propertyName, sourceGuid, record);
-        entries.push({ targetGuid, propertyName });
-        cachedReferenceCount += 1;
-      }
-      if (entries.length > 0) sourceEntriesByRecordGuid.set(sourceGuid, entries);
+    for (const source of cache.sources) {
+      cachedReferenceCount += this.hydratePropertyIndexCacheSource(
+        source,
+        byTargetGuid,
+        sourceEntriesByRecordGuid
+      );
     }
 
-    if (raw.sources.length > 0 && sourceEntriesByRecordGuid.size === 0) return false;
+    if (cache.sources.length > 0 && sourceEntriesByRecordGuid.size === 0) return false;
 
-    const savedAt = this.parsePropertyIndexCacheDate(raw.savedAt)
+    this.finishPropertyIndexCacheHydration({
+      cache,
+      byTargetGuid,
+      sourceEntriesByRecordGuid,
+      cachedReferenceCount,
+      startedAt
+    });
+    return true;
+  }
+
+  parsePropertyIndexCacheSource(source) {
+    if (!Array.isArray(source) || source.length < 2) return null;
+    const sourceGuid = `${source[0] || ''}`.trim();
+    const hasMeta = source.length >= 3 && source[1] && typeof source[1] === 'object' && !Array.isArray(source[1]);
+    const meta = hasMeta ? source[1] : null;
+    const rawEntries = hasMeta && Array.isArray(source[2])
+      ? source[2]
+      : (Array.isArray(source[1]) ? source[1] : []);
+    if (!sourceGuid || rawEntries.length === 0) return null;
+    return { sourceGuid, meta, rawEntries };
+  }
+
+  parsePropertyIndexCacheEntry(rawEntry) {
+    const targetGuid = `${Array.isArray(rawEntry) ? rawEntry[0] : rawEntry?.targetGuid || ''}`.trim();
+    const propertyName = `${Array.isArray(rawEntry) ? rawEntry[1] : rawEntry?.propertyName || ''}`.trim();
+    if (!targetGuid || !propertyName) return null;
+    return { targetGuid, propertyName };
+  }
+
+  hydratePropertyIndexCacheSource(source, byTargetGuid, sourceEntriesByRecordGuid) {
+    const parsed = this.parsePropertyIndexCacheSource(source);
+    if (!parsed) return 0;
+
+    const record = this.createCachedPropertyIndexRecord(parsed.sourceGuid, parsed.meta);
+    const entries = [];
+    const seen = new Set();
+    for (const rawEntry of parsed.rawEntries) {
+      const entry = this.parsePropertyIndexCacheEntry(rawEntry);
+      if (!entry) continue;
+      const key = `${entry.targetGuid}\u0000${entry.propertyName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      this.putPropertyIndexReference(byTargetGuid, entry.targetGuid, entry.propertyName, parsed.sourceGuid, record);
+      entries.push(entry);
+    }
+    if (entries.length > 0) sourceEntriesByRecordGuid.set(parsed.sourceGuid, entries);
+    return entries.length;
+  }
+
+  finishPropertyIndexCacheHydration({ cache, byTargetGuid, sourceEntriesByRecordGuid, cachedReferenceCount, startedAt }) {
+    const stats = cache.stats || {};
+    const savedAt = this.parsePropertyIndexCacheDate(cache.savedAt)
       || this.parsePropertyIndexCacheDate(stats.finishedAt);
     const hydratedAt = new Date();
     this._propertyIndexByTargetGuid = byTargetGuid;
@@ -4706,7 +4813,7 @@ class Plugin extends AppPlugin {
       meta: { reason: 'cache-hydrated' },
       counts: {
         cacheState: 'hydrated',
-        cachedSourceEntries: raw.sources.length,
+        cachedSourceEntries: cache.sources.length,
         cachedSources: sourceEntriesByRecordGuid.size,
         indexedReferences: this._propertyIndexStats.indexedReferences,
         indexedTargets: this._propertyIndexStats.indexedTargets
@@ -4714,7 +4821,6 @@ class Plugin extends AppPlugin {
       steps: []
     });
     this.notifyPropertyIndexChanged('property-index-cache-hydrated');
-    return true;
   }
 
   getPropertyReferenceGuids(prop) {
@@ -4736,13 +4842,7 @@ class Plugin extends AppPlugin {
     if (!sourceGuid) return 0;
     this.removeSourceRecordFromPropertyIndexMaps(sourceGuid, byTargetGuid, sourceEntriesByRecordGuid);
 
-    let props = [];
-    try {
-      props = record.getAllProperties?.() || [];
-    } catch (e) {
-      props = [];
-    }
-    if (!Array.isArray(props)) props = [];
+    const props = this.getRecordPropertiesForIndex(record);
     if (stats && typeof stats === 'object') {
       stats.scannedProperties = this.coerceNonNegativeInt(stats.scannedProperties, 0) + props.length;
     }
@@ -4772,6 +4872,15 @@ class Plugin extends AppPlugin {
     }
 
     return entries.length;
+  }
+
+  getRecordPropertiesForIndex(record) {
+    try {
+      const props = record?.getAllProperties?.() || [];
+      return Array.isArray(props) ? props : [];
+    } catch (e) {
+      return [];
+    }
   }
 
   removeSourceRecordFromPropertyIndexMaps(sourceRecordGuid, byTargetGuid, sourceEntriesByRecordGuid) {
@@ -6478,33 +6587,45 @@ class Plugin extends AppPlugin {
     const seenSourceGuids = new Set();
 
     for (const src of sourceRecords || []) {
-      const srcGuid = src?.guid || null;
+      const srcGuid = this.getUniquePropertySourceGuid(src, seenSourceGuids);
       if (!srcGuid) continue;
-      if (seenSourceGuids.has(srcGuid)) continue;
-      seenSourceGuids.add(srcGuid);
       if (!showSelf && srcGuid === targetGuid) continue;
-
-      const props = src.getAllProperties?.() || [];
-      for (const p of props || []) {
-        const propName = (p?.name || '').trim();
-        if (!propName) continue;
-        if (!this.propertyReferencesGuid(p, targetGuid)) continue;
-
-        let group = byProp.get(propName) || null;
-        if (!group) {
-          group = new Map();
-          byProp.set(propName, group);
-        }
-        group.set(srcGuid, src);
-      }
+      this.collectRecordPropertyBacklinkGroups(src, srcGuid, targetGuid, byProp);
     }
 
-    const groups = Array.from(byProp.entries()).map(([propertyName, recordMap]) => ({
+    return this.sortPropertyReferenceGroups(this.propertyGroupMapToGroups(byProp));
+  }
+
+  getUniquePropertySourceGuid(record, seenSourceGuids) {
+    const guid = (record?.guid || '').trim();
+    if (!guid || seenSourceGuids?.has?.(guid)) return '';
+    seenSourceGuids.add(guid);
+    return guid;
+  }
+
+  collectRecordPropertyBacklinkGroups(record, sourceGuid, targetGuid, byProp) {
+    for (const prop of this.getRecordPropertiesForIndex(record)) {
+      const propertyName = (prop?.name || '').trim();
+      if (!propertyName) continue;
+      if (!this.propertyReferencesGuid(prop, targetGuid)) continue;
+      this.putPropertyGroupRecord(byProp, propertyName, sourceGuid, record);
+    }
+  }
+
+  putPropertyGroupRecord(byProp, propertyName, sourceGuid, record) {
+    let group = byProp.get(propertyName) || null;
+    if (!group) {
+      group = new Map();
+      byProp.set(propertyName, group);
+    }
+    group.set(sourceGuid, record);
+  }
+
+  propertyGroupMapToGroups(byProp) {
+    return Array.from(byProp?.entries?.() || []).map(([propertyName, recordMap]) => ({
       propertyName,
       records: Array.from(recordMap.values())
     }));
-
-    return this.sortPropertyReferenceGroups(groups);
   }
 
   propertyReferencesGuid(prop, targetGuid) {
@@ -6549,36 +6670,32 @@ class Plugin extends AppPlugin {
       out.push(t);
     };
 
-    let raw = [];
-    try {
-      if (prop && 'value' in prop) {
-        raw.push(prop.value);
-      }
-    } catch (e) {
-      // ignore
-    }
-    try {
-      raw.push(prop.text?.());
-    } catch (e) {
-      // ignore
-    }
-    try {
-      raw.push(prop.choice?.());
-    } catch (e) {
-      // ignore
-    }
-    try {
-      const values = prop.values?.();
-      if (Array.isArray(values)) raw.push(values);
-    } catch (e) {
-      // ignore
-    }
-
-    for (const r of raw) {
+    for (const r of this.readRawPropertyCandidateValues(prop)) {
       this.collectPropertyCandidateValues(r, push);
     }
 
     return out;
+  }
+
+  readRawPropertyCandidateValues(prop) {
+    const raw = [];
+    this.pushRawPropertyCandidateValue(raw, () => (prop && 'value' in prop ? prop.value : undefined));
+    this.pushRawPropertyCandidateValue(raw, () => prop?.text?.());
+    this.pushRawPropertyCandidateValue(raw, () => prop?.choice?.());
+    this.pushRawPropertyCandidateValue(raw, () => {
+      const values = prop?.values?.();
+      return Array.isArray(values) ? values : undefined;
+    });
+    return raw;
+  }
+
+  pushRawPropertyCandidateValue(raw, read) {
+    try {
+      const value = typeof read === 'function' ? read() : undefined;
+      if (value !== undefined) raw.push(value);
+    } catch (e) {
+      // ignore
+    }
   }
 
   collectPropertyCandidateValues(raw, push) {
@@ -6592,36 +6709,42 @@ class Plugin extends AppPlugin {
     }
 
     if (Array.isArray(raw)) {
-      const kind = typeof raw[0] === 'string' ? raw[0].trim().toLowerCase() : '';
-      if (raw.length === 2 && kind) {
-        if (kind === 'record' || kind === 'records') {
-          this.collectPropertyCandidateValues(raw[1], push);
-          return;
-        }
-        if (kind === 'text' || kind === 'url' || kind === 'hashtag' || kind === 'choice'
-          || kind === 'datetime' || kind === 'number' || kind === 'banner' || kind === 'file'
-          || kind === 'image') {
-          this.collectPropertyCandidateValues(raw[1], push);
-          return;
-        }
-      }
-
-      for (const item of raw) {
-        this.collectPropertyCandidateValues(item, push);
-      }
+      this.collectPropertyCandidateArrayValues(raw, push);
       return;
     }
 
     if (typeof raw === 'object') {
-      const guidKeys = ['guid', 'recordGuid', 'record_guid', 'targetGuid', 'target_guid'];
-      for (const key of guidKeys) {
-        const value = raw?.[key];
-        if (typeof value === 'string') push(value);
-      }
+      this.collectPropertyCandidateObjectValues(raw, push);
+    }
+  }
 
-      for (const key of ['value', 'record', 'records', 'linkedRecord', 'linkedRecords', 'target', 'targets', 'item', 'items', 'node', 'nodes', 'ref', 'refs']) {
-        if (key in raw) this.collectPropertyCandidateValues(raw[key], push);
-      }
+  isPropertyCandidateTupleKind(kind) {
+    return [
+      'record', 'records', 'text', 'url', 'hashtag', 'choice',
+      'datetime', 'number', 'banner', 'file', 'image'
+    ].includes(kind);
+  }
+
+  collectPropertyCandidateArrayValues(raw, push) {
+    const kind = typeof raw?.[0] === 'string' ? raw[0].trim().toLowerCase() : '';
+    if (raw.length === 2 && kind && this.isPropertyCandidateTupleKind(kind)) {
+      this.collectPropertyCandidateValues(raw[1], push);
+      return;
+    }
+
+    for (const item of raw) {
+      this.collectPropertyCandidateValues(item, push);
+    }
+  }
+
+  collectPropertyCandidateObjectValues(raw, push) {
+    for (const key of ['guid', 'recordGuid', 'record_guid', 'targetGuid', 'target_guid']) {
+      const value = raw?.[key];
+      if (typeof value === 'string') push(value);
+    }
+
+    for (const key of ['value', 'record', 'records', 'linkedRecord', 'linkedRecords', 'target', 'targets', 'item', 'items', 'node', 'nodes', 'ref', 'refs']) {
+      if (key in raw) this.collectPropertyCandidateValues(raw[key], push);
     }
   }
 

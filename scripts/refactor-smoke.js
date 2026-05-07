@@ -1446,6 +1446,45 @@ test('property index cache rejects other workspaces', () => {
   assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex('target-guid', { showSelf: false }), []);
 });
 
+test('property index cache hydration validates entry shape and dedupes references', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  plugin.data.getRecord = () => {
+    throw new Error('cache hydration should use stored record metadata');
+  };
+  installLocalStorage({
+    [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
+      version: 1,
+      workspaceGuid: 'test-workspace-guid',
+      savedAt: '2026-05-07T12:00:00Z',
+      stats: { scannedRecords: 1, scannedProperties: 3, indexedReferences: 3 },
+      sources: [
+        [
+          'source-guid',
+          { name: 'Source Record', updatedAt: '2026-05-07T11:00:00Z' },
+          [
+            [target.guid, 'Entity'],
+            [target.guid, 'Entity'],
+            { targetGuid: target.guid, propertyName: 'Mention' },
+            ['', 'Ignored'],
+            { targetGuid: target.guid, propertyName: '' }
+          ]
+        ],
+        ['malformed-source'],
+        ['', { name: 'Empty' }, [[target.guid, 'Ignored']]]
+      ]
+    })
+  });
+
+  assert.equal(plugin.hydratePropertyIndexFromCache(), true);
+  assert.equal(plugin._propertyIndexStats.indexedReferences, 2);
+  assert.equal(plugin._propertyIndexStats.cacheSourceCount, 1);
+
+  const groups = plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: true });
+  assert.deepEqual(groups.map((group) => group.propertyName), ['Entity', 'Mention']);
+  assert.deepEqual(groups.map((group) => group.records[0].getName()), ['Source Record', 'Source Record']);
+});
+
 test('property index cache serializes incremental record updates', async () => {
   const store = installLocalStorage();
   const {
