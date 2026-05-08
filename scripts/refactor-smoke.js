@@ -1790,6 +1790,43 @@ test('line event matching catches datetime references to journal pages', () => {
   }), false);
 });
 
+test('date normalization handles compact dashed nested and invalid shapes', () => {
+  const plugin = makePlugin();
+
+  assert.equal(plugin.normalizeDateToIso('20260423'), '2026-04-23');
+  assert.equal(plugin.normalizeDateToIso('2026-04-23T09:30:00Z'), '2026-04-23');
+  assert.equal(plugin.normalizeDateToIso({ value: { d: '20260423' } }), '2026-04-23');
+  assert.equal(plugin.normalizeDateToIso({ date: '2026-04-23' }), '2026-04-23');
+  assert.equal(plugin.normalizeDateToIso({ year: 2026, month: 0, day: 23 }), '2026-01-23');
+  assert.equal(plugin.normalizeDateToIso('2026-13-40'), '');
+  assert.equal(plugin.normalizeDateToIso({ value: { nope: true } }), '');
+
+  assert.equal(plugin.dateTimeValueMatchesIso({ value: { d: '20260423' } }, '2026-04-23'), true);
+  assert.equal(plugin.dateTimeValueMatchesIso({
+    start: { d: '20260422' },
+    end: { d: '20260424' }
+  }, '2026-04-23'), true);
+  assert.equal(plugin.dateTimeValueMatchesIso({ d: '20260425' }, '2026-04-23'), false);
+});
+
+test('record date references use journal dates and date-like titles', () => {
+  const plugin = makePlugin();
+  const journal = makeRecord({
+    guid: 'journal-guid',
+    name: 'Fallback Title',
+    journal: true,
+    journalDate: { value: { date: '2026-04-23' } }
+  });
+  const titled = makeRecord({ guid: 'title-guid', name: 'April 23rd 2026' });
+  const dashed = makeRecord({ guid: 'dash-guid', name: '2026-04-23' });
+  const invalid = makeRecord({ guid: 'bad-guid', name: 'April 40 2026' });
+
+  assert.equal(plugin.getRecordDateReferenceIso(journal), '2026-04-23');
+  assert.equal(plugin.getRecordDateReferenceIso(titled), '2026-04-23');
+  assert.equal(plugin.getRecordDateReferenceIso(dashed), '2026-04-23');
+  assert.equal(plugin.getRecordDateReferenceIso(invalid), '');
+});
+
 test('line event matching reuses cached target matchers', () => {
   const plugin = makePlugin();
   let getNameCalls = 0;
@@ -1946,6 +1983,7 @@ test('datetime formatter preserves time-only and date-time values', () => {
 
   assert.equal(plugin.formatDateTimeSegment({ t: '0930' }), '09:30');
   assert.equal(plugin.formatDateTimeSegment({ d: '', t: { t: '1700', tz: 4 } }), '17:00');
+  assert.equal(plugin.formatDateTimeSegment({ d: '2026-03-11', hours: 17, minutes: 5 }), '2026-03-11 17:05');
   assert.equal(plugin.formatDateTimeSegment({ d: '20260311', t: '0930' }), '2026-03-11 09:30');
   assert.equal(
     plugin.formatDateTimeSegment({

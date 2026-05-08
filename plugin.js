@@ -5146,47 +5146,118 @@ class Plugin extends AppPlugin {
   }
 
   normalizeDateToIso(value) {
-    if (!value) return '';
+    return this.formatDatePartsIso(this.getDateParts(value));
+  }
 
-    if (value instanceof Date && Number.isFinite(value.getTime())) {
-      return [
-        this.padDateTimeNumber(value.getFullYear(), 4),
-        this.padDateTimeNumber(value.getMonth() + 1, 2),
-        this.padDateTimeNumber(value.getDate(), 2)
-      ].join('-');
-    }
+  getDateParts(value) {
+    if (!value) return null;
+    if (value instanceof Date) return this.getDatePartsFromDate(value);
+    if (typeof value === 'string') return this.getDatePartsFromString(value);
+    if (typeof value === 'object') return this.getDatePartsFromObject(value);
+    return null;
+  }
 
-    if (typeof value === 'string') {
-      const compact = value.trim().match(/^(\d{4})(\d{2})(\d{2})$/);
-      if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
-      const dashed = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
-      if (dashed) return `${dashed[1]}-${dashed[2]}-${dashed[3]}`;
-      return '';
-    }
+  getDatePartsFromDate(value) {
+    if (!Number.isFinite(value.getTime())) return null;
+    return {
+      year: value.getFullYear(),
+      month: value.getMonth() + 1,
+      day: value.getDate()
+    };
+  }
 
-    if (value && typeof value === 'object') {
-      const source = value.value && typeof value.value === 'object'
-        ? value.value
-        : value;
-      return this.formatDateTimeDate(
-        typeof source.d === 'string' ? source.d
-          : typeof source.date === 'string' ? source.date
-            : source
-      );
-    }
+  getDatePartsFromString(value) {
+    const text = value.trim();
+    const compact = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (compact) return this.createDateParts(compact[1], compact[2], compact[3]);
+    const dashed = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (dashed) return this.createDateParts(dashed[1], dashed[2], dashed[3]);
+    return null;
+  }
 
-    return '';
+  getDatePartsFromObject(value) {
+    const source = this.unwrapDateTimeValueObject(value);
+    const fieldParts = this.getDatePartsFromObjectFields(source);
+    if (fieldParts) return fieldParts;
+
+    const dateSource = this.getDateSourceFromObject(source);
+    if (dateSource && dateSource !== source) return this.getDateParts(dateSource);
+    return null;
+  }
+
+  unwrapDateTimeValueObject(value) {
+    return value?.value && typeof value.value === 'object' ? value.value : value;
+  }
+
+  getDateSourceFromObject(value) {
+    if (value?.d != null) return value.d;
+    if (value?.date != null) return value.date;
+    return value;
+  }
+
+  getDatePartsFromObjectFields(value) {
+    if (!value || typeof value !== 'object') return null;
+    if (value.year == null || value.month == null || value.day == null) return null;
+    const month = Number(value.month);
+    return this.createDateParts(value.year, month >= 1 ? month : month + 1, value.day);
+  }
+
+  createDateParts(year, month, day) {
+    const parts = {
+      year: Number(year),
+      month: Number(month),
+      day: Number(day)
+    };
+    return this.areDatePartsValid(parts) ? parts : null;
+  }
+
+  areDatePartsValid({ year, month, day } = {}) {
+    if (!this.areDatePartNumbersInRange({ year, month, day })) return false;
+    return this.datePartsRoundTrip({ year, month, day });
+  }
+
+  areDatePartNumbersInRange({ year, month, day } = {}) {
+    if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return false;
+    return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  }
+
+  datePartsRoundTrip({ year, month, day }) {
+    const parsed = new Date(year, month - 1, day);
+    return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day;
+  }
+
+  formatDatePartsIso(parts) {
+    if (!parts) return '';
+    return [
+      this.padDateTimeNumber(parts.year, 4),
+      this.padDateTimeNumber(parts.month, 2),
+      this.padDateTimeNumber(parts.day, 2)
+    ].join('-');
   }
 
   parseDateIsoFromRecordTitle(recordName) {
-    const title = typeof recordName === 'string'
-      ? recordName.trim().replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, '$1')
-      : '';
+    const title = this.normalizeRecordDateTitle(recordName);
     if (!title) return '';
 
     const direct = this.normalizeDateToIso(title);
     if (direct) return direct;
 
+    return this.parseNamedDateTitleToIso(title);
+  }
+
+  normalizeRecordDateTitle(recordName) {
+    return typeof recordName === 'string'
+      ? recordName.trim().replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, '$1')
+      : '';
+  }
+
+  parseNamedDateTitleToIso(title) {
+    const match = this.getNamedDateTitleMatch(title);
+    if (!match) return '';
+    return this.formatDatePartsIso(this.createDateParts(match.year, match.month, match.day));
+  }
+
+  getNamedDateTitleMatch(title) {
     const months = {
       jan: 1, january: 1,
       feb: 2, february: 2,
@@ -5204,31 +5275,33 @@ class Plugin extends AppPlugin {
     const monthFirst = title.match(/^(?:[A-Za-z]{3,9}\s+)?([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})$/);
     const dayFirst = title.match(/^(\d{1,2})\s+([A-Za-z]{3,9}),?\s+(\d{4})$/);
     const match = monthFirst || dayFirst;
-    if (!match) return '';
+    if (!match) return null;
 
     const monthName = (monthFirst ? match[1] : match[2]).toLowerCase();
-    const month = months[monthName] || 0;
-    const day = Number(monthFirst ? match[2] : match[1]);
-    const year = Number(match[3]);
-    if (!Number.isFinite(year) || !Number.isFinite(day) || month <= 0 || day <= 0 || day > 31) return '';
-    const parsed = new Date(year, month - 1, day);
-    if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return '';
-    return `${this.padDateTimeNumber(year, 4)}-${this.padDateTimeNumber(month, 2)}-${this.padDateTimeNumber(day, 2)}`;
+    return {
+      month: months[monthName] || 0,
+      day: Number(monthFirst ? match[2] : match[1]),
+      year: Number(match[3])
+    };
   }
 
   getRecordDateReferenceIso(record, recordName) {
     if (!record) return '';
 
-    try {
-      const details = typeof record.getJournalDetails === 'function' ? record.getJournalDetails() : null;
-      const journalDate = this.normalizeDateToIso(details?.date || null);
-      if (journalDate) return journalDate;
-    } catch (e) {
-      // Fall back to parsing date-like page titles below.
-    }
+    const journalDate = this.getJournalDateReferenceIso(record);
+    if (journalDate) return journalDate;
 
     const title = typeof recordName === 'string' ? recordName : (record.getName?.() || '');
     return this.parseDateIsoFromRecordTitle(title);
+  }
+
+  getJournalDateReferenceIso(record) {
+    try {
+      const details = typeof record.getJournalDetails === 'function' ? record.getJournalDetails() : null;
+      return this.normalizeDateToIso(details?.date || null);
+    } catch (e) {
+      return '';
+    }
   }
 
   getLinkedReferenceSearchSpecs(recordGuid, targetRecord, { includeDatetime = true } = {}) {
@@ -7103,29 +7176,17 @@ class Plugin extends AppPlugin {
     const iso = this.normalizeDateToIso(targetIso);
     if (!iso) return false;
 
-    if (typeof value === 'string') {
-      return this.normalizeDateToIso(value) === iso;
-    }
-    if (!value || typeof value !== 'object') return false;
+    return this.dateIsoRangeMatches(this.getDateTimeValueIsoRange(value), iso);
+  }
 
-    const startSource = value.start && typeof value.start === 'object'
-      ? value.start
-      : value.from && typeof value.from === 'object'
-        ? value.from
-        : value;
-    const endSource = value.end && typeof value.end === 'object'
-      ? value.end
-      : value.to && typeof value.to === 'object'
-        ? value.to
-        : (value.ed || value.et || value.endDate || value.endTime)
-          ? {
-              d: value.ed || value.endDate || null,
-              t: value.et || value.endTime || null
-            }
-          : null;
+  getDateTimeValueIsoRange(value) {
+    return {
+      startIso: this.normalizeDateToIso(this.getDateTimeStartSource(value)),
+      endIso: this.normalizeDateToIso(this.getDateTimeEndSource(value))
+    };
+  }
 
-    const startIso = this.normalizeDateToIso(startSource);
-    const endIso = this.normalizeDateToIso(endSource);
+  dateIsoRangeMatches({ startIso, endIso } = {}, iso) {
     if (startIso === iso || endIso === iso) return true;
     if (startIso && endIso) return startIso <= iso && iso <= endIso;
     return false;
@@ -9161,111 +9222,115 @@ class Plugin extends AppPlugin {
   }
 
   formatDateTimeDate(value) {
-    if (typeof value === 'string') {
-      const compact = value.trim().match(/^(\d{4})(\d{2})(\d{2})$/);
-      if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
-      const dashed = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (dashed) return `${dashed[1]}-${dashed[2]}-${dashed[3]}`;
-      return '';
-    }
-
-    if (value && typeof value === 'object') {
-      const year = Number(value.year);
-      const month = Number(value.month);
-      const day = Number(value.day);
-      if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-        const normalizedMonth = month >= 1 ? month : (month + 1);
-        return `${this.padDateTimeNumber(year, 4)}-${this.padDateTimeNumber(normalizedMonth, 2)}-${this.padDateTimeNumber(day, 2)}`;
-      }
-    }
-
-    return '';
+    return this.normalizeDateToIso(value);
   }
 
   formatDateTimeTime(value, fallbackParts = null) {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return `${this.padDateTimeNumber(value, 2)}:00`;
-    }
+    return this.formatDirectTimeValue(value)
+      || this.formatNestedTimeValue(value)
+      || this.formatFallbackTimeParts(fallbackParts);
+  }
 
-    if (value && typeof value === 'object') {
-      const nested = value.value && typeof value.value === 'object'
-        ? value.value
-        : value.t && typeof value.t === 'string'
-          ? value.t
-          : value.time && (typeof value.time === 'string' || typeof value.time === 'number' || typeof value.time === 'object')
-            ? value.time
-            : null;
-      if (nested && nested !== value) {
-        const nestedText = this.formatDateTimeTime(nested, value);
-        if (nestedText) return nestedText;
-      }
-    }
-
-    if (typeof value === 'string') {
-      const raw = value.trim();
-      if (!raw) return '';
-
-      const colon = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-      if (colon) {
-        const hours = this.padDateTimeNumber(colon[1], 2);
-        const minutes = this.padDateTimeNumber(colon[2], 2);
-        const seconds = colon[3] ? this.padDateTimeNumber(colon[3], 2) : '';
-        return seconds ? `${hours}:${minutes}:${seconds}` : `${hours}:${minutes}`;
-      }
-
-      const digits = raw.replace(/\D+/g, '');
-      if (digits.length === 1 || digits.length === 2) {
-        return `${digits.padStart(2, '0')}:00`;
-      }
-      if (digits.length === 3) {
-        return `${digits.slice(0, 1).padStart(2, '0')}:${digits.slice(1, 3)}`;
-      }
-      if (digits.length === 4) {
-        return `${digits.slice(0, 2)}:${digits.slice(2, 4)}`;
-      }
-      if (digits.length === 6) {
-        return `${digits.slice(0, 2)}:${digits.slice(2, 4)}:${digits.slice(4, 6)}`;
-      }
-    }
-
-    if (fallbackParts && typeof fallbackParts === 'object') {
-      const hours = Number(fallbackParts.hours ?? fallbackParts.hour ?? fallbackParts.h);
-      const minutes = Number(fallbackParts.minutes ?? fallbackParts.minute ?? fallbackParts.m ?? 0);
-      const seconds = Number(fallbackParts.seconds ?? fallbackParts.second ?? fallbackParts.s ?? 0);
-      if (Number.isFinite(hours)) {
-        const hh = this.padDateTimeNumber(hours, 2);
-        const mm = this.padDateTimeNumber(minutes, 2);
-        const ss = Number.isFinite(seconds) && seconds > 0
-          ? this.padDateTimeNumber(seconds, 2)
-          : '';
-        return ss ? `${hh}:${mm}:${ss}` : `${hh}:${mm}`;
-      }
-    }
-
+  formatDirectTimeValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return `${this.padDateTimeNumber(value, 2)}:00`;
+    if (typeof value === 'string') return this.formatTimeString(value);
     return '';
   }
 
-  extractDateTimeDisplayParts(value) {
+  formatNestedTimeValue(value) {
+    const nested = this.getNestedTimeValue(value);
+    if (!nested || nested === value) return '';
+    return this.formatDateTimeTime(nested, value);
+  }
+
+  getNestedTimeValue(value) {
     if (!value || typeof value !== 'object') return null;
+    if (value.value && typeof value.value === 'object') return value.value;
+    return this.getNestedClockTimeValue(value);
+  }
 
-    const source = value.value && typeof value.value === 'object'
-      ? value.value
-      : value;
+  getNestedClockTimeValue(value) {
+    if (value.t != null) return value.t;
+    return this.isSupportedTimeValue(value.time) ? value.time : null;
+  }
 
-    const date = this.formatDateTimeDate(
-      typeof source.d === 'string' ? source.d
-        : typeof source.date === 'string' ? source.date
-          : source
-    );
-    const time = this.formatDateTimeTime(
-      source.t != null ? source.t
-        : source.time != null ? source.time
-          : null,
-      source
-    );
+  isSupportedTimeValue(value) {
+    return typeof value === 'string' || typeof value === 'number' || (value && typeof value === 'object');
+  }
+
+  formatTimeString(value) {
+    const raw = value.trim();
+    if (!raw) return '';
+
+    const colon = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (colon) return this.formatColonTimeParts(colon);
+    return this.formatDigitsTime(raw.replace(/\D+/g, ''));
+  }
+
+  formatColonTimeParts(match) {
+    const hours = this.padDateTimeNumber(match[1], 2);
+    const minutes = this.padDateTimeNumber(match[2], 2);
+    const seconds = match[3] ? this.padDateTimeNumber(match[3], 2) : '';
+    return seconds ? `${hours}:${minutes}:${seconds}` : `${hours}:${minutes}`;
+  }
+
+  formatDigitsTime(digits) {
+    if (digits.length === 1 || digits.length === 2) return `${digits.padStart(2, '0')}:00`;
+    if (digits.length === 3) return `${digits.slice(0, 1).padStart(2, '0')}:${digits.slice(1, 3)}`;
+    if (digits.length === 4) return `${digits.slice(0, 2)}:${digits.slice(2, 4)}`;
+    if (digits.length === 6) return `${digits.slice(0, 2)}:${digits.slice(2, 4)}:${digits.slice(4, 6)}`;
+    return '';
+  }
+
+  formatFallbackTimeParts(fallbackParts) {
+    const parts = this.getFallbackTimeParts(fallbackParts);
+    if (!parts) return '';
+    const hh = this.padDateTimeNumber(parts.hours, 2);
+    const mm = this.padDateTimeNumber(parts.minutes, 2);
+    const ss = parts.seconds > 0 ? this.padDateTimeNumber(parts.seconds, 2) : '';
+    return ss ? `${hh}:${mm}:${ss}` : `${hh}:${mm}`;
+  }
+
+  getFallbackTimeParts(fallbackParts) {
+    if (!fallbackParts || typeof fallbackParts !== 'object') return null;
+    const hours = this.getFirstFiniteNumber(fallbackParts, ['hours', 'hour', 'h'], null);
+    if (hours === null) return null;
+    return {
+      hours,
+      minutes: this.getFirstFiniteNumber(fallbackParts, ['minutes', 'minute', 'm'], 0),
+      seconds: this.getFirstFiniteNumber(fallbackParts, ['seconds', 'second', 's'], 0)
+    };
+  }
+
+  getFirstFiniteNumber(source, keys, fallback) {
+    for (const key of keys || []) {
+      if (source?.[key] == null) continue;
+      const value = Number(source[key]);
+      if (Number.isFinite(value)) return value;
+    }
+    return fallback;
+  }
+
+  extractDateTimeDisplayParts(value) {
+    const source = this.getDateTimeDisplaySource(value);
+    if (!source) return null;
+
+    const date = this.formatDateTimeDate(this.getDateSourceFromObject(source));
+    const time = this.formatDateTimeTime(this.getTimeSourceFromObject(source), source);
 
     if (!date && !time) return null;
     return { date, time };
+  }
+
+  getDateTimeDisplaySource(value) {
+    if (!value || typeof value !== 'object') return null;
+    return this.unwrapDateTimeValueObject(value);
+  }
+
+  getTimeSourceFromObject(source) {
+    if (!source || typeof source !== 'object') return null;
+    if (source.t != null) return source.t;
+    return source.time != null ? source.time : null;
   }
 
   formatDateTimeDisplayParts(parts) {
@@ -9283,33 +9348,53 @@ class Plugin extends AppPlugin {
     const raw = typeof v.raw === 'string' ? v.raw.trim() : '';
     if (raw) return raw;
 
-    const startSource = v.start && typeof v.start === 'object'
-      ? v.start
-      : v.from && typeof v.from === 'object'
-        ? v.from
-        : v;
-    const endSource = v.end && typeof v.end === 'object'
-      ? v.end
-      : v.to && typeof v.to === 'object'
-        ? v.to
-        : (v.ed || v.et || v.endDate || v.endTime)
-          ? {
-              d: v.ed || v.endDate || null,
-              t: v.et || v.endTime || null
-            }
-          : null;
+    return this.formatDateTimeRangeDisplay(
+      this.extractDateTimeDisplayParts(this.getDateTimeStartSource(v)),
+      this.extractDateTimeDisplayParts(this.getDateTimeEndSource(v))
+    );
+  }
 
-    const start = this.extractDateTimeDisplayParts(startSource);
-    const end = this.extractDateTimeDisplayParts(endSource);
+  getDateTimeStartSource(value) {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return null;
+    if (this.isObjectDateTimeSource(value.start)) return value.start;
+    if (this.isObjectDateTimeSource(value.from)) return value.from;
+    return value;
+  }
 
+  getDateTimeEndSource(value) {
+    if (!value || typeof value !== 'object') return null;
+    if (this.isObjectDateTimeSource(value.end)) return value.end;
+    if (this.isObjectDateTimeSource(value.to)) return value.to;
+    if (this.hasInlineDateTimeEndSource(value)) return this.buildInlineDateTimeEndSource(value);
+    return null;
+  }
+
+  isObjectDateTimeSource(value) {
+    return value && typeof value === 'object';
+  }
+
+  hasInlineDateTimeEndSource(value) {
+    return Boolean(value?.ed || value?.et || value?.endDate || value?.endTime);
+  }
+
+  buildInlineDateTimeEndSource(value) {
+    return {
+      d: value.ed || value.endDate || null,
+      t: value.et || value.endTime || null
+    };
+  }
+
+  formatDateTimeRangeDisplay(start, end) {
     const startText = this.formatDateTimeDisplayParts(start);
-    let endText = this.formatDateTimeDisplayParts(end);
-    if (start?.date && !end?.date && end?.time) {
-      endText = end.time;
-    }
-
+    const endText = this.formatDateTimeEndDisplayText(start, end);
     if (startText && endText) return `${startText} to ${endText}`;
     return startText || endText || '';
+  }
+
+  formatDateTimeEndDisplayText(start, end) {
+    if (start?.date && !end?.date && end?.time) return end.time;
+    return this.formatDateTimeDisplayParts(end);
   }
 
   coercePositiveInt(val, fallback) {
