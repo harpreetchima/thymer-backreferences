@@ -977,6 +977,77 @@ test('showing a hidden collection remounts from existing state and schedules ref
   ]);
 });
 
+test('initial panel refresh is idle-scheduled while later navigation uses normal scheduling', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin._startupQuietRefreshDelayMs = 1234;
+
+  const refreshes = [];
+  plugin.scheduleRefreshForPanel = (_panel, args) => {
+    refreshes.push(args);
+  };
+
+  plugin.schedulePanelChangedRefresh(panel, state, { reason: 'initial', recordChanged: true });
+  state.initialRefreshStarted = true;
+  plugin.schedulePanelChangedRefresh(panel, state, { reason: 'panel.navigated', recordChanged: false });
+
+  assert.equal(refreshes[0].force, true);
+  assert.equal(refreshes[0].reason, 'initial');
+  assert.equal(refreshes[0].idle, true);
+  assert.equal(refreshes[0].timeoutMs, 1234);
+  assert.equal(refreshes[1].force, false);
+  assert.equal(refreshes[1].reason, 'panel.navigated');
+  assert.equal(refreshes[1].idle, false);
+  assert.equal(refreshes[1].timeoutMs, null);
+});
+
+test('idle refresh scheduling uses requestIdleCallback with timeout fallback', async () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  plugin._panelStates.set('panel-1', state);
+
+  const previousRequestIdleCallback = global.requestIdleCallback;
+  const previousCancelIdleCallback = global.cancelIdleCallback;
+  let idleRequest = null;
+  let canceledIdleId = null;
+  const refreshes = [];
+  global.requestIdleCallback = (callback, opts) => {
+    idleRequest = { callback, opts };
+    return 42;
+  };
+  global.cancelIdleCallback = (id) => {
+    canceledIdleId = id;
+  };
+  plugin.refreshPanel = async (panelId, args) => {
+    refreshes.push({ panelId, reason: args.reason });
+  };
+
+  try {
+    plugin.scheduleRefreshForPanel(panel, { idle: true, timeoutMs: 1200, reason: 'initial' });
+
+    assert.equal(state.refreshTimer.type, 'idle');
+    assert.equal(idleRequest.opts.timeout, 1200);
+
+    plugin.cancelScheduledTask(state.refreshTimer);
+    assert.equal(canceledIdleId, 42);
+
+    state.refreshTimer = { type: 'idle', id: 43 };
+    idleRequest.callback();
+    await Promise.resolve();
+
+    assert.equal(state.refreshTimer, null);
+    assert.deepEqual(refreshes, [{ panelId: 'panel-1', reason: 'initial' }]);
+  } finally {
+    global.requestIdleCallback = previousRequestIdleCallback;
+    global.cancelIdleCallback = previousCancelIdleCallback;
+  }
+});
+
 test('search and custom panels remain suppressed and dispose state', () => {
   const plugin = makePlugin();
   const record = makeRecord({ guid: 'record-a', name: 'Search Page' });
@@ -2233,6 +2304,53 @@ test('context availability preload is capped and skips collapsed groups', () => 
     plugin.collectContextPreloadLines(results, { state, limit: 0 }).map((line) => line.guid),
     []
   );
+});
+
+test('context availability preload is idle-delayed on launch and skipped on mobile', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  state.lastResults = {
+    linkedGroups: [{
+      record: source,
+      lines: [makeLine({ guid: 'line-1', record: source })]
+    }],
+    unlinkedGroups: [],
+    unlinkedDeferred: true,
+    unlinkedLoading: false
+  };
+  plugin._panelStates.set('panel-1', state);
+  plugin._startupContextPreloadDelayMs = 1500;
+  plugin.isLikelyMobileClient = () => false;
+
+  const previousRequestIdleCallback = global.requestIdleCallback;
+  let idleRequest = null;
+  global.requestIdleCallback = (_callback, opts) => {
+    idleRequest = { opts };
+    return 7;
+  };
+
+  try {
+    plugin.scheduleContextAvailabilityPreload(state, state.lastResults, { reason: 'initial' });
+    assert.equal(state.contextPreloadTimer.type, 'idle');
+    assert.equal(idleRequest.opts.timeout, 1500);
+    assert.equal(state.contextPreloadSeq, 1);
+
+    const mobileState = plugin.createPanelState('panel-mobile', panel);
+    mobileState.recordGuid = target.guid;
+    mobileState.lastResults = state.lastResults;
+    plugin._panelStates.set('panel-mobile', mobileState);
+    plugin.isLikelyMobileClient = () => true;
+
+    plugin.scheduleContextAvailabilityPreload(mobileState, mobileState.lastResults, { reason: 'initial' });
+    assert.equal(mobileState.contextPreloadTimer, null);
+    assert.equal(mobileState.contextPreloadSeq, 1);
+  } finally {
+    global.requestIdleCallback = previousRequestIdleCallback;
+  }
 });
 
 test('stale scoped query refreshes cannot overwrite newer filter state', async () => {

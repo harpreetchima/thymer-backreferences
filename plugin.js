@@ -36,6 +36,10 @@ class Plugin extends AppPlugin {
     this._defaultContextPreloadMaxLines = 30;
     this._linkedDateSearchDelayMs = 1200;
     this._refreshDebounceMs = 350;
+    this._startupQuietRefreshDesktopMs = 1200;
+    this._startupQuietRefreshMobileMs = 2500;
+    this._startupContextPreloadDelayMs = 1500;
+    this._startupQuietRefreshDelayMs = this.getStartupQuietRefreshDelayMs();
     this._queryFilterDebounceMs = 180;
     this._defaultQueryFilterMaxResults = 1000;
     this._queryAutocompleteCatalog = null;
@@ -519,6 +523,38 @@ class Plugin extends AppPlugin {
     return sample;
   }
 
+  scheduleBackgroundTask(callback, { idle, delayMs, timeoutMs } = {}) {
+    const run = typeof callback === 'function' ? callback : () => {};
+    if (idle === true && typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(run, {
+        timeout: this.coerceNonNegativeInt(timeoutMs, 0)
+      });
+      return { type: 'idle', id };
+    }
+
+    const fallbackDelay = idle === true && timeoutMs != null ? timeoutMs : delayMs;
+    const id = setTimeout(run, this.coerceNonNegativeInt(fallbackDelay, 0));
+    return { type: 'timeout', id };
+  }
+
+  cancelScheduledTask(token) {
+    if (!token) return;
+    if (token.type === 'idle') {
+      try {
+        if (typeof cancelIdleCallback === 'function') cancelIdleCallback(token.id);
+        else clearTimeout(token.id);
+      } catch (e) {
+        // ignore
+      }
+      return;
+    }
+    if (token.type === 'timeout') {
+      clearTimeout(token.id);
+      return;
+    }
+    clearTimeout(token);
+  }
+
   getPerfSnapshot() {
     const samples = Array.isArray(this._perfSamples) ? this._perfSamples : [];
     return {
@@ -738,10 +774,29 @@ class Plugin extends AppPlugin {
     }
 
     // Always refresh on navigation; on focus we debounce unless already loaded.
+    const refreshReason = reason || (recordChanged ? 'record-changed' : 'record-same');
     this.scheduleRefreshForPanel(panel, {
       force: recordChanged,
-      reason: reason || (recordChanged ? 'record-changed' : 'record-same')
+      reason: refreshReason,
+      idle: this.shouldScheduleInitialRefreshWhenIdle(state, { reason: refreshReason }),
+      timeoutMs: this.getPanelChangedRefreshTimeoutMs(state, { reason: refreshReason })
     });
+  }
+
+  isInitialPanelChangeReason(reason) {
+    const value = `${reason || ''}`.trim();
+    return value === 'initial' || value === 'initial-delayed';
+  }
+
+  shouldScheduleInitialRefreshWhenIdle(state, { reason } = {}) {
+    if (!state || !this.isInitialPanelChangeReason(reason)) return false;
+    return state.initialRefreshStarted !== true;
+  }
+
+  getPanelChangedRefreshTimeoutMs(state, { reason } = {}) {
+    if (!this.shouldScheduleInitialRefreshWhenIdle(state, { reason })) return null;
+    const fallback = this.getStartupQuietRefreshDelayMs();
+    return this.coerceNonNegativeInt(this._startupQuietRefreshDelayMs, fallback);
   }
 
   shouldSkipPanelChangedRefresh(state, { reason, recordChanged } = {}) {
@@ -1006,6 +1061,7 @@ class Plugin extends AppPlugin {
       searchAutocompleteDismissHandler: null,
       searchAutocompleteRequestSeq: 0,
       searchQuery: '',
+      initialRefreshStarted: false,
       cachedRecordName: null,
       cachedRecordDateReferenceIso: null,
       cachedRecordMentionMatchers: null,
@@ -1032,6 +1088,7 @@ class Plugin extends AppPlugin {
       queryFilterState: null,
       contextPreloadTimer: null,
       contextPreloadSeq: 0,
+      contextPreloadStarted: false,
       linkedDateTimer: null,
       linkedDateSeq: 0,
       lastResults: null,
@@ -1046,7 +1103,7 @@ class Plugin extends AppPlugin {
     if (!state) return;
 
     if (state.refreshTimer) {
-      clearTimeout(state.refreshTimer);
+      this.cancelScheduledTask(state.refreshTimer);
       state.refreshTimer = null;
     }
 
@@ -1056,7 +1113,7 @@ class Plugin extends AppPlugin {
     }
 
     if (state.contextPreloadTimer) {
-      clearTimeout(state.contextPreloadTimer);
+      this.cancelScheduledTask(state.contextPreloadTimer);
       state.contextPreloadTimer = null;
     }
     state.contextPreloadSeq = (state.contextPreloadSeq || 0) + 1;
@@ -4392,7 +4449,7 @@ class Plugin extends AppPlugin {
 
   // ---------- Refresh orchestration ----------
 
-  scheduleRefreshForPanel(panel, { force, reason } = {}) {
+  scheduleRefreshForPanel(panel, { force, reason, delayMs, idle, timeoutMs } = {}) {
     const panelId = panel?.getId?.() || null;
     if (!panelId) return;
     if (!this.isPanelVisible(panel)) {
@@ -4405,17 +4462,24 @@ class Plugin extends AppPlugin {
     if (!state) return;
 
     if (state.refreshTimer) {
-      clearTimeout(state.refreshTimer);
+      this.cancelScheduledTask(state.refreshTimer);
       state.refreshTimer = null;
     }
 
-    const delay = force ? 0 : this._refreshDebounceMs;
-    state.refreshTimer = setTimeout(() => {
+    const hasExplicitDelay = delayMs != null && Number.isFinite(Number(delayMs));
+    const delay = hasExplicitDelay
+      ? this.coerceNonNegativeInt(delayMs, 0)
+      : (force ? 0 : this._refreshDebounceMs);
+    state.refreshTimer = this.scheduleBackgroundTask(() => {
       state.refreshTimer = null;
       this.refreshPanel(panelId, { reason: reason || 'scheduled' }).catch(() => {
         // ignore
       });
-    }, delay);
+    }, {
+      idle: idle === true,
+      delayMs: delay,
+      timeoutMs: timeoutMs != null ? timeoutMs : delay
+    });
   }
 
   refreshAllPanels({ force, reason }) {
@@ -4441,6 +4505,34 @@ class Plugin extends AppPlugin {
       ),
       showSelf: cfg.custom?.showSelf === true
     };
+  }
+
+  getStartupQuietRefreshDelayMs() {
+    return this.isLikelyMobileClient()
+      ? this.coerceNonNegativeInt(this._startupQuietRefreshMobileMs, 2500)
+      : this.coerceNonNegativeInt(this._startupQuietRefreshDesktopMs, 1200);
+  }
+
+  isLikelyMobileClient() {
+    try {
+      const nav = typeof navigator !== 'undefined' ? navigator : null;
+      const win = typeof window !== 'undefined' ? window : null;
+      if (nav?.userAgentData?.mobile === true) return true;
+
+      const ua = typeof nav?.userAgent === 'string' ? nav.userAgent : '';
+      if (/\b(Android|iPhone|iPad|iPod|Mobile|Mobi)\b/i.test(ua)) return true;
+
+      const width = Number(win?.innerWidth || 0);
+      const height = Number(win?.innerHeight || 0);
+      const shortestSide = width > 0 && height > 0 ? Math.min(width, height) : 0;
+      const coarsePointer = typeof win?.matchMedia === 'function'
+        && win.matchMedia('(pointer: coarse)')?.matches === true;
+      const touchPoints = Number(nav?.maxTouchPoints || 0);
+      const touchWindow = Boolean(win && 'ontouchstart' in win);
+      return shortestSide > 0 && shortestSide <= 820 && (coarsePointer || touchPoints > 1 || touchWindow);
+    } catch (e) {
+      return false;
+    }
   }
 
   isRefreshStateCurrent(panelId, state, seq) {
@@ -5080,18 +5172,37 @@ class Plugin extends AppPlugin {
     if (!state || !results) return;
     if (!this.isPanelVisible(state.panel || null)) return;
     if (state.contextPreloadTimer) {
-      clearTimeout(state.contextPreloadTimer);
+      this.cancelScheduledTask(state.contextPreloadTimer);
       state.contextPreloadTimer = null;
+    }
+
+    if (this.shouldSkipAutomaticContextAvailabilityPreload()) {
+      state.contextPreloadSeq = (state.contextPreloadSeq || 0) + 1;
+      return;
     }
 
     const seq = (state.contextPreloadSeq || 0) + 1;
     state.contextPreloadSeq = seq;
-    state.contextPreloadTimer = setTimeout(() => {
+    const timeoutMs = this.getContextAvailabilityPreloadTimeoutMs(state);
+    state.contextPreloadTimer = this.scheduleBackgroundTask(() => {
       state.contextPreloadTimer = null;
       this.preloadContextAvailability(state.panelId, seq, results, { reason }).catch(() => {
         // Context availability is opportunistic; failed preloads should not disrupt the panel.
       });
-    }, 0);
+    }, {
+      idle: state.contextPreloadStarted !== true,
+      delayMs: 0,
+      timeoutMs
+    });
+  }
+
+  shouldSkipAutomaticContextAvailabilityPreload() {
+    return this.isLikelyMobileClient();
+  }
+
+  getContextAvailabilityPreloadTimeoutMs(state) {
+    if (state?.contextPreloadStarted === true) return 0;
+    return this.coerceNonNegativeInt(this._startupContextPreloadDelayMs, 1500);
   }
 
   collectContextPreloadLines(results, opts = {}) {
@@ -5151,6 +5262,7 @@ class Plugin extends AppPlugin {
   async preloadContextAvailability(panelId, seq, results) {
     const state = this._panelStates.get(panelId) || null;
     if (!state || state.contextPreloadSeq !== seq || state.lastResults !== results) return;
+    state.contextPreloadStarted = true;
     const perf = this.perfCreate('context-preload', { panelId });
 
     const collectStartedAt = this.perfNow();
@@ -5220,6 +5332,7 @@ class Plugin extends AppPlugin {
       panelId
     });
     const seq = this.advanceRefreshSeq(state);
+    state.initialRefreshStarted = true;
     this.setLoadingState(state, true);
     return { panelId, state, panel, ...recordState, seq, perf };
   }
