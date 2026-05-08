@@ -1222,7 +1222,20 @@ test('property backlink result records candidate stats and SDK failure state', a
     { showSelf: false }
   );
   assert.equal(unavailable.propertyIndexStatus, 'error');
-  assert.match(unavailable.propertyIndexError, /unavailable/);
+  assert.equal(
+    unavailable.propertyIndexError,
+    'Property References require a newer Thymer version. Update Thymer, then refresh references.'
+  );
+
+  target.getBackReferenceRecords = async () => {
+    throw new Error('SDK exploded');
+  };
+  const failed = await plugin.getPropertyBacklinkResult(target, target.guid, { showSelf: false });
+  assert.equal(failed.propertyIndexStatus, 'error');
+  assert.equal(
+    failed.propertyIndexError,
+    'Property References could not be loaded. Refresh references to try again.'
+  );
 });
 
 test('record property updates refresh affected panels without graph index maintenance', () => {

@@ -4324,17 +4324,27 @@ class Plugin extends AppPlugin {
         propertyError: '',
         propertyIndexStatus: 'error',
         propertyIndexStats: stats,
-        propertyIndexError: e?.message || 'Error loading property references.'
+        propertyIndexError: this.getPropertyBacklinkErrorMessage(e)
       };
     }
   }
 
   async getPropertyBacklinkCandidateRecords(targetRecord) {
     if (typeof targetRecord?.getBackReferenceRecords !== 'function') {
-      throw new Error('Property reference lookup is unavailable in this Thymer version.');
+      throw new Error(this.getUnavailablePropertyBacklinkMessage());
     }
     const records = await targetRecord.getBackReferenceRecords();
     return Array.isArray(records) ? records : [];
+  }
+
+  getUnavailablePropertyBacklinkMessage() {
+    return 'Property References require a newer Thymer version. Update Thymer, then refresh references.';
+  }
+
+  getPropertyBacklinkErrorMessage(error) {
+    const message = (error?.message || '').trim();
+    if (message === this.getUnavailablePropertyBacklinkMessage()) return message;
+    return 'Property References could not be loaded. Refresh references to try again.';
   }
 
   finishPropertyBacklinkResult(propertyGroups, stats, startedPerfAt, perf) {
