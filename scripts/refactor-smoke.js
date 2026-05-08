@@ -821,7 +821,10 @@ test('copy perf snapshot command writes snapshot JSON to clipboard', async () =>
 
 test('onLoad skips graph-wide property indexing startup work', async () => {
   const plugin = makePlugin();
-  installLocalStorage();
+  const oldIndexCacheKey = 'thymer_backreferences_property_index_cache_v1';
+  const store = installLocalStorage({
+    [oldIndexCacheKey]: JSON.stringify({ version: 1, records: { stale: true } })
+  });
   const previousSetTimeout = global.setTimeout;
   const previousClearTimeout = global.clearTimeout;
   const scheduled = [];
@@ -857,6 +860,7 @@ test('onLoad skips graph-wide property indexing startup work', async () => {
     assert.equal(commandLabels.includes('Backreferences: Copy Perf Snapshot'), true);
     assert.equal(commandLabels.includes('Backreferences: Rebuild Graph Index'), false);
     assert.deepEqual(scheduled.map((timer) => timer.delay), [250]);
+    assert.equal(store.has(oldIndexCacheKey), false);
     await Promise.resolve();
   } finally {
     global.setTimeout = previousSetTimeout;

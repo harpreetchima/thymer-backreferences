@@ -9,6 +9,9 @@ class Plugin extends AppPlugin {
     this._maxStoredPropGroupStates = 160;
     this._maxStoredRecordGroupStates = 600;
 
+    this._legacyStorageKeyPropertyIndexCache = 'thymer_backreferences_property_index_cache_v1';
+    this.removeLegacyPropertyIndexCache();
+
     this._storageKeyVisibility = 'thymer_backreferences_visibility_v1';
     this._visibilityConfig = this.loadVisibilityConfig();
 
@@ -3599,6 +3602,15 @@ class Plugin extends AppPlugin {
     if (!storageKey) return;
     try {
       localStorage.setItem(storageKey, JSON.stringify(value));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  removeLegacyPropertyIndexCache() {
+    const key = this._legacyStorageKeyPropertyIndexCache || 'thymer_backreferences_property_index_cache_v1';
+    try {
+      localStorage.removeItem(key);
     } catch (e) {
       // ignore
     }
