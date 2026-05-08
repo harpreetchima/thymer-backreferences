@@ -364,25 +364,7 @@ function makePlugin() {
   plugin._recentActivityWindowMs = 7 * 24 * 60 * 60 * 1000;
   plugin._defaultContextPreloadMaxLines = 30;
   plugin._linkedDateSearchDelayMs = 1200;
-  plugin._propertyIndexInitialDelayMs = 500;
-  plugin._propertyIndexHydratedRefreshDelayMs = 30000;
-  plugin._propertyIndexYieldEveryRecords = 25;
-  plugin._propertyIndexYieldBudgetMs = 12;
-  plugin._propertyIndexProgressNotifyMs = 250;
-  plugin._propertyIndexCacheWriteDebounceMs = 1000;
-  plugin._storageKeyPropertyIndexCache = 'thymer_backreferences_property_index_cache_v1';
   plugin._defaultQueryFilterMaxResults = 1000;
-  plugin._propertyIndexStatus = 'idle';
-  plugin._propertyIndexByTargetGuid = new Map();
-  plugin._propertyIndexSourceEntriesByRecordGuid = new Map();
-  plugin._propertyIndexStats = plugin.createEmptyPropertyIndexStats();
-  plugin._propertyIndexError = '';
-  plugin._propertyIndexPromise = null;
-  plugin._propertyIndexBuildSeq = 0;
-  plugin._propertyIndexRebuildTimer = null;
-  plugin._propertyIndexCacheWriteTimer = null;
-  plugin._propertyIndexNeedsRebuild = false;
-  plugin._propertyIndexHydratedFromCache = false;
   plugin._maxStoredPageViewRecords = 400;
   plugin._maxStoredSortByRecords = 400;
   plugin._maxStoredPropGroupStates = 160;
@@ -460,32 +442,6 @@ function makeLoadedFocusedPanelFixture({ pendingRemoteSync = false } = {}) {
   plugin.mountFooter = () => {};
 
   return { plugin, panel, state };
-}
-
-async function makeIndexedPropertyFixture({
-  targetGuid = 'target-guid',
-  targetName = 'Target',
-  sourceGuid = 'source-record',
-  sourceName = 'Source Record',
-  reason = 'test'
-} = {}) {
-  const plugin = makePlugin();
-  const target = makeRecord({ guid: targetGuid, name: targetName });
-  const properties = [makeProperty('Entity', ['record', target.guid])];
-  const source = makeRecord({
-    guid: sourceGuid,
-    name: sourceName,
-    updatedAt: makeDate('2026-04-24T09:00:00Z'),
-    properties
-  });
-
-  plugin.data.getAllCollections = async () => [{
-    getAllRecords: async () => [source]
-  }];
-  plugin.__recordsByGuid.set(source.guid, source);
-  await plugin.rebuildPropertyIndex({ reason });
-
-  return { plugin, target, source, properties };
 }
 
 function attachTwoPanelStates(plugin, {
@@ -863,13 +819,12 @@ test('copy perf snapshot command writes snapshot JSON to clipboard', async () =>
   }
 });
 
-test('onLoad defers initial property indexing instead of scanning synchronously', async () => {
+test('onLoad skips graph-wide property indexing startup work', async () => {
   const plugin = makePlugin();
   installLocalStorage();
   const previousSetTimeout = global.setTimeout;
   const previousClearTimeout = global.clearTimeout;
   const scheduled = [];
-  const rebuildReasons = [];
 
   global.setTimeout = (fn, delay) => {
     scheduled.push({ fn, delay });
@@ -880,9 +835,6 @@ test('onLoad defers initial property indexing instead of scanning synchronously'
   plugin.injectCss = () => {};
   plugin.installPerfConsoleHelper = () => {};
   plugin.handlePanelChanged = () => {};
-  plugin.rebuildPropertyIndex = async ({ reason } = {}) => {
-    rebuildReasons.push(reason || '');
-  };
   const commandLabels = [];
   plugin.ui = {
     addCommandPaletteCommand(command) {
@@ -903,21 +855,16 @@ test('onLoad defers initial property indexing instead of scanning synchronously'
   try {
     plugin.onLoad();
     assert.equal(commandLabels.includes('Backreferences: Copy Perf Snapshot'), true);
-    assert.deepEqual(rebuildReasons, []);
-    const initialIndexTimer = scheduled.find((timer) => timer.delay === plugin._propertyIndexInitialDelayMs);
-    assert.ok(initialIndexTimer);
-    assert.equal(plugin.getPropertyIndexDisplayMessage(plugin.getPropertyIndexSnapshot()), 'Property reference indexing is queued in the background.');
-
-    initialIndexTimer.fn();
+    assert.equal(commandLabels.includes('Backreferences: Rebuild Graph Index'), false);
+    assert.deepEqual(scheduled.map((timer) => timer.delay), [250]);
     await Promise.resolve();
-    assert.deepEqual(rebuildReasons, ['initial']);
   } finally {
     global.setTimeout = previousSetTimeout;
     global.clearTimeout = previousClearTimeout;
   }
 });
 
-test('reload schedules property index rebuild and refreshes panels', () => {
+test('reload refreshes panels without scheduling a property index rebuild', () => {
   const plugin = makePlugin();
   const scheduled = [];
   const refreshes = [];
@@ -930,26 +877,7 @@ test('reload schedules property index rebuild and refreshes panels', () => {
 
   plugin.handlePluginReload();
 
-  assert.deepEqual(scheduled, [{ reason: 'reload-property-index-rebuild', delayMs: 0 }]);
-  assert.deepEqual(refreshes, [{ force: true, reason: 'reload' }]);
-});
-
-test('reload keeps a ready property index and delays the refresh scan', () => {
-  const plugin = makePlugin();
-  const scheduled = [];
-  const refreshes = [];
-  plugin._propertyIndexStatus = 'ready';
-  plugin._propertyIndexHydratedRefreshDelayMs = 12345;
-  plugin.schedulePropertyIndexRebuild = (reason, delayMs) => {
-    scheduled.push({ reason, delayMs });
-  };
-  plugin.refreshAllPanels = (args) => {
-    refreshes.push(args);
-  };
-
-  plugin.handlePluginReload();
-
-  assert.deepEqual(scheduled, [{ reason: 'reload-property-index-rebuild', delayMs: 12345 }]);
+  assert.deepEqual(scheduled, []);
   assert.deepEqual(refreshes, [{ force: true, reason: 'reload' }]);
 });
 
@@ -1205,11 +1133,12 @@ test('property backlink grouping dedupes records and sorts groups by property an
   assert.deepEqual(groups[1].records.map((record) => record.guid), ['record-beta', 'record-alpha', 'record-gamma']);
 });
 
-test('graph property index serves target pages without per-page discovery', async () => {
+test('SDK backreference candidates serve property target pages without graph scanning', async () => {
   const plugin = makePlugin();
   const henrik = makeRecord({ guid: 'henrik-guid', name: 'Henrik Karlsson' });
   const flatland = makeRecord({ guid: 'flatland-guid', name: 'Escaping Flatland' });
   const datePage = makeRecord({ guid: 'date-guid', name: 'April 24, 2026' });
+  const lineOnlySource = makeRecord({ guid: 'line-source', name: 'Line Source' });
   const note = makeRecord({
     guid: 'note-source',
     name: 'Note Source',
@@ -1226,27 +1155,17 @@ test('graph property index serves target pages without per-page discovery', asyn
     properties: [makeProperty('Publication', ['record', flatland.guid])]
   });
 
-  plugin.data.getAllCollections = async () => [{
-    getAllRecords: async () => [note, publication]
-  }];
-
-  await plugin.rebuildPropertyIndex({ reason: 'test' });
-  assert.equal(plugin._propertyIndexStatus, 'ready');
-
-  let perPageDiscoveryCalled = false;
-  henrik.getBackReferenceRecords = async () => {
-    perPageDiscoveryCalled = true;
-    return [];
-  };
+  henrik.getBackReferenceRecords = async () => [lineOnlySource, note];
+  flatland.getBackReferenceRecords = async () => [publication];
+  datePage.getBackReferenceRecords = async () => [note];
   plugin.data.getAllCollections = async () => {
-    throw new Error('per-page scan should not run');
+    throw new Error('property references should not scan graph collections');
   };
 
   const henrikGroups = await plugin.getPropertyBacklinkGroups(henrik, henrik.guid, { showSelf: false });
   const flatlandGroups = await plugin.getPropertyBacklinkGroups(flatland, flatland.guid, { showSelf: false });
   const dateGroups = await plugin.getPropertyBacklinkGroups(datePage, datePage.guid, { showSelf: false });
 
-  assert.equal(perPageDiscoveryCalled, false);
   assert.deepEqual(henrikGroups.map((group) => group.propertyName), ['Entity']);
   assert.deepEqual(henrikGroups[0].records.map((record) => record.guid), ['note-source']);
   assert.deepEqual(flatlandGroups.map((group) => group.propertyName), ['Publication']);
@@ -1254,304 +1173,89 @@ test('graph property index serves target pages without per-page discovery', asyn
   assert.deepEqual(dateGroups.map((group) => group.propertyName), ['Date']);
 });
 
-test('record property updates move index entries between old and new targets', async () => {
-  const {
-    plugin,
-    target: oldTarget,
-    source,
-    properties
-  } = await makeIndexedPropertyFixture({
-    targetGuid: 'old-target',
-    targetName: 'Old Target'
-  });
-  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
-
-  assert.deepEqual(
-    plugin.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
-
-  properties.splice(0, properties.length, makeProperty('Entity', ['record', newTarget.guid]));
-  plugin.updatePropertyIndexForRecord(source.guid, source);
-
-  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false }), []);
-  assert.deepEqual(
-    plugin.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
-
-  properties.splice(0, properties.length);
-  plugin.updatePropertyIndexForRecord(source.guid, source);
-
-  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false }), []);
-});
-
-test('record trash and untrash updates remove and restore property index entries', async () => {
-  const { plugin, target, source } = await makeIndexedPropertyFixture({ reason: 'trash-test' });
-
-  assert.deepEqual(
-    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
-
-  plugin.handleRecordUpdated({
-    recordGuid: source.guid,
-    trashed: true,
-    source: { isLocal: false }
-  });
-  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false }), []);
-
-  plugin.handleRecordUpdated({
-    recordGuid: source.guid,
-    trashed: false,
-    source: { isLocal: false }
-  });
-  assert.deepEqual(
-    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
-
-  const eventSamples = plugin.getPerfSnapshot().samples.filter((sample) => sample.label === 'event-handler');
-  assert.equal(eventSamples[0].counts.removedIndex, true);
-  assert.equal(eventSamples[1].counts.updatedIndex, true);
-});
-
-test('graph property index dedupes duplicate record objects', async () => {
-  const plugin = makePlugin();
-  const targetGuid = 'target-guid';
-  const staleTargetGuid = 'stale-target-guid';
-  const source = makeRecord({
-    guid: 'source-record',
-    name: 'Source Record',
-    properties: [makeProperty('Entity', ['record', targetGuid])]
-  });
-  const duplicateSource = makeRecord({
-    guid: source.guid,
-    name: 'Duplicate Source Object',
-    properties: [
-      makeProperty('Entity', ['record', targetGuid]),
-      makeProperty('Entity', ['record', staleTargetGuid])
-    ]
-  });
-
-  plugin.data.getAllCollections = async () => [{
-    getAllRecords: async () => [source, duplicateSource, source]
-  }];
-  await plugin.rebuildPropertyIndex({ reason: 'test' });
-
-  const groups = plugin.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf: false });
-  assert.deepEqual(groups.map((group) => group.propertyName), ['Entity']);
-  assert.equal(groups[0].records.length, 1);
-  assert.equal(groups[0].records[0].guid, source.guid);
-  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(staleTargetGuid, { showSelf: false }), []);
-});
-
-test('property index build records reason, property counts, duration, and yields', async () => {
-  const plugin = makePlugin();
-  plugin._propertyIndexYieldEveryRecords = 2;
-  plugin._propertyIndexYieldBudgetMs = 0;
-  plugin._propertyIndexProgressNotifyMs = 0;
-  let yieldCalls = 0;
-  plugin.waitForIndexYield = async () => {
-    yieldCalls += 1;
-  };
-
-  const records = Array.from({ length: 5 }, (_, i) => makeRecord({
-    guid: `source-${i}`,
-    name: `Source ${i}`,
-    properties: [
-      makeProperty('Entity', ['record', 'target-guid']),
-      makeProperty('Topic', ['record', `topic-${i}`])
-    ]
-  }));
-  plugin.data.getAllCollections = async () => [{
-    getAllRecords: async () => records
-  }];
-
-  await plugin.rebuildPropertyIndex({ reason: 'stats-test' });
-
-  assert.equal(plugin._propertyIndexStatus, 'ready');
-  assert.equal(plugin._propertyIndexStats.reason, 'stats-test');
-  assert.equal(plugin._propertyIndexStats.collectionCount, 1);
-  assert.equal(plugin._propertyIndexStats.scannedRecords, 5);
-  assert.equal(plugin._propertyIndexStats.scannedProperties, 10);
-  assert.equal(plugin._propertyIndexStats.indexedReferences, 10);
-  assert.equal(plugin._propertyIndexStats.indexedTargets, 6);
-  assert.equal(plugin._propertyIndexStats.yieldCount, 2);
-  assert.equal(yieldCalls, 2);
-  assert.equal(typeof plugin._propertyIndexStats.durationMs, 'number');
-  assert.ok(plugin._propertyIndexStats.startedAt instanceof Date);
-  assert.ok(plugin._propertyIndexStats.finishedAt instanceof Date);
-});
-
-test('property index cache hydrates ready results and delays startup refresh', () => {
+test('property source records returned by getBackReferenceRecords are inspected with linkedRecords', async () => {
   const plugin = makePlugin();
   const target = makeRecord({ guid: 'target-guid', name: 'Target' });
   const source = makeRecord({
     guid: 'source-guid',
     name: 'Source',
-    updatedAt: makeDate('2026-04-24T09:00:00Z')
-  });
-  plugin.data.getRecord = () => {
-    throw new Error('cache hydration should not synchronously fetch records');
-  };
-  installLocalStorage({
-    [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
-      version: 1,
-      workspaceGuid: 'test-workspace-guid',
-      savedAt: Date.UTC(2026, 3, 24, 9, 0, 0),
-      stats: {
-        scannedRecords: 200,
-        scannedProperties: 400,
-        indexedReferences: 1,
-        indexedTargets: 1
+    updatedAt: makeDate('2026-03-11T14:00:00Z'),
+    properties: [{
+      name: 'Entity',
+      value: 'Target display name',
+      linkedRecords() {
+        return [target];
       },
-      sources: [[source.guid, {
-        name: source.getName(),
-        updatedAt: source.getUpdatedAt().toISOString()
-      }, [[target.guid, 'Entity']]]]
-    })
+      text() {
+        return 'Target display name';
+      }
+    }]
   });
+  target.getBackReferenceRecords = async () => [source];
 
-  assert.equal(plugin.hydratePropertyIndexFromCache(), true);
-  assert.equal(plugin._propertyIndexStatus, 'ready');
-  assert.equal(plugin._propertyIndexStats.cacheState, 'hydrated');
-  assert.equal(plugin._propertyIndexStats.cacheSourceCount, 1);
-  assert.equal(
-    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records[0].getName(),
-    'Source'
-  );
-  assert.deepEqual(
-    plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
-
-  const previousSetTimeout = global.setTimeout;
-  const previousClearTimeout = global.clearTimeout;
-  const scheduled = [];
-  global.setTimeout = (fn, delay) => {
-    scheduled.push(delay);
-    return { unref() {} };
-  };
-  global.clearTimeout = () => {};
-
-  try {
-    plugin._propertyIndexHydratedFromCache = true;
-    plugin.scheduleInitialPropertyIndexBuild();
-    assert.deepEqual(scheduled, [plugin._propertyIndexHydratedRefreshDelayMs]);
-    assert.equal(plugin._propertyIndexStats.reason, 'initial-cache-refresh');
-  } finally {
-    global.setTimeout = previousSetTimeout;
-    global.clearTimeout = previousClearTimeout;
-  }
+  const groups = await plugin.getPropertyBacklinkGroups(target, target.guid, { showSelf: false });
+  assert.deepEqual(groups.map((group) => group.propertyName), ['Entity']);
+  assert.deepEqual(groups[0].records.map((record) => record.guid), ['source-guid']);
 });
 
-test('property index cache rejects other workspaces', () => {
-  const plugin = makePlugin();
-  installLocalStorage({
-    [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
-      version: 1,
-      workspaceGuid: 'other-workspace-guid',
-      savedAt: Date.UTC(2026, 3, 24, 9, 0, 0),
-      stats: {
-        scannedRecords: 1,
-        scannedProperties: 1,
-        indexedReferences: 1,
-        indexedTargets: 1
-      },
-      sources: [['source-guid', { name: 'Wrong Workspace' }, [['target-guid', 'Entity']]]]
-    })
-  });
-
-  assert.equal(plugin.hydratePropertyIndexFromCache(), false);
-  assert.equal(plugin._propertyIndexStatus, 'idle');
-  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex('target-guid', { showSelf: false }), []);
-});
-
-test('property index cache hydration validates entry shape and dedupes references', () => {
+test('property backlink result records candidate stats and SDK failure state', async () => {
   const plugin = makePlugin();
   const target = makeRecord({ guid: 'target-guid', name: 'Target' });
-  plugin.data.getRecord = () => {
-    throw new Error('cache hydration should use stored record metadata');
-  };
-  installLocalStorage({
-    [plugin._storageKeyPropertyIndexCache]: JSON.stringify({
-      version: 1,
-      workspaceGuid: 'test-workspace-guid',
-      savedAt: '2026-05-07T12:00:00Z',
-      stats: { scannedRecords: 1, scannedProperties: 3, indexedReferences: 3 },
-      sources: [
-        [
-          'source-guid',
-          { name: 'Source Record', updatedAt: '2026-05-07T11:00:00Z' },
-          [
-            [target.guid, 'Entity'],
-            [target.guid, 'Entity'],
-            { targetGuid: target.guid, propertyName: 'Mention' },
-            ['', 'Ignored'],
-            { targetGuid: target.guid, propertyName: '' }
-          ]
-        ],
-        ['malformed-source'],
-        ['', { name: 'Empty' }, [[target.guid, 'Ignored']]]
-      ]
-    })
+  const source = makeRecord({
+    guid: 'source-guid',
+    name: 'Source',
+    properties: [makeProperty('Entity', ['record', target.guid])]
   });
+  target.getBackReferenceRecords = async () => [source];
 
-  assert.equal(plugin.hydratePropertyIndexFromCache(), true);
-  assert.equal(plugin._propertyIndexStats.indexedReferences, 2);
-  assert.equal(plugin._propertyIndexStats.cacheSourceCount, 1);
+  const ok = await plugin.getPropertyBacklinkResult(target, target.guid, { showSelf: false });
+  assert.equal(ok.propertyIndexStatus, 'ready');
+  assert.equal(ok.propertyIndexStats.reason, 'sdk-backreferences');
+  assert.equal(ok.propertyIndexStats.scannedRecords, 1);
+  assert.equal(ok.propertyIndexStats.scannedProperties, 1);
+  assert.equal(ok.propertyIndexStats.indexedReferences, 1);
+  assert.deepEqual(ok.propertyGroups[0].records.map((record) => record.guid), [source.guid]);
 
-  const groups = plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: true });
-  assert.deepEqual(groups.map((group) => group.propertyName), ['Entity', 'Mention']);
-  assert.deepEqual(groups.map((group) => group.records[0].getName()), ['Source Record', 'Source Record']);
+  const unavailable = await plugin.getPropertyBacklinkResult(
+    makeRecord({ guid: 'missing-sdk', name: 'Missing SDK' }),
+    'missing-sdk',
+    { showSelf: false }
+  );
+  assert.equal(unavailable.propertyIndexStatus, 'error');
+  assert.match(unavailable.propertyIndexError, /unavailable/);
 });
 
-test('property index cache serializes incremental record updates', async () => {
-  const store = installLocalStorage();
-  const {
-    plugin,
-    target: oldTarget,
-    source,
-    properties
-  } = await makeIndexedPropertyFixture({
-    targetGuid: 'old-target',
-    targetName: 'Old Target',
-    reason: 'cache-test'
+test('record property updates refresh affected panels without graph index maintenance', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target' });
+  const source = makeRecord({
+    guid: 'source-guid',
+    name: 'Source',
+    properties: [makeProperty('Entity', ['record', target.guid])]
   });
-  const newTarget = makeRecord({ guid: 'new-target', name: 'New Target' });
-  assert.equal(plugin.writePropertyIndexCache(), true);
-  let cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
-  assert.equal(cached.workspaceGuid, 'test-workspace-guid');
-  assert.equal(cached.sources[0][0], source.guid);
-  assert.equal(cached.sources[0][1].name, 'Source Record');
-  assert.deepEqual(cached.sources[0][2], [[oldTarget.guid, 'Entity']]);
+  plugin.__recordsByGuid.set(source.guid, source);
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin._panelStates.set('panel-1', state);
 
-  properties.splice(0, properties.length, makeProperty('Entity', ['record', newTarget.guid]));
-  plugin.updatePropertyIndexForRecord(source.guid, source);
-  assert.equal(plugin.writePropertyIndexCache(), true);
-  cached = JSON.parse(store.get(plugin._storageKeyPropertyIndexCache));
-  assert.equal(cached.sources[0][0], source.guid);
-  assert.equal(cached.sources[0][1].name, 'Source Record');
-  assert.deepEqual(cached.sources[0][2], [[newTarget.guid, 'Entity']]);
-
-  const hydrated = makePlugin();
-  hydrated.data.getRecord = () => {
-    throw new Error('cache hydration should use stored record metadata');
+  const refreshes = [];
+  plugin.scheduleRefreshForPanel = (nextPanel, opts) => {
+    refreshes.push({ panelId: nextPanel.getId(), opts });
   };
-  installLocalStorage({
-    [hydrated._storageKeyPropertyIndexCache]: JSON.stringify(cached)
+
+  plugin.handleRecordUpdated({
+    recordGuid: source.guid,
+    properties: true,
+    source: { isLocal: false }
   });
-  assert.equal(hydrated.hydratePropertyIndexFromCache(), true);
-  assert.deepEqual(hydrated.getPropertyBacklinkGroupsFromIndex(oldTarget.guid, { showSelf: false }), []);
-  assert.equal(
-    hydrated.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records[0].getName(),
-    'Source Record'
-  );
-  assert.deepEqual(
-    hydrated.getPropertyBacklinkGroupsFromIndex(newTarget.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
+
+  assert.deepEqual(refreshes, [{
+    panelId: 'panel-1',
+    opts: { force: false, reason: 'record.updated' }
+  }]);
+  const eventSamples = plugin.getPerfSnapshot().samples.filter((sample) => sample.label === 'event-handler');
+  assert.equal(eventSamples[0].counts.refreshed, 1);
 });
 
 test('linked and unlinked grouping preserves source grouping rules', () => {
@@ -2570,7 +2274,7 @@ test('fully empty pages open direct empty states for loaded sections', () => {
   assert.equal(plugin.getDefaultSectionCollapsed('unlinked', loadedEmpty), false);
 });
 
-test('property index loading and error states keep the footer recoverable', () => {
+test('property reference loading and error states keep the footer recoverable', () => {
   const plugin = makePlugin();
   const state = {
     searchQuery: '',
@@ -2603,7 +2307,7 @@ test('property index loading and error states keep the footer recoverable', () =
     propertyError: '',
     propertyIndexStatus: 'error',
     propertyIndexStats: plugin.createEmptyPropertyIndexStats(),
-    propertyIndexError: 'Index failed',
+    propertyIndexError: 'Lookup failed',
     linkedGroups: [],
     linkedError: '',
     unlinkedGroups: [],
@@ -2613,10 +2317,10 @@ test('property index loading and error states keep the footer recoverable', () =
     maxResults: 200
   });
 
-  assert.equal(indexingView.propertyIndexMessage, 'Indexing backreferences... 1,240 records scanned');
+  assert.equal(indexingView.propertyIndexMessage, 'Loading property references...');
   assert.equal(plugin.getDefaultFooterCollapsed(indexingView.collapseMetrics), false);
   assert.equal(indexingView.propertySectionCollapsed, false);
-  assert.equal(errorView.propertyIndexError, 'Index failed');
+  assert.equal(errorView.propertyIndexError, 'Lookup failed');
   assert.equal(plugin.getDefaultFooterCollapsed(errorView.collapseMetrics), false);
   assert.equal(errorView.propertySectionCollapsed, false);
 
@@ -2627,10 +2331,10 @@ test('property index loading and error states keep the footer recoverable', () =
 
   try {
     const container = makeDomElement('div');
-    plugin.appendPropertyIndexError(container, 'Index failed');
-    assert.equal(container.children[0].textContent, 'Index failed');
-    assert.equal(container.children[1].dataset.action, 'rebuild-property-index');
-    assert.equal(container.children[1].textContent, 'Rebuild graph index');
+    plugin.appendPropertyIndexError(container, 'Lookup failed');
+    assert.equal(container.children[0].textContent, 'Lookup failed');
+    assert.equal(container.children[1].dataset.action, 'refresh-search');
+    assert.equal(container.children[1].textContent, 'Refresh references');
   } finally {
     global.document = previousDocument;
   }
@@ -3201,7 +2905,7 @@ test('footer click dispatches collapse and search controls', () => {
   assert.equal(state.searchInputEl.value, '');
 });
 
-test('footer click dispatches sort, rebuild, and context controls', () => {
+test('footer click dispatches sort and context controls', () => {
   const plugin = makePlugin();
   const target = makeRecord({ guid: 'target-guid', name: 'Target' });
   const { panel } = makePanel({ id: 'panel-1', record: target });
@@ -3222,10 +2926,6 @@ test('footer click dispatches sort, rebuild, and context controls', () => {
     state.sortDir = sortDir;
     calls.push({ type: 'sort', recordGuid, sortBy, sortDir });
   };
-  plugin.rebuildPropertyIndex = (opts) => {
-    calls.push({ type: 'rebuild', opts });
-    return Promise.resolve();
-  };
   plugin.handleLinkedContextAction = (_nextState, action, lineGuid) => {
     calls.push({ type: 'context', action, lineGuid });
     return Promise.resolve();
@@ -3238,7 +2938,6 @@ test('footer click dispatches sort, rebuild, and context controls', () => {
   clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle-sort-menu'));
   clickFooterAction(plugin, 'panel-1', makeFooterActionEl('set-sort-by', { sortBy: 'reference_count' }));
   clickFooterAction(plugin, 'panel-1', makeFooterActionEl('set-sort-dir', { sortDir: 'asc' }));
-  clickFooterAction(plugin, 'panel-1', makeFooterActionEl('rebuild-property-index'));
   clickFooterAction(plugin, 'panel-1', makeFooterActionEl('toggle-context-more', { lineGuid: 'line-guid' }));
   clickFooterAction(plugin, 'panel-1', makeFooterActionEl('link-unlinked', { lineGuid: 'line-guid' }));
 
@@ -3248,7 +2947,6 @@ test('footer click dispatches sort, rebuild, and context controls', () => {
     { type: 'sort-menu', panelId: 'panel-1', open: true },
     { type: 'sort', recordGuid: 'target-guid', sortBy: 'reference_count', sortDir: 'asc' },
     { type: 'sort-menu', panelId: 'panel-1', open: true },
-    { type: 'rebuild', opts: { reason: 'footer-rebuild-index' } },
     { type: 'context', action: 'toggle-context-more', lineGuid: 'line-guid' },
     { type: 'sort-menu', panelId: 'panel-1', open: false },
     { type: 'link-unlinked', lineGuid: 'line-guid' }
@@ -3430,7 +3128,7 @@ test('deferred unlinked loading hydrates cached state for the current panel only
   assert.deepEqual(scopedSync, { immediate: true, reason: 'deferred-unlinked-loaded' });
 });
 
-test('property invalidation updates graph index while line events stay targeted', () => {
+test('property invalidation refreshes affected panels while line events stay targeted', () => {
   const plugin = makePlugin();
   const { targetA, targetB, stateA, stateB, refreshes } = attachTwoPanelStates(plugin, {
     targetAName: 'Thymer / Backreferences (TBR)',
@@ -3443,12 +3141,7 @@ test('property invalidation updates graph index while line events stay targeted'
     properties: sourceProperties
   });
   plugin.__recordsByGuid.set(source.guid, source);
-  plugin._propertyIndexStatus = 'ready';
-  plugin.indexSourceRecordPropertyRefs(
-    source,
-    plugin._propertyIndexByTargetGuid,
-    plugin._propertyIndexSourceEntriesByRecordGuid
-  );
+  stateA.liveCurrentSnapshot = { sourceRecordGuids: new Set([source.guid]) };
 
   sourceProperties.splice(0, sourceProperties.length, makeProperty('Entity', ['record', targetB.guid]));
   plugin.handleRecordUpdated({
@@ -3464,12 +3157,6 @@ test('property invalidation updates graph index while line events stay targeted'
     }
   });
 
-  assert.deepEqual(plugin.getPropertyBacklinkGroupsFromIndex(targetA.guid, { showSelf: false }), []);
-  assert.deepEqual(
-    plugin.getPropertyBacklinkGroupsFromIndex(targetB.guid, { showSelf: false })[0].records.map((record) => record.guid),
-    [source.guid]
-  );
-
   plugin.handleLineItemCreated({
     recordGuid: 'line-source-guid',
     segments: [{ type: 'text', text: 'TBR just shipped.' }],
@@ -3484,14 +3171,16 @@ test('property invalidation updates graph index while line events stay targeted'
   });
 
   assert.deepEqual(refreshes, [
+    { id: 'panel-a', reason: 'record.updated' },
+    { id: 'panel-b', reason: 'record.updated' },
     { id: 'panel-a', reason: 'lineitem.created' }
   ]);
   assert.equal(stateA.pendingRemoteSync, true);
-  assert.equal(stateB.pendingRemoteSync, false);
+  assert.equal(stateB.pendingRemoteSync, true);
 
   const eventSamples = plugin.getPerfSnapshot().samples.filter((sample) => sample.label === 'event-handler');
   assert.deepEqual(eventSamples.map((sample) => sample.meta.eventName), ['record.updated', 'lineitem.created']);
-  assert.equal(eventSamples[0].counts.updatedIndex, true);
+  assert.equal(eventSamples[0].counts.refreshed, 2);
   assert.equal(eventSamples[1].counts.refreshed, 1);
   assert.equal(eventSamples[1].counts.segmentCount, 1);
 });
@@ -3692,36 +3381,6 @@ test('collapsed sections skip render-time sorting', () => {
     maxResults: 200
   });
   assert.equal(sortCalls, 2);
-});
-
-test('property index progress sync avoids rebuilding live snapshots without property refs', () => {
-  const plugin = makePlugin();
-  const target = makeRecord({ guid: 'target-record', name: 'Target' });
-  const source = makeRecord({ guid: 'source-record', name: 'Source' });
-  const state = plugin.createPanelState('panel-1', null);
-  state.recordGuid = target.guid;
-  state.lastResults = {
-    propertyGroups: [],
-    linkedGroups: [{
-      record: source,
-      lines: [makeLine({ guid: 'line-1', record: source, segments: [{ type: 'text', text: 'linked' }] })]
-    }]
-  };
-
-  plugin.getRefreshConfig = () => ({ showSelf: false });
-  plugin._propertyIndexStatus = 'indexing';
-  let snapshotBuilds = 0;
-  plugin.buildResultsSnapshot = () => {
-    snapshotBuilds += 1;
-    return { itemsByKey: new Map(), sourceRecordGuids: new Set() };
-  };
-
-  plugin.syncPropertyIndexResultForState(state);
-  assert.equal(snapshotBuilds, 0);
-
-  plugin._propertyIndexStatus = 'ready';
-  plugin.syncPropertyIndexResultForState(state);
-  assert.equal(snapshotBuilds, 1);
 });
 
 (async () => {

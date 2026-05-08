@@ -189,19 +189,6 @@ function makePlugin() {
   plugin._defaultMaxResults = 200;
   plugin._defaultContextPreloadMaxLines = 30;
   plugin._defaultQueryFilterMaxResults = 1000;
-  plugin._propertyIndexInitialDelayMs = 500;
-  plugin._propertyIndexYieldEveryRecords = 25;
-  plugin._propertyIndexYieldBudgetMs = 12;
-  plugin._propertyIndexProgressNotifyMs = 250;
-  plugin._propertyIndexStatus = 'idle';
-  plugin._propertyIndexByTargetGuid = new Map();
-  plugin._propertyIndexSourceEntriesByRecordGuid = new Map();
-  plugin._propertyIndexStats = plugin.createEmptyPropertyIndexStats();
-  plugin._propertyIndexError = '';
-  plugin._propertyIndexPromise = null;
-  plugin._propertyIndexBuildSeq = 0;
-  plugin._propertyIndexRebuildTimer = null;
-  plugin._propertyIndexNeedsRebuild = false;
   plugin._recordGroupCollapsed = new Set();
   plugin._queryBuiltInKeys = [
     'created_at', 'modified_at', 'created_by', 'modified_by', 'text', 'type', 'date',
@@ -221,7 +208,6 @@ function makePlugin() {
       return { remove() {} };
     }
   };
-  plugin.notifyPropertyIndexChanged = () => {};
   return plugin;
 }
 
@@ -234,7 +220,20 @@ function createFixture(config) {
   const sourceRecords = [];
   const collections = [];
   const recordsByGuid = new Map(targetRecords.map((record) => [record.guid, record]));
+  const candidatesByTargetGuid = new Map();
   let propertyCount = 0;
+
+  const addCandidate = (targetGuid, record) => {
+    const guid = (targetGuid || '').trim();
+    const sourceGuid = (record?.guid || '').trim();
+    if (!guid || !sourceGuid) return;
+    let bySource = candidatesByTargetGuid.get(guid) || null;
+    if (!bySource) {
+      bySource = new Map();
+      candidatesByTargetGuid.set(guid, bySource);
+    }
+    bySource.set(sourceGuid, record);
+  };
 
   for (let c = 0; c < config.collections; c += 1) {
     const records = [];
@@ -259,6 +258,11 @@ function createFixture(config) {
       sourceRecords.push(record);
       records.push(record);
       recordsByGuid.set(record.guid, record);
+      for (const prop of properties) {
+        for (const linked of prop.linkedRecords()) {
+          addCandidate(linked.guid, record);
+        }
+      }
     }
     collections.push(makeCollection({
       guid: `collection-${c}`,
@@ -287,8 +291,13 @@ function createFixture(config) {
       unlinkedLines.push(makeLine({ guid: `unlinked-line-${index}`, record, index: index + 100000, target }));
       lineCount += 2;
     }
+    addCandidate(target.guid, record);
     linkedGroups.push({ record, lines: linkedLines });
     unlinkedGroups.push({ record, lines: unlinkedLines });
+  }
+
+  for (const target of targetRecords) {
+    target.getBackReferenceRecords = async () => Array.from(candidatesByTargetGuid.get(target.guid)?.values?.() || []);
   }
 
   return {
@@ -313,7 +322,7 @@ function createFixture(config) {
 function installFixture(plugin, fixture) {
   plugin.data = {
     async getAllCollections() {
-      return fixture.collections;
+      throw new Error('property benchmark should not scan all graph collections');
     },
     getRecord(guid) {
       return fixture.recordsByGuid.get(guid) || null;
@@ -362,18 +371,18 @@ function makeReferenceState(plugin, targetGuid, searchQuery = '') {
   };
 }
 
-function makeResults(plugin, fixture) {
+async function makeResults(plugin, fixture) {
   const target = fixture.targetRecords[0];
-  const propertyGroups = plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: true });
+  const propertyResult = await plugin.getPropertyBacklinkResult(target, target.guid, { showSelf: true });
   return {
     target,
-    propertyGroups,
+    propertyGroups: propertyResult.propertyGroups,
     linkedGroups: fixture.linkedGroups,
     unlinkedGroups: fixture.unlinkedGroups,
     propertyError: '',
-    propertyIndexStatus: plugin._propertyIndexStatus,
-    propertyIndexStats: plugin._propertyIndexStats,
-    propertyIndexError: plugin._propertyIndexError,
+    propertyIndexStatus: propertyResult.propertyIndexStatus,
+    propertyIndexStats: propertyResult.propertyIndexStats,
+    propertyIndexError: propertyResult.propertyIndexError,
     linkedError: '',
     unlinkedError: '',
     unlinkedDeferred: false,
@@ -439,60 +448,34 @@ async function runBenchmark(config) {
   installFixture(plugin, fixture);
   const results = [];
 
-  results.push(await measure('propertyIndex.fullBuild.noYield', config.iterations, async () => {
-    plugin._propertyIndexYieldEveryRecords = Number.MAX_SAFE_INTEGER;
-    plugin._propertyIndexYieldBudgetMs = 0;
-    await plugin.rebuildPropertyIndex({ reason: 'bench-full-no-yield' });
+  results.push(await measure('propertyBackrefs.singleTargetSdkCandidates', config.iterations, async () => {
+    const target = fixture.targetRecords[0];
+    const result = await plugin.getPropertyBacklinkResult(target, target.guid, { showSelf: true });
     return {
-      status: plugin._propertyIndexStatus,
-      scannedRecords: plugin._propertyIndexStats.scannedRecords,
-      scannedProperties: plugin._propertyIndexStats.scannedProperties,
-      indexedReferences: plugin._propertyIndexStats.indexedReferences,
-      indexedTargets: plugin._propertyIndexStats.indexedTargets,
-      yieldCount: plugin._propertyIndexStats.yieldCount
+      status: result.propertyIndexStatus,
+      candidateRecords: result.propertyIndexStats.scannedRecords,
+      scannedProperties: result.propertyIndexStats.scannedProperties,
+      propertyGroups: result.propertyGroups.length,
+      references: countPropertyGroups(result.propertyGroups)
     };
   }));
 
-  results.push(await measure('propertyIndex.fullBuild.chunked', config.iterations, async () => {
-    plugin._propertyIndexYieldEveryRecords = 100;
-    plugin._propertyIndexYieldBudgetMs = 0;
-    await plugin.rebuildPropertyIndex({ reason: 'bench-full-chunked' });
-    return {
-      status: plugin._propertyIndexStatus,
-      scannedRecords: plugin._propertyIndexStats.scannedRecords,
-      scannedProperties: plugin._propertyIndexStats.scannedProperties,
-      indexedReferences: plugin._propertyIndexStats.indexedReferences,
-      indexedTargets: plugin._propertyIndexStats.indexedTargets,
-      yieldCount: plugin._propertyIndexStats.yieldCount
-    };
-  }));
-
-  const mutableRecord = fixture.sourceRecords[0];
-  results.push(await measure('propertyIndex.incrementalRecordUpdate', config.iterations, async (iteration) => {
-    const nextTarget = fixture.targetRecords[(iteration + 1) % fixture.targetRecords.length];
-    const props = mutableRecord.getAllProperties();
-    props[0] = makeProperty('Prop 0', [nextTarget]);
-    const updated = plugin.updatePropertyIndexForRecord(mutableRecord.guid, mutableRecord);
-    return {
-      updated,
-      indexedReferences: plugin._propertyIndexStats.indexedReferences,
-      indexedTargets: plugin._propertyIndexStats.indexedTargets,
-      targetGroups: plugin.getPropertyBacklinkGroupsFromIndex(nextTarget.guid, { showSelf: true }).length
-    };
-  }));
-
-  results.push(await measure('propertyIndex.groupedTargetLookup', config.iterations, async () => {
+  results.push(await measure('propertyBackrefs.allTargetSdkCandidates', config.iterations, async () => {
     let groups = 0;
     let references = 0;
+    let candidateRecords = 0;
+    let scannedProperties = 0;
     for (const target of fixture.targetRecords) {
-      const targetGroups = plugin.getPropertyBacklinkGroupsFromIndex(target.guid, { showSelf: true });
-      groups += targetGroups.length;
-      references += countPropertyGroups(targetGroups);
+      const result = await plugin.getPropertyBacklinkResult(target, target.guid, { showSelf: true });
+      candidateRecords += result.propertyIndexStats.scannedRecords;
+      scannedProperties += result.propertyIndexStats.scannedProperties;
+      groups += result.propertyGroups.length;
+      references += countPropertyGroups(result.propertyGroups);
     }
-    return { targets: fixture.targetRecords.length, groups, references };
+    return { targets: fixture.targetRecords.length, candidateRecords, scannedProperties, groups, references };
   }));
 
-  const referenceResults = makeResults(plugin, fixture);
+  const referenceResults = await makeResults(plugin, fixture);
   const queryFilterState = makeQueryFilterState(fixture);
   results.push(await measure('references.scopedQueryFiltering', config.iterations, async () => {
     const propertyGroups = plugin.filterPropertyGroupsByScopedQuery(referenceResults.propertyGroups, queryFilterState);
@@ -559,7 +542,12 @@ async function runBenchmark(config) {
     },
     fixture: fixture.stats,
     benchmarks: results,
-    propertyIndex: plugin.getPropertyIndexSnapshot(),
+    propertyReferences: {
+      status: referenceResults.propertyIndexStatus,
+      stats: referenceResults.propertyIndexStats,
+      groups: referenceResults.propertyGroups.length,
+      references: countPropertyGroups(referenceResults.propertyGroups)
+    },
     perfSamples: plugin.getPerfSnapshot().samples.map((sample) => ({
       label: sample.label,
       totalMs: sample.totalMs,
@@ -584,8 +572,8 @@ function printHumanSummary(result) {
   for (const bench of result.benchmarks) {
     console.log(`- ${bench.name}: mean ${formatMs(bench.meanMs)} (min ${formatMs(bench.minMs)}, max ${formatMs(bench.maxMs)})`);
   }
-  const index = result.propertyIndex;
-  console.log(`Property index: ${index.status}, ${index.stats.scannedRecords} scanned records, ${index.stats.indexedReferences} references, ${index.stats.yieldCount} yields`);
+  const refs = result.propertyReferences;
+  console.log(`Property references: ${refs.status}, ${refs.stats.scannedRecords} candidate records, ${refs.references} references`);
 }
 
 async function main() {

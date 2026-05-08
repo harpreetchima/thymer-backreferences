@@ -32,27 +32,9 @@ class Plugin extends AppPlugin {
     this._defaultMaxResults = 200;
     this._defaultContextPreloadMaxLines = 30;
     this._linkedDateSearchDelayMs = 1200;
-    this._propertyIndexInitialDelayMs = 500;
-    this._propertyIndexHydratedRefreshDelayMs = 30000;
-    this._propertyIndexYieldEveryRecords = 25;
-    this._propertyIndexYieldBudgetMs = 12;
-    this._propertyIndexProgressNotifyMs = 250;
-    this._propertyIndexCacheWriteDebounceMs = 1000;
-    this._storageKeyPropertyIndexCache = 'thymer_backreferences_property_index_cache_v1';
     this._refreshDebounceMs = 350;
     this._queryFilterDebounceMs = 180;
     this._defaultQueryFilterMaxResults = 1000;
-    this._propertyIndexStatus = 'idle';
-    this._propertyIndexByTargetGuid = new Map();
-    this._propertyIndexSourceEntriesByRecordGuid = new Map();
-    this._propertyIndexStats = this.createEmptyPropertyIndexStats();
-    this._propertyIndexError = '';
-    this._propertyIndexPromise = null;
-    this._propertyIndexBuildSeq = 0;
-    this._propertyIndexRebuildTimer = null;
-    this._propertyIndexCacheWriteTimer = null;
-    this._propertyIndexNeedsRebuild = false;
-    this._propertyIndexHydratedFromCache = false;
     this._queryAutocompleteCatalog = null;
     this._queryAutocompleteCatalogPromise = null;
     this._perfStorageKey = 'thymer_backreferences_perf_v1';
@@ -81,15 +63,6 @@ class Plugin extends AppPlugin {
     this.installNavigationTestConsoleHelper();
     this.injectCss();
 
-    this._cmdRebuildIndex = this.ui.addCommandPaletteCommand({
-      label: 'Backreferences: Rebuild Graph Index',
-      icon: 'refresh',
-      onSelected: () => {
-        this.rebuildPropertyIndex({ reason: 'cmdpal-rebuild-index' }).catch(() => {
-          // The error state is rendered in the footer.
-        });
-      }
-    });
     this._cmdCopyPerfSnapshot = this.ui.addCommandPaletteCommand({
       label: 'Backreferences: Copy Perf Snapshot',
       icon: 'clipboard',
@@ -133,20 +106,16 @@ class Plugin extends AppPlugin {
     this._eventHandlerIds.push(this.events.on('record.updated', (ev) => this.handleRecordUpdated(ev)));
     this._eventHandlerIds.push(this.events.on('record.moved', (ev) => this.handleRecordMoved(ev)));
 
-    this._propertyIndexHydratedFromCache = this.hydratePropertyIndexFromCache();
     const panel = this.ui.getActivePanel();
     if (panel) this.handlePanelChanged(panel, 'initial');
-    this.scheduleInitialPropertyIndexBuild();
     setTimeout(() => {
       const p = this.ui.getActivePanel();
       if (p) this.handlePanelChanged(p, 'initial-delayed');
     }, 250);
-    this.perfStep(onLoadPerf, 'setup', onLoadStartedAt, {
-      initialIndexDelayMs: this._propertyIndexInitialDelayMs
-    });
+    this.perfStep(onLoadPerf, 'setup', onLoadStartedAt);
     this.perfCount(onLoadPerf, {
       eventHandlers: this._eventHandlerIds.length,
-      commands: 4
+      commands: 3
     });
     this.perfLog(onLoadPerf);
   }
@@ -161,19 +130,9 @@ class Plugin extends AppPlugin {
     }
     this._eventHandlerIds = [];
 
-    this._cmdRebuildIndex?.remove?.();
     this._cmdCopyPerfSnapshot?.remove?.();
     this._cmdToggleDefaultVisibility?.remove?.();
     this._cmdToggleCollectionVisibility?.remove?.();
-
-    if (this._propertyIndexRebuildTimer) {
-      clearTimeout(this._propertyIndexRebuildTimer);
-      this._propertyIndexRebuildTimer = null;
-    }
-    if (this._propertyIndexCacheWriteTimer) {
-      clearTimeout(this._propertyIndexCacheWriteTimer);
-      this._propertyIndexCacheWriteTimer = null;
-    }
 
     for (const panelId of Array.from(this._panelStates?.keys?.() || [])) {
       this.disposePanelState(panelId);
@@ -182,21 +141,7 @@ class Plugin extends AppPlugin {
   }
 
   handlePluginReload() {
-    const hasReadyIndex = this._propertyIndexStatus === 'ready';
-    const hydrated = hasReadyIndex || this.hydratePropertyIndexFromCache();
-    this.schedulePropertyIndexRebuild(
-      'reload-property-index-rebuild',
-      hydrated ? this._propertyIndexHydratedRefreshDelayMs : 0
-    );
     this.refreshAllPanels({ force: true, reason: 'reload' });
-  }
-
-  scheduleInitialPropertyIndexBuild() {
-    if (this._propertyIndexHydratedFromCache === true) {
-      this.schedulePropertyIndexRebuild('initial-cache-refresh', this._propertyIndexHydratedRefreshDelayMs);
-      return;
-    }
-    this.schedulePropertyIndexRebuild('initial', this._propertyIndexInitialDelayMs);
   }
 
   // ---------- Diagnostics ----------
@@ -1676,9 +1621,6 @@ class Plugin extends AppPlugin {
       case 'refresh-search':
         this.refreshFooterSearchFromClick(state);
         return true;
-      case 'rebuild-property-index':
-        this.rebuildPropertyIndexFromClick();
-        return true;
       case 'set-sort-by':
         this.setFooterSortByFromClick(actionEl, state);
         return true;
@@ -1706,12 +1648,6 @@ class Plugin extends AppPlugin {
   refreshFooterSearchFromClick(state) {
     if (!state) return;
     this.scheduleRefreshForPanel(state.panel, { force: true, reason: 'search-refresh' });
-  }
-
-  rebuildPropertyIndexFromClick() {
-    this.rebuildPropertyIndex({ reason: 'footer-rebuild-index' }).catch(() => {
-      // The error state is rendered in the footer.
-    });
   }
 
   setFooterSortByFromClick(actionEl, state) {
@@ -3626,8 +3562,6 @@ class Plugin extends AppPlugin {
     let rendered = false;
 
     try {
-      this.syncPropertyIndexResultForState(state);
-
       const panel = state.panel || null;
       if (panel && !this.isPanelVisible(panel)) {
         this.unmountFooterForHiddenPanel(state);
@@ -4306,261 +4240,22 @@ class Plugin extends AppPlugin {
 
   getPropertyIndexSnapshot() {
     return {
-      status: this._propertyIndexStatus || 'idle',
-      stats: { ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()) },
-      error: this._propertyIndexError || ''
+      status: 'ready',
+      stats: {
+        ...this.createEmptyPropertyIndexStats(),
+        reason: 'sdk-backreferences'
+      },
+      error: ''
     };
   }
 
   getPropertyIndexDisplayMessage(snapshot) {
     const state = snapshot || this.getPropertyIndexSnapshot();
-    const scanned = this.coerceNonNegativeInt(state?.stats?.scannedRecords, 0);
-    if (state.status === 'indexing') {
-      return `Indexing backreferences... ${scanned.toLocaleString()} records scanned`;
-    }
-    if (state.status === 'idle') {
-      if (state?.stats?.scheduledAt) {
-        return 'Property reference indexing is queued in the background.';
-      }
-      return 'Property reference index has not been built yet.';
-    }
+    if (state.status === 'indexing' || state.status === 'idle') return 'Loading property references...';
     if (state.status === 'error') {
-      return state.error || 'Error indexing property references.';
+      return state.error || 'Error loading property references.';
     }
     return '';
-  }
-
-  notifyPropertyIndexChanged(reason) {
-    for (const state of this._panelStates?.values?.() || []) {
-      if (!state?.lastResults) continue;
-      this.syncPropertyIndexResultForState(state);
-      this.renderFromCache(state);
-    }
-  }
-
-  syncPropertyIndexResultForState(state) {
-    const results = state?.lastResults || null;
-    if (!state || !results) return false;
-    const { showSelf } = this.getRefreshConfig();
-    const next = this.getPropertyBacklinkResult(state.recordGuid, { showSelf });
-    const hadPropertyGroups = Array.isArray(results.propertyGroups) && results.propertyGroups.length > 0;
-    const hasPropertyGroups = Array.isArray(next.propertyGroups) && next.propertyGroups.length > 0;
-    results.propertyGroups = next.propertyGroups;
-    results.propertyError = next.propertyError;
-    results.propertyIndexStatus = next.propertyIndexStatus;
-    results.propertyIndexStats = next.propertyIndexStats;
-    results.propertyIndexError = next.propertyIndexError;
-    if (next.propertyIndexStatus === 'ready' || hadPropertyGroups || hasPropertyGroups) {
-      this.applyLiveSnapshot(state, this.buildResultsSnapshot(results.propertyGroups, results.linkedGroups));
-    }
-    return true;
-  }
-
-  async rebuildPropertyIndex({ reason } = {}) {
-    if (this._propertyIndexStatus === 'indexing' && this._propertyIndexPromise) {
-      this._propertyIndexNeedsRebuild = true;
-      return this._propertyIndexPromise;
-    }
-
-    if (this._propertyIndexRebuildTimer) {
-      clearTimeout(this._propertyIndexRebuildTimer);
-      this._propertyIndexRebuildTimer = null;
-    }
-
-    const startedAt = new Date();
-    const seq = (this._propertyIndexBuildSeq || 0) + 1;
-    this._propertyIndexBuildSeq = seq;
-    this._propertyIndexStatus = 'indexing';
-    this._propertyIndexError = '';
-    this._propertyIndexStats = {
-      ...this.createEmptyPropertyIndexStats(),
-      reason: reason || '',
-      startedAt,
-      lastProgressAt: startedAt
-    };
-    this.notifyPropertyIndexChanged(reason || 'property-index-started');
-
-    const promise = this.buildPropertyIndex(seq, reason)
-      .finally(() => {
-        if (this._propertyIndexPromise === promise) {
-          this._propertyIndexPromise = null;
-        }
-      });
-    this._propertyIndexPromise = promise;
-    return promise;
-  }
-
-  async buildPropertyIndex(seq, reason) {
-    const byTargetGuid = new Map();
-    const sourceEntriesByRecordGuid = new Map();
-    const perf = this.perfCreate('property-index', {
-      reason: reason || ''
-    });
-
-    try {
-      const collections = await this.loadPropertyIndexCollections(perf);
-      const { collectionCount } = await this.scanPropertyIndexCollections({
-        collections,
-        seq,
-        reason,
-        byTargetGuid,
-        sourceEntriesByRecordGuid,
-        perf
-      });
-
-      if (this._propertyIndexBuildSeq !== seq) return;
-
-      this.finishPropertyIndexBuild({
-        byTargetGuid,
-        sourceEntriesByRecordGuid,
-        collectionCount,
-        reason,
-        perf
-      });
-      this.schedulePropertyIndexCacheWrite(0);
-      this.notifyPropertyIndexChanged(reason || 'property-index-ready');
-    } catch (e) {
-      this.failPropertyIndexBuild(seq, reason, e);
-    } finally {
-      this.perfLog(perf);
-      if (this._propertyIndexBuildSeq === seq && this._propertyIndexNeedsRebuild) {
-        this._propertyIndexNeedsRebuild = false;
-        this.schedulePropertyIndexRebuild('queued-property-index-rebuild', 0);
-      }
-    }
-  }
-
-  async loadPropertyIndexCollections(perf) {
-    if (typeof this.data?.getAllCollections !== 'function') {
-      throw new Error('Thymer graph collections are unavailable.');
-    }
-
-    const collectionsStartedAt = this.perfNow();
-    const collections = await this.data.getAllCollections();
-    this.perfStep(perf, 'get all collections', collectionsStartedAt, {
-      collections: Array.isArray(collections) ? collections.length : 0
-    });
-    if (!Array.isArray(collections)) {
-      throw new Error('Thymer graph collections could not be read.');
-    }
-    return collections;
-  }
-
-  getPropertyIndexProgressConfig() {
-    return {
-      yieldEveryRecords: this.coercePositiveInt(this._propertyIndexYieldEveryRecords, 25),
-      yieldBudgetMs: this.coerceNonNegativeInt(this._propertyIndexYieldBudgetMs, 12),
-      progressNotifyMs: this.coerceNonNegativeInt(this._propertyIndexProgressNotifyMs, 250)
-    };
-  }
-
-  async readPropertyIndexCollectionRecords(collection, perf) {
-    if (!collection || typeof collection.getAllRecords !== 'function') return null;
-    try {
-      const recordsStartedAt = this.perfNow();
-      const records = await collection.getAllRecords();
-      this.perfStep(perf, 'get collection records', recordsStartedAt, {
-        records: Array.isArray(records) ? records.length : 0
-      });
-      return Array.isArray(records) ? records : null;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  async scanPropertyIndexCollections({ collections, seq, reason, byTargetGuid, sourceEntriesByRecordGuid, perf }) {
-    const progress = {
-      ...this.getPropertyIndexProgressConfig(),
-      lastNotifyAt: Date.now(),
-      lastYieldAt: Date.now()
-    };
-    let collectionCount = 0;
-    this._propertyIndexStats.collectionCount = collections.length;
-
-    for (const collection of collections) {
-      const records = await this.readPropertyIndexCollectionRecords(collection, perf);
-      if (!records) continue;
-      collectionCount += 1;
-      for (const record of records) {
-        if (this._propertyIndexBuildSeq !== seq) return { collectionCount };
-        await this.scanPropertyIndexRecord(record, {
-          byTargetGuid,
-          sourceEntriesByRecordGuid,
-          progress,
-          reason
-        });
-      }
-    }
-
-    return { collectionCount };
-  }
-
-  async scanPropertyIndexRecord(record, { byTargetGuid, sourceEntriesByRecordGuid, progress, reason }) {
-    this.indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid, {
-      stats: this._propertyIndexStats
-    });
-    this._propertyIndexStats.scannedRecords += 1;
-
-    const now = Date.now();
-    if (now - progress.lastNotifyAt >= progress.progressNotifyMs) {
-      progress.lastNotifyAt = now;
-      this._propertyIndexStats.lastProgressAt = new Date(now);
-      this.notifyPropertyIndexChanged(reason || 'property-index-progress');
-    }
-
-    const shouldYield = this._propertyIndexStats.scannedRecords % progress.yieldEveryRecords === 0
-      || (progress.yieldBudgetMs > 0 && now - progress.lastYieldAt >= progress.yieldBudgetMs);
-    if (!shouldYield) return;
-
-    this._propertyIndexStats.yieldCount += 1;
-    await this.waitForIndexYield();
-    progress.lastYieldAt = Date.now();
-  }
-
-  finishPropertyIndexBuild({ byTargetGuid, sourceEntriesByRecordGuid, collectionCount, perf }) {
-    const finishedAt = new Date();
-    const durationMs = this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt);
-    this._propertyIndexByTargetGuid = byTargetGuid;
-    this._propertyIndexSourceEntriesByRecordGuid = sourceEntriesByRecordGuid;
-    this._propertyIndexStats = {
-      ...this._propertyIndexStats,
-      indexedReferences: this.countPropertyIndexReferences(byTargetGuid),
-      indexedTargets: byTargetGuid.size,
-      cacheState: 'rebuilt',
-      durationMs,
-      finishedAt,
-      lastProgressAt: finishedAt
-    };
-    this._propertyIndexStatus = 'ready';
-    this._propertyIndexError = '';
-    this.perfCount(perf, {
-      collections: collectionCount,
-      scannedRecords: this._propertyIndexStats.scannedRecords || 0,
-      scannedProperties: this._propertyIndexStats.scannedProperties || 0,
-      indexedReferences: this._propertyIndexStats.indexedReferences || 0,
-      indexedTargets: this._propertyIndexStats.indexedTargets || 0,
-      yieldCount: this._propertyIndexStats.yieldCount || 0,
-      cacheState: this._propertyIndexStats.cacheState || '',
-      durationMs: this._propertyIndexStats.durationMs || 0
-    });
-  }
-
-  failPropertyIndexBuild(seq, reason, error) {
-    if (this._propertyIndexBuildSeq !== seq) return;
-    const finishedAt = new Date();
-    this._propertyIndexStatus = 'error';
-    this._propertyIndexError = error?.message || 'Error indexing property references.';
-    this._propertyIndexStats = {
-      ...this._propertyIndexStats,
-      durationMs: this.getPropertyIndexDurationMs(this._propertyIndexStats.startedAt, finishedAt),
-      finishedAt,
-      lastProgressAt: finishedAt
-    };
-    this.notifyPropertyIndexChanged(reason || 'property-index-error');
-  }
-
-  waitForIndexYield() {
-    return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   getPropertyIndexDurationMs(startedAt, finishedAt) {
@@ -4568,340 +4263,6 @@ class Plugin extends AppPlugin {
     const finishTime = finishedAt instanceof Date ? finishedAt.getTime() : 0;
     if (!startTime || !finishTime) return 0;
     return Math.max(0, finishTime - startTime);
-  }
-
-  schedulePropertyIndexRebuild(reason, delayMs = 600) {
-    if (this._propertyIndexStatus === 'indexing') {
-      this._propertyIndexNeedsRebuild = true;
-      return;
-    }
-    if (this._propertyIndexRebuildTimer) {
-      clearTimeout(this._propertyIndexRebuildTimer);
-      this._propertyIndexRebuildTimer = null;
-    }
-    const scheduledAt = new Date();
-    this._propertyIndexStats = {
-      ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()),
-      reason: reason || 'scheduled-property-index-rebuild',
-      scheduledAt
-    };
-    this.notifyPropertyIndexChanged(reason || 'scheduled-property-index-rebuild');
-    this._propertyIndexRebuildTimer = setTimeout(() => {
-      this._propertyIndexRebuildTimer = null;
-      this.rebuildPropertyIndex({ reason: reason || 'scheduled-property-index-rebuild' }).catch(() => {
-        // The error state is rendered in the footer.
-      });
-    }, Math.max(0, Number(delayMs) || 0));
-  }
-
-  countPropertyIndexReferences(byTargetGuid = this._propertyIndexByTargetGuid) {
-    let total = 0;
-    for (const byProp of byTargetGuid?.values?.() || []) {
-      for (const records of byProp?.values?.() || []) {
-        total += records?.size || 0;
-      }
-    }
-    return total;
-  }
-
-  parsePropertyIndexCacheDate(value) {
-    if (value instanceof Date && Number.isFinite(value.getTime())) return value;
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-      const date = new Date(value);
-      return Number.isFinite(date.getTime()) ? date : null;
-    }
-    if (typeof value === 'string' && value.trim()) {
-      const date = new Date(value);
-      return Number.isFinite(date.getTime()) ? date : null;
-    }
-    return null;
-  }
-
-  getPropertyIndexSourceRecord(sourceGuid) {
-    const guid = `${sourceGuid || ''}`.trim();
-    if (!guid) return null;
-    for (const byProp of this._propertyIndexByTargetGuid?.values?.() || []) {
-      for (const bySource of byProp?.values?.() || []) {
-        const record = bySource?.get?.(guid) || null;
-        if (record) return record;
-      }
-    }
-    return null;
-  }
-
-  serializePropertyIndexRecordMeta(record, fallbackGuid) {
-    const guid = `${record?.guid || fallbackGuid || ''}`.trim();
-    const updatedAt = this.parsePropertyIndexCacheDate(record?.getUpdatedAt?.());
-    const createdAt = this.parsePropertyIndexCacheDate(record?.getCreatedAt?.());
-    return {
-      guid,
-      name: (record?.getName?.() || '').trim(),
-      updatedAt: updatedAt ? updatedAt.toISOString() : null,
-      createdAt: createdAt ? createdAt.toISOString() : null
-    };
-  }
-
-  createCachedPropertyIndexRecord(sourceGuid, meta) {
-    const guid = `${sourceGuid || meta?.guid || ''}`.trim();
-    const name = (meta?.name || '').trim() || guid;
-    const updatedAt = this.parsePropertyIndexCacheDate(meta?.updatedAt);
-    const createdAt = this.parsePropertyIndexCacheDate(meta?.createdAt);
-    return {
-      guid,
-      __backreferencesCachedRecord: true,
-      getName() {
-        return name;
-      },
-      getUpdatedAt() {
-        return updatedAt;
-      },
-      getCreatedAt() {
-        return createdAt;
-      },
-      getJournalDetails() {
-        return null;
-      }
-    };
-  }
-
-  compactPropertyIndexCacheEntries(entries) {
-    const compact = [];
-    const seen = new Set();
-    for (const entry of entries || []) {
-      const targetGuid = `${entry?.targetGuid || ''}`.trim();
-      const propertyName = `${entry?.propertyName || ''}`.trim();
-      if (!targetGuid || !propertyName) continue;
-      const key = `${targetGuid}\u0000${propertyName}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      compact.push([targetGuid, propertyName]);
-    }
-    return compact;
-  }
-
-  serializePropertyIndexCacheStats(stats, referenceCount) {
-    return {
-      reason: stats?.reason || '',
-      collectionCount: this.coerceNonNegativeInt(stats?.collectionCount, 0),
-      scannedRecords: this.coerceNonNegativeInt(stats?.scannedRecords, 0),
-      scannedProperties: this.coerceNonNegativeInt(stats?.scannedProperties, 0),
-      indexedReferences: referenceCount,
-      indexedTargets: this.coerceNonNegativeInt(stats?.indexedTargets, this._propertyIndexByTargetGuid?.size || 0),
-      finishedAt: this.parsePropertyIndexCacheDate(stats?.finishedAt)?.toISOString?.() || null
-    };
-  }
-
-  putPropertyIndexReference(byTargetGuid, targetGuid, propertyName, sourceGuid, record) {
-    let byProp = byTargetGuid.get(targetGuid) || null;
-    if (!byProp) {
-      byProp = new Map();
-      byTargetGuid.set(targetGuid, byProp);
-    }
-    let bySource = byProp.get(propertyName) || null;
-    if (!bySource) {
-      bySource = new Map();
-      byProp.set(propertyName, bySource);
-    }
-    bySource.set(sourceGuid, record);
-  }
-
-  serializePropertyIndexCache() {
-    if (this._propertyIndexStatus !== 'ready') return null;
-    const workspaceGuid = this.getPropertyIndexCacheWorkspaceGuid();
-    if (!workspaceGuid) return null;
-
-    const { sources, referenceCount } = this.serializePropertyIndexCacheSources();
-    const stats = this._propertyIndexStats || this.createEmptyPropertyIndexStats();
-    return {
-      version: 1,
-      workspaceGuid,
-      savedAt: Date.now(),
-      stats: this.serializePropertyIndexCacheStats(stats, referenceCount),
-      sources
-    };
-  }
-
-  serializePropertyIndexCacheSources() {
-    const sources = [];
-    let referenceCount = 0;
-    for (const [sourceGuid, entries] of this._propertyIndexSourceEntriesByRecordGuid?.entries?.() || []) {
-      const guid = `${sourceGuid || ''}`.trim();
-      if (!guid || !Array.isArray(entries) || entries.length === 0) continue;
-      const compact = this.compactPropertyIndexCacheEntries(entries);
-      if (compact.length === 0) continue;
-      sources.push([
-        guid,
-        this.serializePropertyIndexRecordMeta(this.getPropertyIndexSourceRecord(guid), guid),
-        compact
-      ]);
-      referenceCount += compact.length;
-    }
-    return { sources, referenceCount };
-  }
-
-  getPropertyIndexCacheWorkspaceGuid() {
-    try {
-      const workspaceGuid = this.getWorkspaceGuid?.();
-      return typeof workspaceGuid === 'string' ? workspaceGuid.trim() : '';
-    } catch (e) {
-      return '';
-    }
-  }
-
-  isPropertyIndexCacheForCurrentWorkspace(raw) {
-    const currentWorkspaceGuid = this.getPropertyIndexCacheWorkspaceGuid();
-    const cachedWorkspaceGuid = typeof raw?.workspaceGuid === 'string' ? raw.workspaceGuid.trim() : '';
-    return Boolean(currentWorkspaceGuid && cachedWorkspaceGuid && currentWorkspaceGuid === cachedWorkspaceGuid);
-  }
-
-  hasUsablePropertyIndexCacheScan(sources, stats) {
-    return sources.length > 0
-      || this.coerceNonNegativeInt(stats.scannedRecords, 0) > 0
-      || this.coerceNonNegativeInt(stats.scannedProperties, 0) > 0
-      || this.coerceNonNegativeInt(stats.indexedReferences, 0) > 0;
-  }
-
-  getUsablePropertyIndexCache(raw) {
-    if (!raw || raw.version !== 1 || !Array.isArray(raw.sources)) return null;
-    if (!this.isPropertyIndexCacheForCurrentWorkspace(raw)) return null;
-
-    const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
-    if (!this.hasUsablePropertyIndexCacheScan(raw.sources, stats)) return null;
-    return { sources: raw.sources, stats, savedAt: raw.savedAt };
-  }
-
-  writePropertyIndexCache() {
-    const cache = this.serializePropertyIndexCache();
-    if (!cache) return false;
-    this.writeJsonStorage(this._storageKeyPropertyIndexCache, cache);
-    return true;
-  }
-
-  schedulePropertyIndexCacheWrite(delayMs) {
-    if (this._propertyIndexStatus !== 'ready') return;
-    if (this._propertyIndexCacheWriteTimer) {
-      clearTimeout(this._propertyIndexCacheWriteTimer);
-      this._propertyIndexCacheWriteTimer = null;
-    }
-    const delay = delayMs === undefined
-      ? this.coerceNonNegativeInt(this._propertyIndexCacheWriteDebounceMs, 1000)
-      : this.coerceNonNegativeInt(delayMs, 0);
-    this._propertyIndexCacheWriteTimer = setTimeout(() => {
-      this._propertyIndexCacheWriteTimer = null;
-      this.writePropertyIndexCache();
-    }, delay);
-    this._propertyIndexCacheWriteTimer?.unref?.();
-  }
-
-  hydratePropertyIndexFromCache() {
-    const cache = this.getUsablePropertyIndexCache(
-      this.readJsonStorage(this._storageKeyPropertyIndexCache)
-    );
-    if (!cache) return false;
-
-    const startedAt = this.perfNow();
-    const byTargetGuid = new Map();
-    const sourceEntriesByRecordGuid = new Map();
-    let cachedReferenceCount = 0;
-
-    for (const source of cache.sources) {
-      cachedReferenceCount += this.hydratePropertyIndexCacheSource(
-        source,
-        byTargetGuid,
-        sourceEntriesByRecordGuid
-      );
-    }
-
-    if (cache.sources.length > 0 && sourceEntriesByRecordGuid.size === 0) return false;
-
-    this.finishPropertyIndexCacheHydration({
-      cache,
-      byTargetGuid,
-      sourceEntriesByRecordGuid,
-      cachedReferenceCount,
-      startedAt
-    });
-    return true;
-  }
-
-  parsePropertyIndexCacheSource(source) {
-    if (!Array.isArray(source) || source.length < 2) return null;
-    const sourceGuid = `${source[0] || ''}`.trim();
-    const hasMeta = source.length >= 3 && source[1] && typeof source[1] === 'object' && !Array.isArray(source[1]);
-    const meta = hasMeta ? source[1] : null;
-    const rawEntries = hasMeta && Array.isArray(source[2])
-      ? source[2]
-      : (Array.isArray(source[1]) ? source[1] : []);
-    if (!sourceGuid || rawEntries.length === 0) return null;
-    return { sourceGuid, meta, rawEntries };
-  }
-
-  parsePropertyIndexCacheEntry(rawEntry) {
-    const targetGuid = `${Array.isArray(rawEntry) ? rawEntry[0] : rawEntry?.targetGuid || ''}`.trim();
-    const propertyName = `${Array.isArray(rawEntry) ? rawEntry[1] : rawEntry?.propertyName || ''}`.trim();
-    if (!targetGuid || !propertyName) return null;
-    return { targetGuid, propertyName };
-  }
-
-  hydratePropertyIndexCacheSource(source, byTargetGuid, sourceEntriesByRecordGuid) {
-    const parsed = this.parsePropertyIndexCacheSource(source);
-    if (!parsed) return 0;
-
-    const record = this.createCachedPropertyIndexRecord(parsed.sourceGuid, parsed.meta);
-    const entries = [];
-    const seen = new Set();
-    for (const rawEntry of parsed.rawEntries) {
-      const entry = this.parsePropertyIndexCacheEntry(rawEntry);
-      if (!entry) continue;
-      const key = `${entry.targetGuid}\u0000${entry.propertyName}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      this.putPropertyIndexReference(byTargetGuid, entry.targetGuid, entry.propertyName, parsed.sourceGuid, record);
-      entries.push(entry);
-    }
-    if (entries.length > 0) sourceEntriesByRecordGuid.set(parsed.sourceGuid, entries);
-    return entries.length;
-  }
-
-  finishPropertyIndexCacheHydration({ cache, byTargetGuid, sourceEntriesByRecordGuid, cachedReferenceCount, startedAt }) {
-    const stats = cache.stats || {};
-    const savedAt = this.parsePropertyIndexCacheDate(cache.savedAt)
-      || this.parsePropertyIndexCacheDate(stats.finishedAt);
-    const hydratedAt = new Date();
-    this._propertyIndexByTargetGuid = byTargetGuid;
-    this._propertyIndexSourceEntriesByRecordGuid = sourceEntriesByRecordGuid;
-    this._propertyIndexStatus = 'ready';
-    this._propertyIndexError = '';
-    this._propertyIndexStats = {
-      ...this.createEmptyPropertyIndexStats(),
-      reason: 'cache-hydrated',
-      collectionCount: this.coerceNonNegativeInt(stats.collectionCount, 0),
-      scannedRecords: this.coerceNonNegativeInt(stats.scannedRecords, 0),
-      scannedProperties: this.coerceNonNegativeInt(stats.scannedProperties, 0),
-      indexedReferences: this.countPropertyIndexReferences(byTargetGuid) || cachedReferenceCount,
-      indexedTargets: byTargetGuid.size,
-      cacheState: 'hydrated',
-      cacheSavedAt: savedAt,
-      cacheHydratedAt: hydratedAt,
-      cacheSourceCount: sourceEntriesByRecordGuid.size,
-      finishedAt: savedAt,
-      lastProgressAt: hydratedAt
-    };
-    this.recordPerfSample({
-      label: 'property-index-cache',
-      totalMs: this.roundPerfMs(this.perfNow() - startedAt),
-      meta: { reason: 'cache-hydrated' },
-      counts: {
-        cacheState: 'hydrated',
-        cachedSourceEntries: cache.sources.length,
-        cachedSources: sourceEntriesByRecordGuid.size,
-        indexedReferences: this._propertyIndexStats.indexedReferences,
-        indexedTargets: this._propertyIndexStats.indexedTargets
-      },
-      steps: []
-    });
-    this.notifyPropertyIndexChanged('property-index-cache-hydrated');
   }
 
   getPropertyReferenceGuids(prop) {
@@ -4918,43 +4279,6 @@ class Plugin extends AppPlugin {
     return out;
   }
 
-  indexSourceRecordPropertyRefs(record, byTargetGuid, sourceEntriesByRecordGuid, { stats } = {}) {
-    const sourceGuid = (record?.guid || '').trim();
-    if (!sourceGuid) return 0;
-    this.removeSourceRecordFromPropertyIndexMaps(sourceGuid, byTargetGuid, sourceEntriesByRecordGuid);
-
-    const props = this.getRecordPropertiesForIndex(record);
-    if (stats && typeof stats === 'object') {
-      stats.scannedProperties = this.coerceNonNegativeInt(stats.scannedProperties, 0) + props.length;
-    }
-
-    const entries = [];
-    const seenEntries = new Set();
-    for (const prop of props) {
-      const propertyName = (prop?.name || '').trim();
-      if (!propertyName) continue;
-
-      for (const targetGuid of this.getPropertyReferenceGuids(prop)) {
-        const guid = (targetGuid || '').trim();
-        if (!guid) continue;
-        const entryKey = `${guid}\u0000${propertyName}`;
-        if (seenEntries.has(entryKey)) continue;
-        seenEntries.add(entryKey);
-
-        this.putPropertyIndexReference(byTargetGuid, guid, propertyName, sourceGuid, record);
-        entries.push({ targetGuid: guid, propertyName });
-      }
-    }
-
-    if (entries.length > 0) {
-      sourceEntriesByRecordGuid.set(sourceGuid, entries);
-    } else {
-      sourceEntriesByRecordGuid.delete(sourceGuid);
-    }
-
-    return entries.length;
-  }
-
   getRecordPropertiesForIndex(record) {
     try {
       const props = record?.getAllProperties?.() || [];
@@ -4964,119 +4288,77 @@ class Plugin extends AppPlugin {
     }
   }
 
-  removeSourceRecordFromPropertyIndexMaps(sourceRecordGuid, byTargetGuid, sourceEntriesByRecordGuid) {
-    const sourceGuid = (sourceRecordGuid || '').trim();
-    if (!sourceGuid) return false;
-    const entries = sourceEntriesByRecordGuid?.get?.(sourceGuid) || [];
-    for (const entry of entries) {
-      const byProp = byTargetGuid?.get?.(entry.targetGuid);
-      if (!byProp) continue;
-      const bySource = byProp.get(entry.propertyName);
-      if (!bySource) continue;
-      bySource.delete(sourceGuid);
-      if (bySource.size === 0) byProp.delete(entry.propertyName);
-      if (byProp.size === 0) byTargetGuid.delete(entry.targetGuid);
-    }
-    sourceEntriesByRecordGuid?.delete?.(sourceGuid);
-    return entries.length > 0;
-  }
-
-  removeSourceRecordFromPropertyIndex(sourceRecordGuid) {
-    return this.removeSourceRecordFromPropertyIndexMaps(
-      sourceRecordGuid,
-      this._propertyIndexByTargetGuid,
-      this._propertyIndexSourceEntriesByRecordGuid
-    );
-  }
-
-  removePropertyIndexForRecord(sourceRecordGuid) {
-    const sourceGuid = ((sourceRecordGuid || '') + '').trim();
-    if (!sourceGuid) return false;
-    if (this._propertyIndexStatus !== 'ready') {
-      this.schedulePropertyIndexRebuild('record-removed-during-index-build');
-      return false;
-    }
-
-    const removed = this.removeSourceRecordFromPropertyIndex(sourceGuid);
-    if (!removed) return false;
-
-    this._propertyIndexStats = {
-      ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()),
-      indexedReferences: this.countPropertyIndexReferences(),
-      indexedTargets: this._propertyIndexByTargetGuid.size,
-      cacheState: 'updated'
+  async getPropertyBacklinkResult(targetRecord, targetGuid, { showSelf, perf } = {}) {
+    const guid = (targetGuid || targetRecord?.guid || '').trim();
+    const startedAt = new Date();
+    const startedPerfAt = this.perfNow();
+    const stats = {
+      ...this.createEmptyPropertyIndexStats(),
+      reason: 'sdk-backreferences',
+      startedAt,
+      lastProgressAt: startedAt
     };
-    this.schedulePropertyIndexCacheWrite();
-    this.notifyPropertyIndexChanged('record-property-index-removed');
-    return true;
-  }
 
-  updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord) {
-    const sourceGuid = ((sourceRecordGuid || sourceRecord?.guid || '') + '').trim();
-    if (!sourceGuid) return false;
-    if (this._propertyIndexStatus !== 'ready') {
-      this.schedulePropertyIndexRebuild('record-updated-during-index-build');
-      return false;
+    if (!guid) {
+      return this.finishPropertyBacklinkResult([], stats, startedPerfAt, perf);
     }
 
-    const record = sourceRecord || this.data.getRecord?.(sourceGuid) || null;
-    if (!record) {
-      this.schedulePropertyIndexRebuild('record-updated-without-record');
-      return false;
+    try {
+      const candidateRecords = await this.getPropertyBacklinkCandidateRecords(targetRecord);
+      stats.scannedRecords = Array.isArray(candidateRecords) ? candidateRecords.length : 0;
+      const propertyGroups = this.buildPropertyBacklinkGroupsFromRecords(candidateRecords, guid, {
+        showSelf,
+        stats
+      });
+      return this.finishPropertyBacklinkResult(propertyGroups, stats, startedPerfAt, perf);
+    } catch (e) {
+      const finishedAt = new Date();
+      stats.durationMs = this.getPropertyIndexDurationMs(startedAt, finishedAt);
+      stats.finishedAt = finishedAt;
+      stats.lastProgressAt = finishedAt;
+      this.perfStep(perf, 'property backlink candidates', startedPerfAt, {
+        status: 'error'
+      });
+      return {
+        propertyGroups: [],
+        propertyError: '',
+        propertyIndexStatus: 'error',
+        propertyIndexStats: stats,
+        propertyIndexError: e?.message || 'Error loading property references.'
+      };
     }
-
-    this.removeSourceRecordFromPropertyIndex(sourceGuid);
-    this.indexSourceRecordPropertyRefs(
-      record,
-      this._propertyIndexByTargetGuid,
-      this._propertyIndexSourceEntriesByRecordGuid
-    );
-    this._propertyIndexStats = {
-      ...(this._propertyIndexStats || this.createEmptyPropertyIndexStats()),
-      indexedReferences: this.countPropertyIndexReferences(),
-      indexedTargets: this._propertyIndexByTargetGuid.size,
-      cacheState: 'updated'
-    };
-    this.schedulePropertyIndexCacheWrite();
-    this.notifyPropertyIndexChanged('record-property-index-updated');
-    return true;
   }
 
-  getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf } = {}) {
-    const guid = (targetGuid || '').trim();
-    if (!guid || this._propertyIndexStatus !== 'ready') return [];
-
-    const byProp = this._propertyIndexByTargetGuid?.get?.(guid) || null;
-    if (!byProp) return [];
-
-    const groups = Array.from(byProp.entries()).map(([propertyName, recordMap]) => {
-      const records = [];
-      const seen = new Set();
-      for (const record of recordMap?.values?.() || []) {
-        const sourceGuid = (record?.guid || '').trim();
-        if (!sourceGuid || seen.has(sourceGuid)) continue;
-        if (!showSelf && sourceGuid === guid) continue;
-        seen.add(sourceGuid);
-        records.push(record);
-      }
-      return { propertyName, records };
-    }).filter((group) => group.records.length > 0);
-
-    return this.sortPropertyReferenceGroups(groups);
+  async getPropertyBacklinkCandidateRecords(targetRecord) {
+    if (typeof targetRecord?.getBackReferenceRecords !== 'function') {
+      throw new Error('Property reference lookup is unavailable in this Thymer version.');
+    }
+    const records = await targetRecord.getBackReferenceRecords();
+    return Array.isArray(records) ? records : [];
   }
 
-  getPropertyBacklinkResult(targetGuid, { showSelf } = {}) {
-    const snapshot = this.getPropertyIndexSnapshot();
+  finishPropertyBacklinkResult(propertyGroups, stats, startedPerfAt, perf) {
+    const groups = Array.isArray(propertyGroups) ? propertyGroups : [];
+    const finishedAt = new Date();
+    stats.indexedReferences = groups.reduce((total, group) => total + (group?.records?.length || 0), 0);
+    stats.indexedTargets = stats.indexedReferences > 0 ? 1 : 0;
+    stats.cacheState = 'sdk';
+    stats.durationMs = this.getPropertyIndexDurationMs(stats.startedAt, finishedAt);
+    stats.finishedAt = finishedAt;
+    stats.lastProgressAt = finishedAt;
+    this.perfStep(perf, 'property backlink candidates', startedPerfAt, {
+      status: 'ready',
+      candidateRecords: stats.scannedRecords,
+      scannedProperties: stats.scannedProperties,
+      propertyGroups: groups.length,
+      propertyRefs: stats.indexedReferences
+    });
     return {
-      propertyGroups: snapshot.status === 'ready'
-        ? this.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf })
-        : [],
+      propertyGroups: groups,
       propertyError: '',
-      propertyIndexStatus: snapshot.status,
-      propertyIndexStats: snapshot.stats,
-      propertyIndexError: snapshot.status === 'error'
-        ? (snapshot.error || 'Error indexing property references.')
-        : ''
+      propertyIndexStatus: 'ready',
+      propertyIndexStats: stats,
+      propertyIndexError: ''
     };
   }
 
@@ -5544,9 +4826,9 @@ class Plugin extends AppPlugin {
     unlinkedSearchPromise
   }) {
     const shouldLoadUnlinked = Boolean(recordName) && !this.isSectionCollapsed(state, 'unlinked');
-    const propertyResult = this.getPropertyBacklinkResult(recordGuid, { showSelf });
+    const propertyResultPromise = this.getPropertyBacklinkResult(record, recordGuid, { showSelf, perf });
     const followupPromises = [
-      Promise.resolve(propertyResult)
+      propertyResultPromise
     ];
 
     if (shouldLoadUnlinked) {
@@ -6237,36 +5519,22 @@ class Plugin extends AppPlugin {
   handleRecordUpdated(ev) {
     // Property-based references (record-link fields) do not emit lineitem events.
     const perf = this.createEventPerf('record.updated', ev);
-    let updatedIndex = false;
-    let removedIndex = false;
-    let scheduledRebuild = false;
+    let refreshed = 0;
+    let workspaceInvalidated = false;
     try {
       if (!ev) return;
 
       const sourceRecordGuid = this.getEventRecordGuid(ev);
-      if (ev.trashed === true) {
-        removedIndex = this.removePropertyIndexForRecord(sourceRecordGuid);
-        if (!removedIndex) {
-          scheduledRebuild = true;
-          this.schedulePropertyIndexRebuild('record.trashed-property-index-rebuild');
-        }
-        return;
-      }
-
-      if (!ev.properties && ev.trashed !== false) return;
-
       const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
-      updatedIndex = this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
-      if (!updatedIndex) {
-        scheduledRebuild = true;
-        this.schedulePropertyIndexRebuild(
-          ev.trashed === false
-            ? 'record.untrashed-property-index-rebuild'
-            : 'record.updated-property-index-rebuild'
-        );
+      refreshed = this.refreshMatchingStates(ev, 'record.updated', (state) =>
+        this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
+      );
+      if (refreshed === 0 && !sourceRecordGuid) {
+        workspaceInvalidated = true;
+        this.handleWorkspaceInvalidation(ev, 'record.updated');
       }
     } finally {
-      this.perfCount(perf, { updatedIndex, removedIndex, scheduledRebuild });
+      this.perfCount(perf, { refreshed, workspaceInvalidated });
       this.perfLog(perf);
     }
   }
@@ -6274,17 +5542,10 @@ class Plugin extends AppPlugin {
   handleRecordCreated(ev) {
     const perf = this.createEventPerf('record.created', ev);
     let refreshed = 0;
-    let scheduledRebuild = false;
     let workspaceInvalidated = false;
     try {
       const sourceRecordGuid = this.getEventRecordGuid(ev);
       const sourceRecord = sourceRecordGuid ? (this.data.getRecord?.(sourceRecordGuid) || null) : null;
-      if (sourceRecordGuid && sourceRecord) {
-        this.updatePropertyIndexForRecord(sourceRecordGuid, sourceRecord);
-      } else {
-        scheduledRebuild = true;
-        this.schedulePropertyIndexRebuild('record.created-property-index-rebuild');
-      }
       refreshed = this.refreshMatchingStates(ev, 'record.created', (state) =>
         this.recordEventAffectsState(state, sourceRecordGuid, sourceRecord)
       );
@@ -6293,7 +5554,7 @@ class Plugin extends AppPlugin {
         this.handleWorkspaceInvalidation(ev, 'record.created');
       }
     } finally {
-      this.perfCount(perf, { refreshed, scheduledRebuild, workspaceInvalidated });
+      this.perfCount(perf, { refreshed, workspaceInvalidated });
       this.perfLog(perf);
     }
   }
@@ -6884,10 +6145,11 @@ class Plugin extends AppPlugin {
   }
 
   async getPropertyBacklinkGroups(targetRecord, targetGuid, { showSelf } = {}) {
-    return this.getPropertyBacklinkGroupsFromIndex(targetGuid, { showSelf });
+    const candidateRecords = await this.getPropertyBacklinkCandidateRecords(targetRecord);
+    return this.buildPropertyBacklinkGroupsFromRecords(candidateRecords, targetGuid, { showSelf });
   }
 
-  buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf }) {
+  buildPropertyBacklinkGroupsFromRecords(sourceRecords, targetGuid, { showSelf, stats } = {}) {
     const byProp = new Map();
     const seenSourceGuids = new Set();
 
@@ -6895,7 +6157,7 @@ class Plugin extends AppPlugin {
       const srcGuid = this.getUniquePropertySourceGuid(src, seenSourceGuids);
       if (!srcGuid) continue;
       if (!showSelf && srcGuid === targetGuid) continue;
-      this.collectRecordPropertyBacklinkGroups(src, srcGuid, targetGuid, byProp);
+      this.collectRecordPropertyBacklinkGroups(src, srcGuid, targetGuid, byProp, { stats });
     }
 
     return this.sortPropertyReferenceGroups(this.propertyGroupMapToGroups(byProp));
@@ -6908,8 +6170,12 @@ class Plugin extends AppPlugin {
     return guid;
   }
 
-  collectRecordPropertyBacklinkGroups(record, sourceGuid, targetGuid, byProp) {
-    for (const prop of this.getRecordPropertiesForIndex(record)) {
+  collectRecordPropertyBacklinkGroups(record, sourceGuid, targetGuid, byProp, { stats } = {}) {
+    const props = this.getRecordPropertiesForIndex(record);
+    if (stats && typeof stats === 'object') {
+      stats.scannedProperties = this.coerceNonNegativeInt(stats.scannedProperties, 0) + props.length;
+    }
+    for (const prop of props) {
       const propertyName = (prop?.name || '').trim();
       if (!propertyName) continue;
       if (!this.propertyReferencesGuid(prop, targetGuid)) continue;
@@ -8411,13 +7677,13 @@ class Plugin extends AppPlugin {
 
   appendPropertyIndexError(container, message) {
     if (!container) return;
-    this.appendError(container, message || 'Error indexing property references.');
+    this.appendError(container, message || 'Error loading property references.');
 
     const action = document.createElement('button');
     action.className = 'tlr-btn button-none button-small button-minimal-hover';
     action.type = 'button';
-    action.dataset.action = 'rebuild-property-index';
-    action.textContent = 'Rebuild graph index';
+    action.dataset.action = 'refresh-search';
+    action.textContent = 'Refresh references';
     container.appendChild(action);
   }
 
