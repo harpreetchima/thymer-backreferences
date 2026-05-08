@@ -1401,6 +1401,43 @@ test('refresh defers journal datetime search until after first render', async ()
   );
 });
 
+test('first refresh defers unlinked search until the section is expanded', async () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source' });
+  const linkedLine = makeLine({
+    guid: 'linked-line',
+    record: source,
+    segments: [{ type: 'ref', text: { guid: target.guid, title: target.getName() } }]
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  state.rootEl = makeDomElement('div');
+  state.rootEl.isConnected = true;
+  state.bodyEl = makeDomElement('div');
+  state.countEl = makeDomElement('span');
+  plugin._panelStates.set('panel-1', state);
+
+  const queries = [];
+  plugin.getRefreshConfig = () => ({ maxResults: 200, showSelf: false });
+  plugin.data.searchByQuery = async (query) => {
+    queries.push(query);
+    if (query === '@linkto = "target-guid"') return { error: '', records: [source], lines: [linkedLine] };
+    if (query === '"Target Note"') return { error: '', records: [source], lines: [] };
+    return { error: '', records: [], lines: [] };
+  };
+  plugin.renderFromCache = () => {};
+  plugin.scheduleContextAvailabilityPreload = () => {};
+
+  await plugin.refreshPanel('panel-1', { reason: 'initial' });
+
+  assert.deepEqual(queries, ['@linkto = "target-guid"']);
+  assert.equal(state.lastResults.unlinkedDeferred, true);
+  assert.equal(state.lastResults.linkedGroups.length, 1);
+  assert.equal(plugin.isSectionCollapsed(state, 'unlinked', plugin.getCollapseMetrics(state.lastResults)), true);
+});
+
 test('refresh overlaps linked and unlinked searches but groups after linked results', async () => {
   const plugin = makePlugin();
   const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
@@ -2384,6 +2421,8 @@ test('fully empty pages open direct empty states for loaded sections', () => {
   assert.equal(plugin.getDefaultSectionCollapsed('linked', deferredEmpty), false);
   assert.equal(plugin.getDefaultSectionCollapsed('unlinked', deferredEmpty), true);
   assert.equal(plugin.getDefaultSectionCollapsed('unlinked', loadedEmpty), false);
+  assert.equal(plugin.getDefaultSectionCollapsed('unlinked', null), true);
+  assert.equal(plugin.getDefaultSectionCollapsed('linked', null), false);
 });
 
 test('property reference loading and error states keep the footer recoverable', () => {
@@ -2450,6 +2489,22 @@ test('property reference loading and error states keep the footer recoverable', 
   } finally {
     global.document = previousDocument;
   }
+});
+
+test('deferred unlinked section shows idle copy until loading starts', () => {
+  const plugin = makePlugin();
+  assert.deepEqual(plugin.getUnlinkedReferenceSectionOutcome({
+    unlinkedLoading: false,
+    unlinkedError: '',
+    unlinkedSectionCollapsed: false,
+    unlinkedDeferred: true
+  }), { type: 'note', message: 'Expand to load unlinked references.' });
+  assert.deepEqual(plugin.getUnlinkedReferenceSectionOutcome({
+    unlinkedLoading: true,
+    unlinkedError: '',
+    unlinkedSectionCollapsed: false,
+    unlinkedDeferred: true
+  }), { type: 'note', message: 'Loading unlinked references...' });
 });
 
 test('reference sections render property linked and unlinked rows with highlights', () => withDomDocument(() => {
@@ -3238,6 +3293,54 @@ test('deferred unlinked loading hydrates cached state for the current panel only
   assert.equal(state.lastResults.unlinkedGroups.length, 1);
   assert.equal(renderCount, 2);
   assert.deepEqual(scopedSync, { immediate: true, reason: 'deferred-unlinked-loaded' });
+});
+
+test('expanding deferred unlinked section starts loading and hydrates cached results', async () => {
+  const plugin = makePlugin();
+  installLocalStorage();
+  plugin._storageKeyPageViewByRecord = 'thymer_backreferences_page_view_by_record_v1';
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source Note' });
+  const line = makeLine({
+    guid: 'line-unlinked',
+    record: source,
+    segments: [{ type: 'text', text: 'Target Note appears here.' }]
+  });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  state.refreshSeq = 1;
+  state.lastResults = {
+    linkedGroups: [],
+    unlinkedDeferred: true,
+    unlinkedLoading: false,
+    unlinkedError: '',
+    unlinkedGroups: []
+  };
+  plugin._panelStates.set('panel-1', state);
+
+  let loadCalls = 0;
+  plugin.getRefreshConfig = () => ({ maxResults: 200, showSelf: false });
+  plugin.renderFromCache = () => {};
+  plugin.syncScopedQueryWithCurrentInput = () => {};
+  plugin.scheduleContextAvailabilityPreload = () => {};
+  plugin.loadUnlinkedReferenceGroups = async () => {
+    loadCalls += 1;
+    return {
+      unlinkedGroups: [{ record: source, lines: [line] }],
+      unlinkedError: ''
+    };
+  };
+
+  plugin.applySectionCollapsedPreferenceForRecord(target.guid, 'unlinked', false);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(loadCalls, 1);
+  assert.equal(state.sectionCollapsed.unlinked, false);
+  assert.equal(state.lastResults.unlinkedDeferred, false);
+  assert.equal(state.lastResults.unlinkedLoading, false);
+  assert.equal(state.lastResults.unlinkedGroups[0].lines[0].guid, 'line-unlinked');
 });
 
 test('property invalidation refreshes affected panels while line events stay targeted', () => {

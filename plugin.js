@@ -2222,7 +2222,7 @@ class Plugin extends AppPlugin {
   getDefaultSectionCollapsed(sectionId, metrics) {
     const id = this.normalizeSectionId(sectionId);
     if (!id) return false;
-    if (!metrics?.ready) return false;
+    if (!metrics?.ready) return id === 'unlinked';
     const isTrulyEmpty = !metrics.propertyError
       && !metrics.linkedError
       && !metrics.unlinkedError
@@ -7517,7 +7517,7 @@ class Plugin extends AppPlugin {
     if (viewState.unlinkedLoading) return { type: 'none' };
     if (viewState.unlinkedError) return { type: 'error', message: viewState.unlinkedError };
     if (viewState.unlinkedSectionCollapsed) return { type: 'none' };
-    if (viewState.unlinkedDeferred) return { type: 'note', message: 'Loading unlinked references...' };
+    if (viewState.unlinkedDeferred) return { type: 'note', message: 'Expand to load unlinked references.' };
     return {
       type: 'groups',
       emptyMessage: viewState.hasScopedView ? 'No matching unlinked references.' : 'No unlinked references.'
