@@ -1511,6 +1511,101 @@ test('line event matching catches datetime references to journal pages', () => {
   }), false);
 });
 
+test('same-record local line edits do not refresh unless self references are visible and matched', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  state.recordGuid = target.guid;
+  plugin.updatePanelStateRecordCache(state, target);
+
+  plugin.getConfiguration = () => ({ custom: { showSelf: false } });
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: target.guid,
+    segments: [],
+    referencedGuids: new Set()
+  }), false);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: target.guid,
+    segments: [{ type: 'text', text: 'Just typing in the current page.' }],
+    referencedGuids: new Set()
+  }), false);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: target.guid,
+    segments: [{ type: 'ref', text: { guid: target.guid, title: target.getName() } }],
+    referencedGuids: new Set([target.guid])
+  }), false);
+
+  plugin.getConfiguration = () => ({ custom: { showSelf: true } });
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: target.guid,
+    segments: [{ type: 'text', text: 'Just typing in the current page.' }],
+    referencedGuids: new Set()
+  }), false);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: target.guid,
+    segments: [{ type: 'ref', text: { guid: target.guid, title: target.getName() } }],
+    referencedGuids: new Set([target.guid])
+  }), true);
+  assert.equal(plugin.lineEventAffectsState(state, {
+    sourceRecordGuid: target.guid,
+    segments: [{ type: 'text', text: 'Target Note appears as self text.' }],
+    referencedGuids: new Set()
+  }), true);
+});
+
+test('current target line edits do not schedule refresh or replace cached results', () => {
+  const plugin = makePlugin();
+  const target = makeRecord({ guid: 'target-guid', name: 'Target Note' });
+  const source = makeRecord({ guid: 'source-guid', name: 'Source Note' });
+  const { panel } = makePanel({ id: 'panel-1', record: target });
+  const state = plugin.createPanelState('panel-1', panel);
+  const cachedResults = {
+    propertyGroups: [],
+    linkedGroups: [{ record: source, lines: [makeLine({ guid: 'line-1', record: source })] }],
+    unlinkedGroups: [],
+    unlinkedDeferred: true,
+    unlinkedLoading: false
+  };
+  state.recordGuid = target.guid;
+  state.lastResults = cachedResults;
+  plugin._panelStates.set('panel-1', state);
+
+  const refreshes = [];
+  plugin.scheduleRefreshForPanel = (nextPanel, opts) => {
+    refreshes.push({ panelId: nextPanel.getId(), opts });
+  };
+
+  plugin.handleLineItemCreated({
+    recordGuid: target.guid,
+    segments: [],
+    source: { isLocal: true }
+  });
+  plugin.handleLineItemUpdated({
+    recordGuid: target.guid,
+    segments: [{ type: 'text', text: 'irrelevant new text' }],
+    source: { isLocal: true }
+  });
+
+  assert.deepEqual(refreshes, []);
+  assert.equal(state.lastResults, cachedResults);
+});
+
+test('external line edits that reference the target still refresh affected panels', () => {
+  const plugin = makePlugin();
+  const { targetA, refreshes } = attachTwoPanelStates(plugin);
+
+  plugin.handleLineItemUpdated({
+    recordGuid: 'source-guid',
+    segments: [{ type: 'ref', text: { guid: targetA.guid, title: targetA.getName() } }],
+    source: { isLocal: false }
+  });
+
+  assert.deepEqual(refreshes, [
+    { id: 'panel-a', reason: 'lineitem.updated' }
+  ]);
+});
+
 test('date normalization handles compact dashed nested and invalid shapes', () => {
   const plugin = makePlugin();
 

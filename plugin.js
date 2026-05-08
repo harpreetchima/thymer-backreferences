@@ -5513,8 +5513,17 @@ class Plugin extends AppPlugin {
   lineEventAffectsState(state, { sourceRecordGuid, segments, referencedGuids } = {}) {
     const targetGuid = (state?.recordGuid || '').trim();
     if (!targetGuid) return false;
-    if (sourceRecordGuid && sourceRecordGuid === targetGuid) return true;
+    if (sourceRecordGuid && sourceRecordGuid === targetGuid) {
+      return this.getRefreshConfig().showSelf === true
+        && this.lineEventSegmentsReferenceState(state, { referencedGuids, segments });
+    }
     if (sourceRecordGuid && this.snapshotIncludesSourceRecord(state, sourceRecordGuid)) return true;
+    return this.lineEventSegmentsReferenceState(state, { referencedGuids, segments });
+  }
+
+  lineEventSegmentsReferenceState(state, { referencedGuids, segments } = {}) {
+    const targetGuid = (state?.recordGuid || '').trim();
+    if (!targetGuid) return false;
     if (referencedGuids instanceof Set && referencedGuids.has(targetGuid)) return true;
 
     const targetDateIso = this.getStateRecordDateReferenceIso(state);
